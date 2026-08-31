@@ -1,0 +1,399 @@
+# Copyright (c) 2024-2026 Protocentral Electronics
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "HealthyPi 6 M7"
+
+config HPI_APP_LOG_LEVEL
+	int "Compiled-in log level for this application's own modules"
+	range 0 4
+	default 3
+	help
+	  The level every HealthyPi module passes to LOG_MODULE_REGISTER
+	  (0=off 1=err 2=wrn 3=inf 4=dbg). It exists because
+	  CONFIG_LOG_DEFAULT_LEVEL could not do this job: every one of our
+	  modules registered with a hardcoded LOG_LEVEL_INF, which OVERRIDES the
+	  default, so prj.prod.conf's CONFIG_LOG_DEFAULT_LEVEL=2 trimmed nothing
+	  and the shipping image logged exactly as much as a dev build. CONFIG_LOG_OVERRIDE_LEVEL cannot fix it either
+	  — that only raises a floor, never lowers a ceiling.
+
+	  Levels are compiled out, so lowering this also reclaims the flash held
+	  by the dropped format strings. prj.prod.conf sets 2.
+
+config HPI_DEV_MODE
+	bool "Developer build (shell, verbose logs, dev unlock secret)"
+	default n
+	help
+	  When enabled, compiles in the Zephyr shell (CDC 2 + UART), verbose
+	  logging, and the development unlock secret. MUST be n for customer
+	  builds — the production build asserts that shell/fs/log MCUmgr
+	  groups are absent. See FIRMWARE_REWRITE_BUILD_PLAN.md.
+
+config HPI_APP_BANNER
+	bool "Print boot banner (version, board, build) at startup"
+	default y
+
+config HPI_HEARTBEAT_LOG
+	bool "Periodic 'alive' heartbeat log (~5 s)"
+	default n
+	help
+	  Bring-up aid that logs uptime/fs/wdt every ~5 s. Off by default
+	  because it spams the dev console and buries shell echo; query status
+	  on demand via `hpi sys info` / `hpi wdt` instead.
+
+config HPI_BUS_MAX_SUBS
+	int "Max sample-bus subscribers"
+	default 8
+	help
+	  Upper bound on concurrent sample-bus consumers (UI preview,
+	  recording, stream, M4 feed, diagnostics, ...). Each occupies a fixed
+	  registry slot; ring storage is allocated per subscription.
+
+config HPI_BUS_SELFTEST
+	bool "Run the sample-bus self-test at boot"
+	default n
+	help
+	  Dev aid: at boot, publish a known sequence through the sample bus and
+	  verify fan-out filtering, FIFO order, payload integrity and drop
+	  counting, logging a single PASS/FAIL line. Enable in dev builds; off
+	  for production.
+
+config HPI_ACQ_DEBUG
+	bool "Log live ECG/PPG acquisition rates once a second"
+	default n
+	help
+	  Dev aid: a consumer subscribes to ECG+PPG and logs frames/second per
+	  channel (expect ~500/s ECG, ~125/s PPG), proving onboard acquisition
+	  reaches the bus. Off for production.
+
+config HPI_NPU_UART
+	bool "NPU transport over USART2 (1 Mbaud) -- primary HealthyLink Compute link"
+	default n
+	depends on SERIAL
+	select UART_INTERRUPT_DRIVEN
+	help
+	  PARKED (default n): a USART hardware issue is under investigation, so the
+	  default build does not exercise the NPU UART link. The transport code is
+	  complete and stays in tree; re-enable once the hardware is sorted. The NPU
+	  is still detected/registered/active without it.
+	  Use USART2 (host PD5/PD6/PD4/PD3 <-> module STM32N657 USART1 PB7/PB6/PA11/PB0)
+	  as the command/inference transport to the HealthyLink Compute NPU, replacing
+	  the parked SPI4 link. Framed
+	  protocol in include/healthylink/hl_npu_uart_proto.h. When an HealthyLink Compute
+	  module is detected, the app runs a STATUS + GET_INFO comms check off the boot
+	  path and logs the result.
+
+config HPI_NPU_COMMS_CHECK
+	bool "Probe the HealthyLink NPU (STM32N657) over SPI4 at module start"
+	default n
+	depends on !HPI_NPU_UART
+	help
+	  Dev/bring-up aid: when an HealthyLink Compute module is detected, perform a
+	  SPI4 STATUS + GET_INFO transaction with the N657 and log the link state.
+
+	  OFF by default: SPI4 transfers are not yet proven on this hardware and a
+	  faulting transceive resets the board (boot loop). The NPU is still
+	  detected, registered and marked active without this; enable only for
+	  focused SPI4 bring-up, ideally with a debugger/RTT attached to catch any
+	  fault. The check runs on a dedicated low-priority work queue so it cannot
+	  starve the watchdog, but a CPU exception in the SPI driver will still
+	  reset regardless of thread.
+
+config HPI_NPU_INFERENCE_TEST
+	bool "Run one NPU inference round-trip after the comms check (bring-up)"
+	default n
+	depends on HPI_NPU_COMMS_CHECK
+	help
+	  Bring-up aid: once the SPI4 link is alive, run a full inference
+	  round-trip against the HealthyLink Compute (N657) beat-classifier model --
+	  LOAD_INPUT (187 INT8 ECG samples, synthetic ramp) -> RUN_INFERENCE -> wait
+	  for the module IRQ (PI12) -> READ_OUTPUT (5 AAMI class scores) -- and log
+	  the result. Runs once on the npu_comms work queue; dev only.
+
+config HPI_SPI4_LOOPBACK_TEST
+	bool "Run a SPI4 loopback self-test at boot (bring-up diagnostic)"
+	default n
+	help
+	  Hardware bring-up aid for the HealthyLink slot-A SPI4 bus, which has
+	  never been proven to transfer on this board (the NPU comms check faults
+	  it). Externally tie SPI4 MOSI (PE6) to MISO (PE5), enable this, and the
+	  app does a short conservative (1 MHz) transceive and logs whether the
+	  bytes loop back (PASS) or not (FAIL/garbage).
+
+	  Run with a debugger/RTT attached, NOT the UART-TX-only DEV flavor: if
+	  SPI4 faults, the exception dump must survive the reset. The test runs on
+	  a dedicated work queue so a hang cannot starve the watchdog, but a CPU
+	  exception in the SPI driver will still reset. Off for normal builds.
+
+config HPI_SECURITY
+	bool "Device lock/unlock state machine"
+	default n
+	select MBEDTLS
+	select MBEDTLS_PSA_CRYPTO_C
+	select PSA_WANT_ALG_HMAC
+	select PSA_WANT_ALG_SHA_256
+	select PSA_WANT_KEY_TYPE_HMAC
+	select PSA_WANT_GENERATE_RANDOM
+	help
+	  Boot LOCKED and gate destructive / PHI / privileged MCUmgr commands
+	  behind a challenge-response unlock (HMAC-SHA256 over a 16-byte CSPRNG
+	  nonce, §14.4). Default n -- enable together with the MCUboot signing +
+	  OTP secret provisioning (§14.5), since production needs the device-unique
+	  secret in OTP. When off, hpi_security_require_unlocked() is a no-op and
+	  all commands are allowed (current pre-security behavior). Enabling pulls
+	  in mbedTLS PSA crypto for HMAC/SHA-256/CSPRNG -- validate the crypto +
+	  entropy config on target.
+
+if HPI_SECURITY
+
+choice
+	prompt "Unlock shared-secret source"
+	default HPI_UNLOCK_SECRET_SOURCE_KCONFIG
+
+config HPI_UNLOCK_SECRET_SOURCE_OTP
+	bool "STM32H7 OTP / protected flash (production)"
+	help
+	  Device-unique 256-bit secret provisioned at manufacture. The OTP read is
+	  not yet implemented (TODO §14.4) -- selecting this currently fails closed
+	  (the device cannot be unlocked).
+
+config HPI_UNLOCK_SECRET_SOURCE_KCONFIG
+	bool "Kconfig hex string (DEVELOPMENT ONLY)"
+	help
+	  Dev fallback; the device logs a prominent DO-NOT-SHIP warning at boot.
+
+endchoice
+
+config HPI_UNLOCK_SECRET_HEX
+	string "Dev unlock secret (64 hex chars = 32 bytes)"
+	depends on HPI_UNLOCK_SECRET_SOURCE_KCONFIG
+	default "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+	help
+	  Development-only shared secret used to compute HMAC(nonce). DO NOT SHIP.
+
+config HPI_UNLOCK_GRANT_S
+	int "Unlock grant TTL, seconds"
+	default 600
+	range 60 3600
+	help
+	  How long the device stays UNLOCKED after a successful unlock_response
+	  before auto-relocking (§14.4). Also relocks on hpi/lock or reboot.
+
+endif # HPI_SECURITY
+
+config HPI_USB_VID
+	hex "USB Vendor ID (idVendor)"
+	default 0x2fe3
+	help
+	  0x2FE3 is the Zephyr-project DEVELOPMENT VID -- not shippable. Replace
+	  with a registered VID before customer shipment (for this open-source
+	  product, a pid.codes PID on VID 0x1209). tools/ci/check_prod_surface.sh
+	  fails a prod build that still carries the 0x2FE3 test VID.
+
+config HPI_USB_PID
+	hex "USB Product ID (idProduct)"
+	default 0x0100
+	help
+	  Paired with HPI_USB_VID. Set to the assigned pid.codes PID for shipment.
+
+config HPI_USB_MANUFACTURER
+	string "USB manufacturer string descriptor"
+	default "Protocentral"
+
+config HPI_USB_PRODUCT
+	string "USB product string descriptor"
+	default "HealthyPi 6"
+
+config HPI_CONNECTIVITY
+	bool "ESP32-C6 connectivity (WiFi/BLE) via HealthyBridge SPI"
+	default n
+	help
+	  Stream the sample bus to the ESP32-C6 network co-processor over the
+	  HealthyBridge SPI link (SPI2, M7 master) for WiFi TCP + BLE GATT
+	  re-streaming, and proxy WiFi control via the group-64 wifi_* commands
+	  (0x0070-0x0073). A from-scratch L4 bus-consumer service
+	  (services/connectivity/) on top of the existing
+	  drivers/misc/healthybridge_esp32 driver + the ESP32-C6 app.
+
+	  Default n: needs the ESP32-C6 firmware running and the SPI2 link
+	  validated on hardware. When off, nothing touches SPI2 or the ESP32 and
+	  the wifi_* commands return ENOTSUP.
+
+config HPI_CONN_DEBUG
+	bool "Log connectivity SPI link stats every 5 s"
+	depends on HPI_CONNECTIVITY
+	default n
+	help
+	  Phase-1 bring-up aid. The connectivity thread prints a 5-second window
+	  of frames forwarded to the ESP32 per channel and the SPI send-failure
+	  (drop) count: "conn 5s: ECG=.. PPG=.. vitals=.. sent | drops=..".
+	  Rising sent counts with drops near zero means the SPI2 link to the
+	  ESP32 is healthy; zero sent / high drops means the ESP32 is not
+	  responding. Off in prod.
+
+config HPI_WIRELESS_OTA
+	bool "MCUmgr SMP transport on UART4 (ESP32 wireless OTA gateway)"
+	depends on MCUMGR_TRANSPORT_UART
+	# UART4 is the HealthyBridge host link. Two consumers on
+	# one UART is not a degraded mode: both would call uart_callback_set() and
+	# uart_rx_enable(), the second silently displacing the first, and the
+	# symptom would be a link that stops carrying data for no visible reason.
+	# Make the combination unselectable rather than merely discouraged. The
+	# real answer is to carry SMP as a HealthyBridge frame type over the same
+	# link -- migration plan P6.
+	depends on !DT_HAS_PROTOCENTRAL_HEALTHYBRIDGE_ESP32_UART_ENABLED
+	default n
+	help
+	  Adds a SECOND MCUmgr SMP transport bound to UART4 (the ESP32-C6 gateway
+	  line), in addition to the USB CDC1 transport. Lets a WiFi SMP client
+	  reach the device's MCUmgr server -- including the stock img group for
+	  firmware OTA -- by byte-relaying through the ESP32's TCP<->UART
+	  passthrough (leg 2). Reuses Zephyr's generic mcumgr serial framing; the
+	  CDC1 transport and the UART4 line are unaffected when off.
+
+	  Default n: needs the ESP32 passthrough enabled and HW validation. BLE
+	  OTA is NOT available (the ESP32 app exposes no SMP/DFU BLE service); the
+	  wireless OTA path is WiFi-only.
+
+config HPI_DISPLAY_ENABLED
+	bool "On-device LVGL UI (GC9503V + GT911)"
+	depends on DISPLAY && LVGL
+	default n
+	help
+	  Compile the modular Material-3 LVGL UI (app_m7/src/ui/) as an L5 bus
+	  consumer + service client: live ECG/PPG waveforms, vitals, record and
+	  status screens on the GC9503V panel with GT911 touch. Pure consumer --
+	  nothing in core/services/transport depends on it. Default n so the image
+	  is headless; enable via scripts/make_m7_disp.sh (which also applies
+	  disp_conf.conf + the display overlay). The UI never runs on a producer
+	  callback (deferred lv_timer update) and core/ never includes ui/.
+
+config HPI_UI_DEBUG_CYCLE
+	bool "UI debug: auto-cycle every screen"
+	depends on HPI_DISPLAY_ENABLED
+	default n
+	help
+	  Walk the UI through every screen on a timer instead of waiting for
+	  touch. Exists to measure the LVGL heap high-water across the whole
+	  screen set (rendering allocates well past what ui_build() reserves),
+	  and to exercise the UI at all while GT911 touch is down. Debug only --
+	  it takes navigation away from the user. Pair it with
+	  CONFIG_SYS_HEAP_RUNTIME_STATS to get the numbers out
+	  (app_m7/disp_debug.conf sets both).
+
+config HPI_UI_DEBUG_CYCLE_MS
+	int "UI debug: ms per screen"
+	depends on HPI_UI_DEBUG_CYCLE
+	default 3000
+
+config HPI_EOL_SUITE_VER
+	int "End-of-line (manufacturing) self-test suite version"
+	default 1
+	help
+	  Version stamp returned by the group-64 self-test (0x0080) so the factory
+	  can pin which EOL check suite a unit passed. Bump whenever the set of
+	  checks or their pass criteria change. Prod pins this explicitly
+	  (prj.prod.conf) so a shipped image always reports a deliberate suite
+	  version. The firmware suite covers the runtime-automatable checks
+	  (sd/batt/ecg/ppg/m4/qspi); SDRAM sweep, display backlight and touch are
+	  bench/visual line steps (see app_m7_bench + the manufacturing checklist).
+
+config HPI_HEALTH_POLL_MS
+	int "Subsystem health monitor poll interval, ms"
+	default 1000
+	help
+	  Period of the health monitor thread that enforces per-subsystem
+	  heartbeat deadlines (DEGRADED after 1x timeout, FAILED after 2x) and
+	  publishes health events. Pure software layer above the IWDG; it logs and
+	  flags degradation but never resets (graceful degradation).
+
+config HPI_WATCHDOG_TIMEOUT_MS
+	int "Hardware watchdog (IWDG) timeout, ms"
+	default 4000
+	help
+	  Window after which the IWDG resets the MCU if not fed. Per-subsystem
+	  task watchdogs are layered on top of this hardware backstop.
+
+config HPI_FS_READY_TIMEOUT_MS
+	int "Max time to wait for the filesystem to become ready, ms"
+	default 3000
+	help
+	  main() waits up to this long for fs_mount to post the FS-ready
+	  semaphore. On timeout the app continues in a graceful "SD not ready"
+	  state rather than crashing (independent of the legacy mount fault).
+
+source "Kconfig.zephyr"
+
+config HPI_RECOVERY_MODE
+	bool "Reboot into MCUboot serial recovery over group-64"
+	default n
+	help
+	  Adds group-64 command 0x00A5 (hpi/enter_recovery): set the retained
+	  boot-mode flag and reboot, so MCUboot stays in serial recovery over USB
+	  CDC instead of jumping to the application. This is the "device is healthy
+	  but needs reflashing" entry into recovery; MCUboot's
+	  CONFIG_BOOT_SERIAL_NO_APPLICATION covers the "there is no bootable image"
+	  case on its own and needs nothing here.
+
+	  Signed flavor only (prj.signed.conf). It needs RETENTION_BOOT_MODE and a
+	  "zephyr,boot-mode" chosen node, both of which only the signed overlay
+	  provides; asking for it without them is a build error rather than a
+	  command that quietly does nothing.
+
+config HPI_M4_UPDATE
+	bool "M4 firmware update over group-64"
+	default n
+	select FLASH
+	select FLASH_MAP
+	select MBEDTLS
+	select MBEDTLS_PSA_CRYPTO_C
+	# Enabling the PSA crypto *library* is not enough -- each algorithm has to be
+	# requested too, or psa_hash_setup() returns PSA_ERROR_NOT_SUPPORTED (-134).
+	# Missing this is what made the first hardware commit fail.
+	select PSA_WANT_ALG_SHA_256
+	help
+	  Update the M4 (algorithm core) through the M7: the host uploads an image
+	  over the group-64 control channel into the QSPI staging region, the M7
+	  verifies it, then erases and rewrites bank 2. A reset is needed
+	  afterwards for the M4 to run it.
+
+	  The M4 is deliberately NOT an MCUboot image -- its reset vector has 64 KB
+	  granularity while MCUboot's header-size field is 16-bit, which makes the
+	  two irreconcilable.
+
+	  Requires the m4_staging_partition from the MCUboot slot map, so this is
+	  only usable in the signed flavor; the service self-stubs otherwise.
+
+if HPI_M4_UPDATE
+
+config HPI_M4_UPDATE_REQUIRE_SIGNATURE
+	bool "Require an ECDSA-P256 signature on M4 images"
+	default y
+	select PSA_WANT_ALG_ECDSA
+	select PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY
+	select PSA_WANT_ECC_SECP_R1_256
+	help
+	  Verify the uploaded M4 image's signature against the release signing key
+	  (the same key MCUboot verifies the M7 against; its public half is
+	  generated into the build by tools/build/gen_m4_pubkey.py).
+
+	  Default y, and it should stay y for anything that ships. The device
+	  ships with the unlock gate off, so without this check anyone with USB
+	  access could put arbitrary code on the M4 while the M7 remains
+	  signature-verified — an asymmetry with no justification. SHA-256 alone
+	  only proves the bytes arrived intact, not who sent them.
+
+	  Turning it off is a bench convenience (push a freshly built
+	  build/m4/zephyr/zephyr.bin without signing it). A build with it off is
+	  not a shippable build.
+
+config HPI_M4_SIGNING_KEY
+	string "PEM key whose public half verifies M4 images"
+	default ""
+	depends on HPI_M4_UPDATE_REQUIRE_SIGNATURE
+	help
+	  Absolute path. Empty means "use the same default as the signed build"
+	  (keys/hp6_dev_ec256.pem), which is what a local developer wants.
+	  Release builds pass the real key here. Relative paths are a known trap —
+	  they resolve against the west topdir, not this repo.
+
+endif # HPI_M4_UPDATE

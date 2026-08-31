@@ -1,0 +1,21 @@
+# Copyright (c) 2025
+# SPDX-License-Identifier: Apache-2.0
+
+description: GalaxyCore GC9503V display controller
+
+compatible: "galaxycore,gc9503v-dsi"
+
+include: [mipi-dsi-device.yaml, display-controller.yaml]
+
+properties:
+  reset-gpios:
+    type: phandle-array
+    description: |
+      The RESET pin controls hardware reset for the panel. Adjust polarity
+      according to the board wiring (active-high/active-low).
+
+  bl-gpios:
+    type: phandle-array
+    description: |
+      The backlight control GPIO for the panel. Usually an active-high output
+      to enable the backlight.

@@ -1,0 +1,42 @@
+/*
+ * MCUboot-image overlay for healthypi6_v5 (M7) — SIGNED flavor only.
+ * Passed by scripts/build.sh signed via -Dmcuboot_EXTRA_DTC_OVERLAY_FILE.
+ * MCUboot itself runs from boot_partition (flash0 @ 0x08000000, 128 KB).
+ */
+
+#include "healthypi6_v5_mcuboot_partitions.dtsi"
+#include "healthypi6_v5_bootmode.dtsi"
+
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};
+
+/*
+ * Serial recovery over USB CDC (CONFIG_BOOT_SERIAL_CDC_ACM).
+ *
+ * MCUboot's serial_adapter.c resolves the recovery device with
+ * DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart), which requires EXACTLY ONE enabled
+ * cdc-acm-uart node. The board DTS declares two (CDC0 stream + CDC1 control),
+ * so one has to go in the bootloader image or the build fails outright.
+ *
+ * CDC0 is the one dropped: keeping cdc_acm_uart1 leaves the board's
+ * `chosen { zephyr,uart-mcumgr = &cdc_acm_uart1 }` pointing at an enabled node.
+ * That chosen is also what keeps the compile-time guard in serial_adapter.c
+ * quiet — it errors if the UART console (usart1) and serial recovery would
+ * share a device, which they do not.
+ *
+ * The host therefore sees a SINGLE CDC ACM port in recovery mode, not the
+ * two-port composite the application enumerates. Tools must not assume the
+ * app's CDC1 port name still applies after a reboot into recovery.
+ */
+&cdc_acm_uart0 { status = "disabled"; };
+
+/* The bootloader needs flash (internal + QSPI), UART console and the IWDG —
+ * nothing else. The board DTS enables the app's sensor/bridge peripherals,
+ * whose drivers are DT-compat-gated (healthybridge_esp32_uart has no Kconfig
+ * gate) and would drag their dependencies into the 128 KB bootloader.
+ * Disable them here; Kconfig-side trimming lives in app_m7/sysbuild/mcuboot.conf. */
+&healthybridge_esp32_uart { status = "disabled"; };
+

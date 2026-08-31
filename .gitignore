@@ -1,0 +1,98 @@
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# All west build directories live under build/ — ignore the contents,
+# keep the folder itself (via .gitkeep) so the layout is preserved.
+/build/*
+!/build/.gitkeep
+
+# ESP-IDF builds into its own in-app directory. The app moved under archived/
+# when the ESP32 firmware was superseded by the standalone HealthyBridge repo;
+# keep both paths ignored so a stale build tree can't be committed by accident.
+/app_esp32c6_esp_idf/build
+/archived/app_esp32c6_esp_idf/build
+
+/CMakeFiles
+CMakeCache.txt
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
+
+# Python host tools (tools/healthypi, tools/smpgroup)
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+# sdist/wheel staging. The /build/* rule above is anchored to the repo
+# root, so it does NOT cover these -- `pip wheel tools/healthypi` drops a
+# full copy of the sources under tools/<pkg>/build/lib/ and it was staged
+# for commit once before this rule existed.
+tools/*/build/
+tools/*/dist/
+
+# --- never published -------------------------------------------------------
+# Internal working notes: plans, handoffs, phase trackers, bring-up and debug
+# logs, roadmaps, the factory SOP and assistant working notes. They are kept
+# locally and archived in the private reference repository, but they go stale
+# within a week of any publish and describe commercial sequencing and defect
+# history, so they are not part of the published tree. Do not un-ignore them.
+/docs/internal/
+/CLAUDE.md
+
+# ST Edge AI tool output (console logs, ONNX/JSON intermediates, the .raw weight
+# blob) used to be ignored here. Those rules moved on 2026-08-31 with the
+# compute-module firmware, to Protocentral/healthylink-compute-fw. Nothing in
+# this repository runs ST Edge AI or generates its byproducts any more; if you
+# find yourself wanting these rules back, the code they belong to is in the
+# other repository.

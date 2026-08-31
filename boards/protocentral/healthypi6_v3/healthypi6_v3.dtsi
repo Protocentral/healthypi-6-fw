@@ -1,0 +1,230 @@
+/*
+ * Copyright (c) 2019 Linaro Limited
+ * Copyright (c) 2025-2026 ProtoCentral
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/clock/stm32h7_clock.h>
+
+&usart1 {
+	pinctrl-0 = <&usart1_tx_pa9 &usart1_rx_pa10>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+};
+
+/*
+ * USART2 - HealthyLink Expansion UART with Hardware Flow Control
+ * This is the primary serial interface for HealthyLink modules.
+ * RTS/CTS enables reliable high-speed communication with module MCUs.
+ */
+&usart2 {
+	pinctrl-0 = <&usart2_tx_pd5 &usart2_rx_pd6 &usart2_rts_pd4 &usart2_cts_pd3>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+};
+
+&mailbox {
+	status = "okay";
+};
+
+&rcc {
+	d1cpre = <1>;
+	hpre = <2>;
+	d1ppre = <2>;
+	d2ppre1 = <2>;
+	d2ppre2 = <2>;
+	d3ppre = <2>;
+};
+
+/*
+ * HealthyLink Expansion Port Base Definitions (v3)
+ *
+ * Interface Assignments:
+ *   SPI4:    PE2 (SCK), PE5 (MISO), PE6 (MOSI), PE4 (NSS) - Primary high-speed
+ *   SPI6:    PG13 (SCK), PG12 (MISO), PG14 (MOSI), PA15 (NSS) - Secondary
+ *   USART2:  PD5 (TX), PD6 (RX), PD4 (RTS), PD3 (CTS) - With HW flow control
+ *   FDCAN1:  PH13 (TX), PH14 (RX) - CAN-FD interface
+ *   USB_FS:  PA11 (DM), PA12 (DP) - USB Host (12 Mbps, disabled by default)
+ *   I2C3:    PH7 (SCL), PH8 (SDA) - Module EEPROM
+ *   ADC:     11 channels on PA1-PA7, PC0, PC1, PC4, PC5 (defined in M7 DTS)
+ *
+ * GPIO Assignments:
+ *   Module Control:  PI2 (START), PI3 (RESET), PI6 (PWDN), PH6 (DRDY)
+ *   StackLink Bus:   PI0 (CLK), PI1 (DATA), PI4 (SYNC) - Inter-module comms
+ *   Module Detect:   PI5 (MOD_PRESENT)
+ *   Aux GPIO:        PI12, PI13, PI14 - General purpose expansion
+ *
+ * v3 Pin Changes from v2:
+ *   - ADS1299 DRDY moved from PG12 to PH6 (frees PG12 for SPI6 MISO)
+ *   - SPI6 CS changed from PA10 to PA15 (hardware SPI6_NSS function)
+ *   - SPI6 enabled by default (no longer blocked by DRDY conflict)
+ *   - FDCAN1 enabled by default
+ *   - Removed PA9/PA10 from expansion-gpios (conflict with USART1 console)
+ *   - Added StackLink bus GPIOs (PI0, PI1, PI4)
+ *   - Added Module Detect GPIO (PI5 MOD_PRESENT)
+ *   - HealthyBridge reset moved from PA11 to PA8 (frees USB_FS pins)
+ *   - USB OTG FS reserved for USB Host modules (PA11/PA12)
+ */
+
+/* I2C3 for module identification EEPROM */
+&i2c3 {
+	status = "okay";
+	pinctrl-0 = <&i2c3_scl_ph7 &i2c3_sda_ph8>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+
+	/* Module ID EEPROM - Microchip 24AA02: 256 bytes @ 0x50 */
+	healthylink_eeprom: eeprom@50 {
+		compatible = "microchip,24aa02", "atmel,at24";
+		reg = <0x50>;
+		size = <256>;
+		pagesize = <8>;
+		address-width = <8>;
+		timeout = <5>;
+		status = "okay";
+	};
+};
+
+/*
+ * SPI4 for HealthyLink high-speed expansion
+ * Enabled by default with ADS1299 child node using deferred-init.
+ * The driver will only initialize if EEPROM identifies EEG-8CH module.
+ *
+ * Note: SPI4 uses PE2 which conflicts with QUADSPI IO2 on v2.
+ * In v3, QSPI IO2 is routed to PF7 instead, so no conflict.
+ */
+&spi4 {
+	status = "okay";
+	clocks = <&rcc STM32_CLOCK(APB2, 13)>,
+		 <&rcc STM32_SRC_PLL2_Q SPI45_SEL(2)>;
+	pinctrl-0 = <&spi4_sck_pe2 &spi4_miso_pe5 &spi4_mosi_pe6>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioe 4 GPIO_ACTIVE_LOW>;
+
+	/*
+	 * ADS1299 8-Channel EEG AFE (HealthyLink EEG-8CH Module)
+	 * Uses deferred-init: driver skeleton loads at boot, but hardware
+	 * is only initialized when ads1299_hw_init() is called after
+	 * EEPROM identifies the connected module as EEG-8CH (0x0001).
+	 *
+	 * v3 change: DRDY moved from PG12 to PH6
+	 */
+	ads1299: ads1299@0 {
+		compatible = "ti,ads1299";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		drdy-gpios = <&gpioh 6 GPIO_ACTIVE_LOW>;    /* v3: PH6 (was PG12 in v2) */
+		reset-gpios = <&gpioi 3 GPIO_ACTIVE_HIGH>;
+		pwdn-gpios = <&gpioi 6 GPIO_ACTIVE_HIGH>;
+		start-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>;
+		gain = <24>;      /* EEG standard gain */
+		sample-rate = <250>;
+		bias-enabled;     /* Enable BIAS/DRL for common-mode rejection */
+		srb1-enabled;     /* Enable SRB1: REF electrode connected to SRB1 pin */
+		status = "okay";
+		zephyr,deferred-init;
+	};
+};
+
+/*
+ * SPI6 for secondary expansion (enabled in v3)
+ * v3: PG12 freed from ADS1299 DRDY conflict, SPI6 MISO can now use PG12.
+ * CS changed from PA10 to PA15 (hardware SPI6_NSS alternate function).
+ */
+&spi6 {
+	status = "okay";
+	pinctrl-0 = <&spi6_sck_pg13 &spi6_miso_pg12 &spi6_mosi_pg14>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioa 15 GPIO_ACTIVE_LOW>;  /* v3: PA15 (was PA10 in v2) */
+};
+
+/*
+ * FDCAN1 for CAN-FD interface (enabled in v3)
+ * v2 had this disabled by default; v3 enables it for HealthyLink CAN modules.
+ */
+&fdcan1 {
+	status = "okay";
+	pinctrl-0 = <&fdcan1_tx_ph13 &fdcan1_rx_ph14>;
+	pinctrl-names = "default";
+	sample-point = <875>;
+	sample-point-data = <875>;
+};
+
+/*
+ * USB OTG FS for HealthyLink USB Host modules (disabled by default)
+ *
+ * When enabled, provides USB Full-Speed Host capability (12 Mbps) for:
+ *   - USB cameras (eye tracking)
+ *   - USB storage devices
+ *   - USB HID (response buttons, keyboards)
+ *   - USB-Serial adapters
+ *
+ * When disabled, PA11/PA12 can be used as general purpose GPIO.
+ * Enable in module overlay with: status = "okay";
+ *
+ * Note: HealthyBridge reset was moved from PA11 to PA8 to free these pins.
+ * Module must provide 5V VBUS power with overcurrent protection.
+ */
+&usbotg_fs {
+	status = "disabled";
+	pinctrl-0 = <&usb_otg_fs_dm_pa11 &usb_otg_fs_dp_pa12>;
+	pinctrl-names = "default";
+};
+
+/* HealthyLink controller node */
+/ {
+	healthylink: healthylink {
+		compatible = "protocentral,healthylink";
+		status = "okay";
+		zephyr,deferred-init;
+		eeprom = <&healthylink_eeprom>;
+
+		/*
+		 * Module Control GPIOs (directly control module hardware)
+		 * These are directly wired to the ADS1299 on EEG modules.
+		 */
+		control-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>,   /* START */
+		                <&gpioi 3 GPIO_ACTIVE_HIGH>,   /* RESET */
+		                <&gpioi 6 GPIO_ACTIVE_HIGH>,   /* PWDN */
+		                <&gpioh 6 GPIO_ACTIVE_LOW>;    /* DRDY (active low) */
+
+		/*
+		 * StackLink Inter-Module Communication Bus
+		 * Allows direct communication between stacked modules without
+		 * involving the host MCU. Uses simple synchronous protocol.
+		 */
+		stacklink-gpios = <&gpioi 0 GPIO_ACTIVE_HIGH>, /* SLINK_CLK */
+		                  <&gpioi 1 GPIO_ACTIVE_HIGH>, /* SLINK_DATA */
+		                  <&gpioi 4 GPIO_ACTIVE_HIGH>; /* SLINK_SYNC */
+
+		/*
+		 * Module Detection
+		 * MOD_PRESENT: Hardware detect (active low, pulled high)
+		 * Note: MOD_ID pins removed in v3 (PI7 reassigned to ADS1292R RESET)
+		 */
+		detect-gpios = <&gpioi 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; /* MOD_PRESENT */
+
+		/*
+		 * Auxiliary GPIO for module-specific functions
+		 * General purpose I/O exposed on the expansion connector
+		 */
+		aux-gpios = <&gpioi 12 GPIO_ACTIVE_HIGH>,
+		            <&gpioi 13 GPIO_ACTIVE_HIGH>,
+		            <&gpioi 14 GPIO_ACTIVE_HIGH>;
+
+		/* Legacy expansion-gpios for backward compatibility */
+		expansion-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>,
+		                  <&gpioi 3 GPIO_ACTIVE_HIGH>,
+		                  <&gpioi 6 GPIO_ACTIVE_HIGH>,
+		                  <&gpioh 6 GPIO_ACTIVE_LOW>,
+		                  <&gpioi 5 GPIO_ACTIVE_LOW>;
+	};
+
+	chosen {
+		healthylink-eeprom = &healthylink_eeprom;
+	};
+};

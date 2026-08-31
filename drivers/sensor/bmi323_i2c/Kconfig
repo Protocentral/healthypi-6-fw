@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Protocentral Electronics
+# SPDX-License-Identifier: Apache-2.0
+
+config BMI323_I2C
+	bool "BMI323 IMU driver (I2C fork)"
+	default y
+	depends on DT_HAS_PROTOCENTRAL_BMI323_I2C_ENABLED
+	select I2C
+	select SENSOR
+	help
+	  Local fork of the upstream Bosch BMI323 Zephyr driver with an I2C
+	  bus backend. The upstream driver only supports SPI at the time of
+	  writing (Zephyr 4.2). This fork uses the
+	  "protocentral,bmi323-i2c" compatible to avoid clashing if upstream
+	  later grows native I2C support.
+
+	  Exposes the same sensor API channels (accel x/y/z, gyro x/y/z,
+	  die temp) and the any-motion trigger.

@@ -1,0 +1,35 @@
+config SENSOR_AFE4400
+	bool "Enable AFE4400 driver"
+	default y
+	help
+		Enable the AFE4400 PPG sensor driver (async RTIO-capable)
+
+if SENSOR_AFE4400
+
+config AFE4400_PRF_HZ
+	int "AFE4400 pulse repetition frequency / PPG sample rate (Hz)"
+	default 250
+	range 62 2000
+	help
+	  PPG sample rate, in Hz. This is the single source of truth for the rate:
+	  the driver programs PRPCOUNT = (4000000 / PRF) - 1 from the AFE4400's
+	  4 MHz timer clock, and the application derives HPI_PPG_RATE_HZ from this
+	  symbol, so the advertised rate and the hardware can no longer disagree.
+
+	  Every DATA_READY assertion is one PPG sample, so this directly sets the
+	  sample-bus rate, the SPI load to the ESP32, the rate the M4 sees (after
+	  the 2:1 decimation in platform/ipc.c, which adapts automatically) and the
+	  ppg_rate field written into .HP6 recordings.
+
+	  250 Hz is the HealthyPi 6 design rate. 125 Hz is also valid -- usable PPG
+	  content sits well inside that -- and halves bus, SPI and recording load.
+
+	  Only the repetition period changes with this option. The LED, ambient and
+	  ADC-convert phase timings are deliberately left fixed, so the tuned LED
+	  currents, TIA gain and R-ratio behaviour are identical at any rate; a
+	  slower PRF simply idles longer between identical acquisitions (which also
+	  lowers average LED power). The acquisition pattern occupies counts 0..1650,
+	  which bounds the maximum PRF; PRPCOUNT is a 16-bit field, which bounds the
+	  minimum.
+
+endif # SENSOR_AFE4400

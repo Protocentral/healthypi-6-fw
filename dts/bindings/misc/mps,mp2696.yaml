@@ -1,0 +1,123 @@
+# Copyright (c) 2026 Protocentral Electronics
+# SPDX-License-Identifier: MIT
+
+description: |
+  Monolithic Power Systems MP2696B single-cell Li-ion switching charger with
+  power-path management and boost output. I2C-controlled; device address 0x6B.
+
+  Optional properties map directly to register fields. When omitted, the
+  power-on default defined in the datasheet is kept.
+
+  Example:
+
+    &i2c2 {
+        charger@6b {
+            compatible = "mps,mp2696";
+            reg = <0x6b>;
+            charge-current-microamp = <1500000>;
+            input-current-limit-microamp = <2000000>;
+            battery-regulation-microvolt = <4200000>;
+            boost-output-microvolt = <5150000>;
+            int-gpios = <&gpioc 5 GPIO_ACTIVE_LOW>;
+        };
+    };
+
+compatible: "mps,mp2696"
+
+include: [i2c-device.yaml]
+
+properties:
+  int-gpios:
+    type: phandle-array
+    description: |
+      Open-drain INT output from the charger. Goes low on status/fault
+      change; the host clears it by reading REG05h / REG06h.
+
+  input-current-limit-microamp:
+    type: int
+    description: |
+      Input current limit (IINLIM, REG00h[2:0]). Quantised to the nearest
+      supported step: 500000, 1000000, 1500000, 1800000, 2100000, 2400000,
+      3000000, 3500000.
+
+  charge-current-microamp:
+    type: int
+    description: |
+      Fast-charge current (ICC, REG01h[7:3]). 500000..3600000 in 100 mA
+      steps (10 mOhm sense resistor).
+
+  precharge-current-microamp:
+    type: int
+    description: |
+      Pre-charge current (IPRE, REG01h[1:0]). 150000, 250000, 350000.
+
+  termination-current-microamp:
+    type: int
+    description: |
+      Charge termination current (ITERM, REG02h[2:1]). 100000, 200000,
+      300000, 400000.
+
+  battery-regulation-microvolt:
+    type: int
+    description: |
+      Battery regulation voltage (BATT_REG, REG02h[6:4]). One of 3600000,
+      4100000, 4200000, 4300000, 4350000, 4400000, 4450000.
+
+  input-voltage-regulation-microvolt:
+    type: int
+    description: |
+      Minimum input-voltage regulation threshold (VINMIN, REG00h[5:3]).
+      4450000..4800000 in 50 mV steps.
+
+  boost-output-microvolt:
+    type: int
+    description: |
+      Boost regulation voltage at PMID (VBOOST, REG04h[7:5]).
+      5050000..5225000 in 25 mV steps.
+
+  boost-current-limit-microamp:
+    type: int
+    description: |
+      SYS output current limit in boost mode (IOLIM, REG03h[7:4]).
+      1000000..4000000 in 200 mA steps.
+
+  charge-safety-timer-hours:
+    type: int
+    enum: [10, 20]
+    description: |
+      Charge safety timer (REG0Ah TMR). 20 h is the POR default.
+
+  vin-ovp-microvolt:
+    type: int
+    enum: [6000000, 11000000]
+    description: |
+      Input over-voltage protection threshold (VIN_OVP, REG07h[3]).
+
+  switching-frequency-hz:
+    type: int
+    enum: [700000, 1200000]
+    description: |
+      Switching frequency (SW_FREQ, REG07h[2]).
+
+  charge-disable:
+    type: boolean
+    description: |
+      Leave the CHG_EN bit cleared after init. Default is to enable
+      charging (POR default).
+
+  jeita-disable:
+    type: boolean
+    description: |
+      Disable JEITA-driven charge derating (JEITA_DIS, REG02h[3]).
+      Warm/cool states will only be reported, not acted on.
+
+  ntc-disable:
+    type: boolean
+    description: |
+      Disable NTC monitoring entirely (EN_NTC=0, REG01h[2]). Use on boards
+      with no battery thermistor.
+
+  safety-timer-disable:
+    type: boolean
+    description: |
+      Disable the charge safety timer (EN_TIMER=0, REG00h[6]).

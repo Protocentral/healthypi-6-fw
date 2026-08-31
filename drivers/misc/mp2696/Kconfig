@@ -1,0 +1,26 @@
+# Copyright (c) 2026 Protocentral Electronics
+# SPDX-License-Identifier: Apache-2.0
+
+config MP2696
+	bool "MP2696B battery charger driver"
+	default y
+	depends on DT_HAS_MPS_MP2696_ENABLED
+	select I2C
+	help
+	  Enable driver for the Monolithic Power MP2696B single-cell Li-ion
+	  switching charger with power-path management and boost output.
+
+if MP2696
+
+config MP2696_INIT_PRIORITY
+	int "MP2696 init priority"
+	default 85
+	help
+	  Post-kernel init priority. Must be higher than the I2C controller
+	  driver priority so the bus is ready when this driver probes.
+
+module = MP2696
+module-str = mp2696
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # MP2696

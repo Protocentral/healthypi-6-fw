@@ -1,0 +1,155 @@
+# HealthyLink Expansion Port Driver Configuration
+# Copyright (c) 2025 ProtoCentral
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig HEALTHYLINK
+	bool "HealthyLink Expansion Port Support"
+	default y
+	depends on I2C
+	help
+	  Enable support for HealthyLink expansion modules on the
+	  HealthyPi 6 expansion connector. HealthyLink provides a
+	  modular interface for EEG, EMG, trigger I/O, CAN, and
+	  HealthyLink Compute expansion boards.
+
+if HEALTHYLINK
+
+config HEALTHYLINK_INIT_PRIORITY
+	int "HealthyLink driver initialization priority"
+	default 90
+	help
+	  Initialization priority for the HealthyLink controller driver.
+	  Should be after I2C (default 50) but before application code.
+
+config HEALTHYLINK_AUTO_DETECT
+	bool "Auto-detect connected modules at boot"
+	default n
+	help
+	  Automatically detect connected HealthyLink modules by reading
+	  the I2C EEPROM at startup. If disabled (recommended), call
+	  healthylink_detect() manually from application code after
+	  hardware initialization is complete.
+
+	  NOTE: When using auto-provisioning with module overlays, this
+	  should be disabled and detection triggered from hw_module.c
+	  after the module hardware (e.g., ADS1299) is initialized.
+
+config HEALTHYLINK_AUTO_PROVISION
+	bool "Auto-provision blank EEPROMs"
+	default y
+	help
+	  When a blank EEPROM is detected (all 0xFF or all 0x00 in magic),
+	  automatically write the module identity based on:
+	  1. Device tree overlay (if module-id is specified)
+	  2. Hardware probing (detect connected chip IDs)
+
+	  This eliminates the need for external EEPROM programmers during
+	  module manufacturing or development.
+
+config HEALTHYLINK_REPROVISION_NAME
+	bool "Rewrite an already-provisioned EEPROM's name field on boot"
+	default n
+	help
+	  One-shot maintenance helper: on a non-blank, valid EEPROM whose stored
+	  module name does not match the canonical name for its module ID
+	  (healthylink_module_name()), rewrite ONLY the name field (preserving
+	  module ID, capabilities, serial, manufacturer, etc.) and recompute the
+	  CRC. Used to migrate fielded modules to a renamed module string (e.g.
+	  "AI-ACCELERATOR" -> "HealthyLink Compute"). Enable, build, flash, boot
+	  once to rewrite, then disable again for normal builds.
+
+	  The provisioned data includes:
+	  - Module ID, name, manufacturer
+	  - Hardware revision, capabilities
+	  - Auto-generated serial number (based on MCU unique ID)
+
+	  NOTE: This is triggered when healthylink_detect() is called,
+	  either automatically (if AUTO_DETECT=y) or manually from
+	  application code (recommended).
+
+config HEALTHYLINK_LOG_LEVEL
+	int "HealthyLink log level"
+	default 3
+	range 0 4
+	help
+	  Log level for HealthyLink drivers:
+	  0 = Off, 1 = Error, 2 = Warning, 3 = Info, 4 = Debug
+
+config HEALTHYLINK_EEG_8CH
+	bool "EEG-8CH Module Support"
+	depends on SPI
+	help
+	  Enable driver for 8-channel EEG expansion module using
+	  Texas Instruments ADS1299.
+
+	  Uses: SPI4, GPIO (DRDY, RESET, PWDN, START)
+
+if HEALTHYLINK_EEG_8CH
+
+config HEALTHYLINK_EEG_THREAD_STACK_SIZE
+	int "EEG sampling thread stack size"
+	default 1024
+	help
+	  Stack size for the EEG sampling thread.
+
+config HEALTHYLINK_EEG_THREAD_PRIORITY
+	int "EEG sampling thread priority"
+	default 5
+	help
+	  Priority for the EEG sampling thread.
+	  Lower number = higher priority.
+
+endif # HEALTHYLINK_EEG_8CH
+
+config HEALTHYLINK_CAN_INTERFACE
+	bool "CAN Interface Module Support"
+	depends on CAN
+	help
+	  Enable driver for FDCAN lab equipment interface module.
+
+	  Uses: FDCAN1
+
+config HEALTHYLINK_TRIGGER_IO
+	bool "Trigger I/O Module Support"
+	depends on GPIO
+	help
+	  Enable driver for lab trigger input/output module with
+	  precise timestamping.
+
+	  Uses: GPIO (PI2, PI3, PI6, PA9, PA10)
+
+config HEALTHYLINK_COMPUTE
+	bool "HealthyLink Compute Module Support"
+	depends on SPI
+	help
+	  Enable driver for external AI/ML compute accelerator module.
+
+	  Uses: SPI6, GPIO (CS, IRQ, RESET)
+
+config HEALTHYLINK_LLEXT_FALLBACK
+	bool "Load unknown modules via LLEXT"
+	depends on LLEXT
+	depends on FILE_SYSTEM
+	help
+	  When an unknown module ID is detected, attempt to load
+	  a driver from the SD card using Zephyr's Linkable Loadable
+	  Extensions (LLEXT) subsystem.
+
+	  Driver files should be placed at:
+	  /SD:/healthylink/mod_XXXX.llext
+
+	  where XXXX is the 4-digit hex module ID.
+
+if HEALTHYLINK_LLEXT_FALLBACK
+
+config HEALTHYLINK_LLEXT_PATH
+	string "LLEXT module path prefix"
+	default "/SD:/healthylink/"
+	help
+	  Path prefix for loading LLEXT module drivers.
+	  The module ID (as 4-digit hex) and ".llext" suffix
+	  will be appended.
+
+endif # HEALTHYLINK_LLEXT_FALLBACK
+
+endif # HEALTHYLINK

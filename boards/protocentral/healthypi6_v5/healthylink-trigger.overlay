@@ -1,0 +1,84 @@
+/*
+ * HealthyLink Trigger I/O Module Overlay
+ * Copyright (c) 2025-2026 ProtoCentral
+ * SPDX-License-Identifier: MIT
+ *
+ * Lab trigger inputs and outputs with precise timing for
+ * experiment synchronization and event marking.
+ * Module ID: 0x0003
+ *
+ * Hardware Connections:
+ *   GPIO Outputs: PI2 (TRIG_OUT_0), PI3 (TRIG_OUT_1)
+ *   GPIO Inputs:  PI6 (TRIG_IN_0), PA9 (TRIG_IN_1), PA10 (TRIG_IN_2)
+ *
+ * CAUTION: this pin map predates v5 -- PI2 is MOD_RESET_A and PI3 is the user
+ * button on v5. Revisit the assignments before using this overlay.
+ *
+ * Usage:
+ *   scripts/build.sh m7 with
+ *   -DEXTRA_DTC_OVERLAY_FILE="boards/protocentral/healthypi6_v5/healthylink-trigger.overlay"
+ */
+
+/ {
+	/* HealthyLink Trigger module binding */
+	healthylink_trigger: healthylink-trigger {
+		compatible = "protocentral,healthylink-trigger";
+		status = "okay";
+
+		/* Module identification */
+		module-id = <0x0003>;
+
+		/* Trigger outputs */
+		trigger-out-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>,  /* PI2 - TRIG_OUT_0 */
+		                    <&gpioi 3 GPIO_ACTIVE_HIGH>;  /* PI3 - TRIG_OUT_1 */
+
+		/* Trigger inputs */
+		trigger-in-gpios = <&gpioi 6 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>,   /* PI6 - TRIG_IN_0 */
+		                   <&gpioa 9 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>,   /* PA9 - TRIG_IN_1 */
+		                   <&gpioa 10 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;  /* PA10 - TRIG_IN_2 */
+
+		timestamp-resolution-ns = <10>;
+		debounce-us = <0>;
+
+		detect-rising-edge;
+		detect-falling-edge;
+	};
+
+	/* GPIO key bindings for interrupt-driven trigger inputs */
+	trigger_inputs: trigger-inputs {
+		compatible = "gpio-keys";
+		status = "okay";
+
+		trigger_in_0: trigger_in_0 {
+			gpios = <&gpioi 6 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+			label = "TRIG_IN_0";
+			zephyr,code = <0>;
+		};
+
+		trigger_in_1: trigger_in_1 {
+			gpios = <&gpioa 9 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+			label = "TRIG_IN_1";
+			zephyr,code = <1>;
+		};
+
+		trigger_in_2: trigger_in_2 {
+			gpios = <&gpioa 10 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+			label = "TRIG_IN_2";
+			zephyr,code = <2>;
+		};
+	};
+
+	/* Update chosen node for trigger module */
+	chosen {
+		healthylink-module = &healthylink_trigger;
+	};
+
+	/* Aliases for quick access */
+	aliases {
+		trigger-out0 = &gpioi;  /* Pin 2 */
+		trigger-out1 = &gpioi;  /* Pin 3 */
+		trigger-in0 = &trigger_in_0;
+		trigger-in1 = &trigger_in_1;
+		trigger-in2 = &trigger_in_2;
+	};
+};

@@ -1,0 +1,87 @@
+/*
+ * HealthyLink CAN Interface Module Overlay
+ * Copyright (c) 2025 ProtoCentral
+ * SPDX-License-Identifier: MIT
+ *
+ * FDCAN interface for connecting to lab equipment and research systems
+ * Module ID: 0x0004
+ *
+ * Hardware Connections:
+ *   FDCAN1: PH13 (TX), PH14 (RX)
+ *   GPIO: PA10 (Optional termination control)
+ *
+ * CAN-FD Support:
+ *   - Arbitration phase: Up to 1 Mbit/s
+ *   - Data phase: Up to 5 Mbit/s (with suitable transceiver)
+ *
+ * Usage:
+ *   west build -b healthypi6_v2/stm32h757xx/m7 app_m7 \
+ *       -DEXTRA_DTC_OVERLAY_FILE="boards/protocentral/healthypi6_v2/healthylink-can.overlay"
+ *
+ * Required Kconfig:
+ *   CONFIG_CAN=y
+ *   CONFIG_CAN_STM32_FDCAN=y
+ */
+
+/* Include base HealthyLink definitions */
+#include "healthylink.dtsi"
+
+/* Enable FDCAN1 for CAN-FD communication */
+&fdcan1 {
+	status = "okay";
+
+	/*
+	 * CAN Bus Timing Configuration
+	 *
+	 * FDCAN clock source: PLL1_Q or PLL2_Q (check main DTS)
+	 * For 1 Mbit/s with 40 MHz FDCAN clock:
+	 *   Prescaler = 1, Bit time = 40 time quanta
+	 *   Sync = 1, Prop + Phase1 = 31, Phase2 = 8
+	 *   Sample point = (1 + 31) / 40 = 80%
+	 *
+	 * For CAN-FD data phase at 4 Mbit/s:
+	 *   Prescaler = 1, Bit time = 10 time quanta
+	 *   Sync = 1, Prop + Phase1 = 7, Phase2 = 2
+	 *   Sample point = (1 + 7) / 10 = 80%
+	 */
+
+	/* Arbitration phase: 1 Mbit/s */
+	bus-speed = <1000000>;
+	sample-point = <800>;
+
+	/* Data phase (CAN-FD): 4 Mbit/s */
+	bus-speed-data = <4000000>;
+	sample-point-data = <800>;
+};
+
+/ {
+	/* HealthyLink CAN module binding */
+	healthylink_can: healthylink-can {
+		compatible = "protocentral,healthylink-can";
+		status = "okay";
+
+		/* Reference to the FDCAN controller */
+		can-controller = <&fdcan1>;
+
+		/* Module identification */
+		module-id = <0x0004>;
+
+		/* Optional: CAN bus termination control GPIO
+		 * Set high to enable onboard 120 ohm termination
+		 * Comment out if module doesn't have switchable termination
+		 */
+		/* termination-gpios = <&gpioa 10 GPIO_ACTIVE_HIGH>; */
+
+		/* CAN ID filter configuration (application-specific)
+		 * These are examples - adjust for your protocol
+		 */
+		/* Standard 11-bit ID range for this device */
+		/* can-id-base = <0x100>; */
+		/* can-id-mask = <0x7F0>; */
+	};
+
+	/* Update chosen node for CAN module */
+	chosen {
+		healthylink-module = &healthylink_can;
+	};
+};

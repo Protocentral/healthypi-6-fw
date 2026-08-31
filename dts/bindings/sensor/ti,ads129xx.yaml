@@ -1,0 +1,45 @@
+# ProtoCentral Electronics (info@protocentral.com)
+# SPDX-License-Identifier: Apache-2.0
+
+description: ADS129XX SPI Device
+
+compatible: "ti,ads129xx"
+
+include: [sensor-device.yaml, spi-device.yaml]
+
+properties:
+  pwdn-gpios:
+    type: phandle-array
+    description: |
+      Powerdown pin required
+  
+  reset-gpios:
+    type: phandle-array
+    description: |
+      Reset pin required
+  
+  drdy-gpios:
+    type: phandle-array
+    description: |
+      Data ready pin required
+  
+  start-gpios:
+    type: phandle-array
+    description: |
+      Start pin required
+  
+  gain:
+    type: int
+    description: |
+      PGA gain for all channels. Maps to GAINn[2:0] bits in CHnSET register.
+      Valid values: 1, 2, 3, 4, 6, 8, 12
+    default: 3
+    enum:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 6
+      - 8
+      - 12
+  

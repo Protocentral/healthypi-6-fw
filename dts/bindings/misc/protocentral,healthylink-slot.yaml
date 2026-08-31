@@ -1,0 +1,53 @@
+# Copyright (c) 2026 ProtoCentral
+# SPDX-License-Identifier: MIT
+
+description: |
+  HealthyPi 6 HealthyLink expansion slot (per-slot physical connector).
+
+  One node per physical module slot (A, B, ...). This binding models only the
+  static, slot-level resources that belong to the connector itself:
+    - the load-switch enable that gates power to the slot,
+    - the load-switch fault indicator,
+    - a reference to the slot's ID EEPROM.
+
+  Module presence and identity are detected SOLELY via the slot's ID EEPROM -
+  there is no dedicated module-present/detect GPIO. Firmware powers the slot,
+  then probes the EEPROM: an I2C ACK means a module is seated, and the EEPROM
+  contents identify the module type.
+
+  The module's *functional* device (e.g. the ADS1299 EEG AFE, an NPU, an
+  FDCAN transceiver) is NOT described here. It is a normal bus child (SPI/I2C)
+  with its own chip binding and `zephyr,deferred-init`, brought up at runtime
+  only after the slot's EEPROM identifies which module is plugged in. This
+  keeps a single firmware image able to auto-detect any module, while the slot
+  node provides the per-slot power/fault that the connector owns.
+
+compatible: "protocentral,healthylink-slot"
+
+include: base.yaml
+
+properties:
+  power-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Load-switch enable that gates power to this slot. Single entry, driven
+      active to power the slot (typically GPIO_ACTIVE_HIGH).
+
+  fault-gpios:
+    type: phandle-array
+    description: |
+      Load-switch fault indicator for this slot. Single entry, asserted by the
+      switch on over-current / thermal fault (typically GPIO_ACTIVE_LOW with a
+      pull-up).
+
+  eeprom:
+    type: phandle
+    description: |
+      Phandle to the I2C ID EEPROM for this slot. This is the slot's detection
+      mechanism: an I2C ACK from the EEPROM means a module is present, and its
+      contents identify the module type. No separate detect GPIO is used.
+
+  slot-label:
+    type: string
+    description: Human-readable slot designator, e.g. "A" or "B".

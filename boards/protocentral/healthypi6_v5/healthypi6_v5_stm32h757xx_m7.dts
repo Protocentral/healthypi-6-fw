@@ -1,0 +1,664 @@
+/*
+ * Copyright (c) 2019 Linaro Limited
+ * Copyright (c) 2025-2026 ProtoCentral
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+#include <st/h7/stm32h757Xi_m7.dtsi>
+#include <st/h7/stm32h757bitx-pinctrl.dtsi>
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include "healthypi6_v5.dtsi"
+
+/*
+ * UART4 RX with an explicit pull-up. The ESP32-C6 is held in reset at boot,
+ * which leaves its TX pin high-Z; an unbiased PI9 then floats at 2 Mbaud and
+ * the receiver latches framing errors in an endless restart loop. A pull-up
+ * makes an undriven line read as UART idle (mark), i.e. silence.
+ */
+&pinctrl {
+	uart4_rx_pi9_pullup: uart4_rx_pi9_pullup {
+		pinmux = <STM32_PINMUX('I', 9, AF8)>;
+		bias-pull-up;
+	};
+
+	/*
+	 * UART4 CTS with a pull-down instead of the HAL default pull-up.
+	 *
+	 * nCTS is ACTIVE LOW. A pull-up reads as "NOT clear to send" whenever
+	 * the far end is not driving -- i.e. while the ESP32-C6 is held in
+	 * reset, is booting, or is depopulated -- and with hw-flow-control that
+	 * stalls the transmitter until every uart_tx() burns its full timeout.
+	 * A pull-down fails the other way: an absent ESP32 reads as "clear to
+	 * send" and bytes go into nothing, the same failure mode as a link with
+	 * no flow control. Callers should still pass a bounded timeout to
+	 * uart_tx().
+	 */
+	uart4_cts_pb0_pulldown: uart4_cts_pb0_pulldown {
+		pinmux = <STM32_PINMUX('B', 0, AF8)>;
+		bias-pull-down;
+	};
+};
+
+/ {
+	model = "HealthyPi 6 v5 STM32H757";
+	compatible = "protocentral,healthypi6_v5";
+
+	/* HW resources are split between CM7 and CM4 */
+	chosen {
+		zephyr,console = &usart1;
+		zephyr,shell-uart = &usart1;
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,flash-controller = &w25q01jv;
+		/* CDC 0 (cdc_acm_uart0) carries the one-way .HP6 sample stream;
+		 * CDC 1 (cdc_acm_uart1) carries MCUmgr SMP request/response. */
+		zephyr,uart-mcumgr = &cdc_acm_uart1;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		blue_led: led_blue {
+			gpios = <&gpioh 9 GPIO_ACTIVE_HIGH>;
+			label = "Blue LED";
+			status = "okay";
+		};
+		green_led: led_green {
+			/* Wired between VDD and PH10, so the pin sinks current
+			 * when driven LOW = LED on. ACTIVE_LOW keeps call sites
+			 * polarity-agnostic. */
+			gpios = <&gpioh 10 GPIO_ACTIVE_LOW>;
+			label = "Green LED";
+			status = "okay";
+		};
+	};
+
+	/* HealthyLink per-slot power/fault/detect are modeled as
+	 * "protocentral,healthylink-slot" nodes (healthylink_slot_a / _b) in
+	 * healthypi6_v5.dtsi, alongside the healthylink controller + EEPROM. */
+
+	/*
+	 * The single user button, on PI3. Active low with an EXTERNAL pull-up --
+	 * so no GPIO_PULL_UP here, or the internal pull would sit in parallel
+	 * with the board's. Polarity matters more than usual: the button map
+	 * puts power-off on a 5 s hold, so a pin that reads permanently asserted
+	 * would shut the device down by itself.
+	 */
+	buttons {
+		compatible = "gpio-keys";
+		user_button: button_user {
+			gpios = <&gpioi 3 GPIO_ACTIVE_LOW>;
+			label = "User button";
+			zephyr,code = <INPUT_KEY_POWER>;
+			status = "okay";
+		};
+	};
+
+	aliases {
+		blue-led = &blue_led;
+		green-led = &green_led;
+		sw0 = &user_button;
+		/* Zephyr MCUmgr's os/datetime handler looks up the RTC via
+		 * DT_ALIAS(rtc). Without this alias, datetime_get/set return
+		 * ENOENT from the stock handler. */
+		rtc = &rtc;
+	};
+
+	/* Expansion-connector analog inputs. Nothing in the app reads these
+	 * channels today (PA4-PA7 carry SPI1 instead). */
+	zephyr,user {
+		/* PC5 is NOT here -- it is the charger's PGOOD input below, and
+		 * ANALOG mode would break the GPIO read on it. */
+		io-channels = <&adc1 4>,   /* PC4 - INP4 */
+		              <&adc1 10>,  /* PC0 - INP10 */
+		              <&adc1 11>,  /* PC1 - INP11 */
+		              <&adc1 14>,  /* PA2 - INP14 */
+		              <&adc1 15>,  /* PA3 - INP15 */
+		              <&adc1 17>;  /* PA1 - INP17 */
+		io-channel-names = "PC4", "PC0", "PC1",
+		                   "PA2", "PA3", "PA1";
+
+		/*
+		 * BQ24074 charger status. Both are OPEN-DRAIN, ACTIVE LOW, and the
+		 * part has no register interface at all -- these two pins are the
+		 * only thing it tells the MCU.
+		 *
+		 *   CHG   (PC7) low  = a charge cycle is in progress
+		 *   PGOOD (PC5) low  = a valid input supply is present
+		 *
+		 * Pull-ups requested here so the read is defined whether or not the
+		 * board fits external ones; an internal pull in parallel with an
+		 * external one is harmless.
+		 *
+		 * Charge CURRENT is not adjustable from firmware: it is set by
+		 * R_ISET, and the input ceiling by EN1/EN2, which are hard-strapped
+		 * on this board. See power_service.c.
+		 */
+		chg-gpios   = <&gpioc 7 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		pgood-gpios = <&gpioc 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+	};
+
+	/* W9825G6KH SDRAM: 4M x 4 banks x 16 bits = 32 Megabytes
+	 * Single chip connected to FMC SDRAM Bank 0 (SDNE0/SDCKE0)
+	 * Address range: 0xC0000000 - 0xC1FFFFFF (32 MB)
+	 */
+	sdram1: sdram@c0000000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		device_type = "memory";
+		reg = <0xc0000000 DT_SIZE_M(32)>;  /* Full 32 MB of W9825G6KH */
+		zephyr,memory-region = "SDRAM1";
+		zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM) )>;
+	};
+
+	ext_memory: memory@90000000 {
+		compatible = "zephyr,memory-region";
+		reg = <0x90000000 DT_SIZE_M(128)>; /* 1 Gbit */
+		zephyr,memory-region = "EXTMEM";
+		/* ATTR_MPU_EXTMEM causes an MPU fault here; IO works. */
+		zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_IO) )>;
+	};
+
+	// IPC between CM7 and CM4 - OpenAMP/RPMSG Implementation
+	// OpenAMP manages memory internally with static VRINGs (no dynamic allocation)
+	sram_ipc: memory@38000000 {
+		 zephyr,memory-region = "SRAM_IPC";
+		 compatible = "zephyr,memory-region", "mmio-sram";
+		 reg = <0x38000000 0x10000>;  // 64 KB total (full SRAM4)
+		 zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE) )>;
+	 };
+
+	ipc0: ipc0 {
+		compatible = "zephyr,ipc-openamp-static-vrings";
+		memory-region = <&sram_ipc>;
+		mboxes = <&mailbox 11>, <&mailbox 10>;
+		mbox-names = "tx", "rx";
+		role = "host";  // M7 is OpenAMP host, M4 is remote
+		zephyr,buffer-size = <512>;  // Match largest message (ECG: 452 bytes)
+		status = "okay";
+	};
+};
+
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(25)>;
+	status = "okay";
+};
+
+/* LSE 32.768 kHz crystal for RTC - battery-backed via VBAT pin */
+&clk_lse {
+	status = "okay";
+	driving-capability = <3>;
+};
+
+&clk_hsi48 {
+	status = "okay";
+};
+
+/* PLL1: 25 MHz / 5 = 5 MHz input × 160 = 800 MHz VCO
+ *   P = 800/2 = 400 MHz (SYSCLK)
+ *   Q = 800/4 = 200 MHz
+ *   R = 800/2 = 400 MHz
+ */
+&pll {
+	div-m = <5>;
+	mul-n = <160>;
+	div-p = <2>;
+	div-q = <4>;
+	div-r = <2>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+/* PLL2: 25 MHz / 5 = 5 MHz input × 96 = 480 MHz VCO
+ *   R = 480/10 = 48 MHz (SDMMC clock)
+ */
+&pll2 {
+	div-m = <5>;
+	mul-n = <96>;
+	div-p = <2>;
+	div-q = <4>;
+	div-r = <10>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(400)>;
+};
+
+&usart1 {
+	status = "okay";
+};
+
+&usart2 {
+	status = "okay";
+};
+
+&spi1 {
+	status = "okay";
+	pinctrl-0 = <&spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
+
+	ads129xx: ads129xx@0 {
+		compatible = "ti,ads129xx";
+		reg = <0x00>;
+		spi-max-frequency = <DT_FREQ_M(2)>;
+
+		pwdn-gpios = <&gpioi 11 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpioi 7 GPIO_ACTIVE_HIGH>;
+		drdy-gpios = <&gpioi 15 GPIO_ACTIVE_LOW>;
+		start-gpios = <&gpioi 10 GPIO_ACTIVE_HIGH>;
+
+		gain = <6>;
+
+		status = "okay";
+	};
+};
+
+/* DMA controllers + mux (used by UART4). */
+&dma1 {
+	status = "okay";
+};
+
+&dma2 {
+	status = "okay";
+};
+
+&dmamux1 {
+	status = "okay";
+};
+
+/*
+ * SPI2 is unused: the ESP32-C6 link runs on UART4 (below). The pins --
+ * PB10/PC2_C/PC3_C/PB12 plus PB1 and PB13 -- are still routed to the C6 but no
+ * longer driven; left disabled rather than deleted so the wiring stays
+ * documented.
+ */
+&spi2 {
+	status = "disabled";
+};
+
+&spi3 {
+	status = "okay";
+	pinctrl-0 = <&spi3_sck_pb3 &spi3_miso_pb4 &spi3_mosi_pb2>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpiob 8 GPIO_ACTIVE_LOW>;
+
+	afe4400: afe4400@0 {
+		label = "AFE4400";
+		status = "okay";
+		compatible = "ti,afe4400";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(4)>;
+		drdy-gpios = <&gpiob 9 GPIO_ACTIVE_LOW>;
+		pwdn-gpios = <&gpioc 13 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpiob 5 GPIO_ACTIVE_LOW>;
+	};
+};
+
+/*
+ * UART4 -- the ESP32-C6 host link, with hardware flow control.
+ *
+ *   M7 pin  function          dir      C6 GPIO   C6 function
+ *   ------  ----------------  -------  -------   -----------
+ *   PA0     uart4_tx_pa0      M7 -> C6    22     RX
+ *   PI9     uart4_rx_pi9      C6 -> M7    19     TX
+ *   PA15    uart4_rts_pa15    M7 -> C6    21     CTS
+ *   PB0     uart4_cts_pb0     C6 -> M7    20     RTS
+ *
+ * Note the crossover: the M7's TX is the C6's RX and the M7's RTS drives the
+ * C6's CTS.
+ *
+ * DMA is required at this rate -- byte interrupts would cost ~200k IRQ/s at
+ * 2 Mbaud. UART4's DMAMUX requests are TX = 64, RX = 63; the dmas property is
+ * inert until CONFIG_UART_ASYNC_API is enabled.
+ */
+&uart4 {
+	status = "okay";
+	pinctrl-0 = <&uart4_tx_pa0 &uart4_rx_pi9_pullup
+		     &uart4_rts_pa15 &uart4_cts_pb0_pulldown>;
+	pinctrl-names = "default";
+	/*
+	 * 2 Mbaud -- an exact divisor at both ends, so there is no baud error to
+	 * chase: STM32 PCLK1 100 MHz / 50, ESP32-C6 PLL_F80M 80 MHz / 40.
+	 *
+	 * MUST match CONFIG_HB_UART_BAUD_HP6 on the ESP32-C6. A mismatch is not
+	 * a graceful failure -- it is framing errors that look like bad wiring.
+	 */
+	current-speed = <2000000>;
+	hw-flow-control;
+	fifo-enable;
+
+	dmas = <&dmamux1 2 64 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+	       <&dmamux1 3 63 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+	dma-names = "tx", "rx";
+
+	healthybridge_esp32_uart: healthybridge-esp32-uart {
+		compatible = "protocentral,healthybridge-esp32-uart";
+		status = "okay";
+
+		/* ESP32-C6 reset, PA11, active low. */
+		reset-gpios = <&gpioa 11 GPIO_ACTIVE_LOW>;
+	};
+};
+
+&i2c1 {
+	status = "okay";
+	compatible = "st,stm32-i2c-v2";
+	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	sq-size = <1024>;
+	cq-size = <1024>;
+};
+
+&i2c2 {
+	status = "okay";
+	pinctrl-0 = <&i2c2_scl_ph4 &i2c2_sda_pb11>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+
+	max17048: max17048@36 {
+		compatible = "maxim,max17048";
+		status = "okay";
+		reg = <0x36>;
+	};
+
+	/* ams AS6221 digital temperature sensor. Driven by Zephyr's tmp108
+	 * driver, which covers the TI TMP108 and the ams AS621x/AS6221 --
+	 * CONFIG_TMP108 turns itself on from this compatible.
+	 *
+	 * v5 ONLY. v2/v3/v4 keep their maxim,max30205 nodes -- those boards
+	 * carry the Maxim part, and pointing them at ams would be worse than
+	 * leaving them: the MAX30205 node was inert (no driver existed for it
+	 * anywhere in the tree), whereas this compatible pulls in a real driver
+	 * that writes a config register at init and would fail on the wrong
+	 * silicon.
+	 *
+	 * The address is carried over unchanged from the node this replaced.
+	 * CONFIRM 0x49 against the schematic -- it is set by the AS6221's ADDR
+	 * pin strapping, a different pin on a different part. Nothing answered
+	 * at 0x49 on the bench unit (2026-08-31): a full 7-bit scan of i2c2
+	 * found only 0x36 (MAX17048) and 0x69 (BMI323), and i2c1 was empty, so
+	 * no temperature sensor is fitted on that particular board. */
+	as6221: as6221@49 {
+		compatible = "ams,as6221";
+		status = "okay";
+		reg = <0x49>;
+	};
+
+	/* Bosch BMI323 6-axis IMU. SDO is strapped high on v4, so the
+	 * 7-bit address is 0x69. Uses the local I2C fork of the upstream
+	 * (SPI-only) bosch,bmi323 driver.
+	 */
+	bmi323: imu@69 {
+		compatible = "protocentral,bmi323-i2c";
+		status = "okay";
+		reg = <0x69>;
+	};
+};
+
+&flash0 {
+	/* H757 = 2 x 1 MB banks. Without this, the flash driver derives the part
+	 * size from this node alone (1 MB), believes the part has a bank
+	 * "discontinuity" at 512 KB, and rejects every access in the upper half
+	 * of bank 1 -- which breaks MCUboot's slot0 trailer reads. */
+	bank2-flash-size = <1024>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Set 2KB of storage at the end of first 1MB flash */
+		storage_partition: partition@ff800 {
+			label = "storage";
+			reg = <0x000ff800 DT_SIZE_K(2)>;
+		};
+	};
+};
+
+&rng {
+	status = "okay";
+};
+
+/* FMC Configuration for W9825G6KH SDRAM (32 MB) */
+&fmc {
+	status = "okay";
+	pinctrl-0 = <&fmc_nbl0_pe0 &fmc_nbl1_pe1
+	&fmc_sdclk_pg8 &fmc_sdnwe_ph5 &fmc_sdcke0_ph2
+	&fmc_sdne0_ph3 &fmc_sdnras_pf11 &fmc_sdncas_pg15
+
+	&fmc_a0_pf0 &fmc_a1_pf1 &fmc_a2_pf2 &fmc_a3_pf3 &fmc_a4_pf4
+	&fmc_a5_pf5 &fmc_a6_pf12 &fmc_a7_pf13 &fmc_a8_pf14
+	&fmc_a9_pf15 &fmc_a10_pg0 &fmc_a11_pg1 &fmc_a12_pg2
+	/* BA0 */ &fmc_a14_pg4 /*BA1 */ &fmc_a15_pg5
+
+	&fmc_d0_pd14 &fmc_d1_pd15 &fmc_d2_pd0 &fmc_d3_pd1
+	&fmc_d4_pe7 &fmc_d5_pe8 &fmc_d6_pe9 &fmc_d7_pe10
+	&fmc_d8_pe11 &fmc_d9_pe12 &fmc_d10_pe13 &fmc_d11_pe14
+	&fmc_d12_pe15 &fmc_d13_pd8 &fmc_d14_pd9 &fmc_d15_pd10>;
+	pinctrl-names = "default";
+
+	sdram {
+		status = "okay";
+
+		power-up-delay = <100>;
+		num-auto-refresh = <8>;
+		mode-register = <0x220>;
+		refresh-rate = <603>;
+
+		/* W9825G6KH on FMC Bank 0 (SDNE0/SDCKE0) @ 0xC0000000 */
+		bank@0 {
+			reg = <0>;
+			st,sdram-control = <STM32_FMC_SDRAM_NC_9
+			STM32_FMC_SDRAM_NR_13
+			STM32_FMC_SDRAM_MWID_16
+			STM32_FMC_SDRAM_NB_4
+			STM32_FMC_SDRAM_CAS_2
+			STM32_FMC_SDRAM_SDCLK_PERIOD_2
+			STM32_FMC_SDRAM_RBURST_ENABLE
+			STM32_FMC_SDRAM_RPIPE_0>;
+			st,sdram-timing = <2 6 4 6 2 2 2>;
+		};
+	};
+};
+
+&sdmmc1 {
+	status = "okay";
+	clocks = <&rcc STM32_CLOCK_BUS_AHB3 0x00010000>,
+	         <&rcc STM32_SRC_PLL2_R SDMMC_SEL(1)>;
+	pinctrl-0 = <&sdmmc1_d0_pc8 &sdmmc1_d1_pc9
+	&sdmmc1_d2_pc10 &sdmmc1_d3_pc11
+	&sdmmc1_ck_pc12 &sdmmc1_cmd_pd2>;
+	bus-width = <4>;
+	disk-name = "SD";
+	pinctrl-names = "default";
+	/* No card-detect line -- the card is probed at boot only. */
+};
+
+zephyr_udc0: &usbotg_hs {
+	status = "okay";
+	pinctrl-0 = <&usb_otg_hs_dm_pb14 &usb_otg_hs_dp_pb15>;
+	pinctrl-names = "default";
+	/* CDC 0 -- one-way .HP6 sample stream (device -> host). */
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+	/* CDC 1 -- MCUmgr SMP control pipe (bidirectional); bound to
+	 * zephyr,uart-mcumgr in the `chosen` node above. */
+	cdc_acm_uart1: cdc_acm_uart1 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+&mailbox {
+	status = "okay";
+};
+
+&backup_sram{
+	status = "okay";
+};
+
+/* RTC - Real-Time Clock with battery backup */
+&rtc {
+	status = "okay";
+	clocks = <&rcc STM32_CLOCK_BUS_APB4 0x00010000>,
+	         <&rcc STM32_SRC_LSE RTC_SEL(1)>;
+};
+
+/*
+ * QUADSPI -- W25Q01JV in full quad (4-bit) mode; IO2/IO3 are on PF7/PF6, so
+ * there is no PE2 conflict with SPI4. Quad reads are ~4x dual.
+ *
+ * writeoc MUST stay PP_1_1_4: the W25Q01JV does not implement the default
+ * PP_1_4_4 (0x38) opcode, and writes through it are corrupted.
+ */
+&quadspi {
+	pinctrl-0 = <&quadspi_clk_pf10 &quadspi_bk1_ncs_pg6
+	&quadspi_bk1_io0_pf8 &quadspi_bk1_io1_pf9
+	&quadspi_bk1_io2_pf7 &quadspi_bk1_io3_pf6>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	w25q01jv: qspi-nor-flash-1@90000000 {
+		compatible = "st,stm32-qspi-nor";
+		reg = <0x90000000>;
+		size = <1073741824>; /* 128 MBytes */
+		qspi-max-frequency = <48000000>;
+		spi-bus-width = <4>;
+		quad-enable-requirements = "S2B1v1";
+		writeoc = "PP_1_1_4";
+		status = "okay";
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/* XIP (Execute In Place) partition - 56MB for code/assets */
+			xip_partition: partition@0 {
+				label = "xip";
+				reg = <0x0 DT_SIZE_M(56)>;
+			};
+
+			/* Model storage - 8 MB, XIP-addressable */
+			model_partition: partition@3800000 {
+				label = "tflite_model";
+				reg = <0x3800000 DT_SIZE_M(8)>;
+			};
+
+			/* LittleFS storage - 64 MB */
+			lfs_partition: partition@4000000 {
+				label = "lfs_storage";
+				reg = <0x4000000 DT_SIZE_M(64)>;
+			};
+		};
+	};
+};
+
+/* alias used by display shields with touch control */
+qsh_030_i2c: &i2c4 {
+	pinctrl-0 = <&i2c4_scl_pd12 &i2c4_sda_pd13>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	status = "okay";
+};
+
+/* aliases used by display configuration */
+zephyr_mipi_dsi: &mipi_dsi {};
+zephyr_lcd_controller: &ltdc {};
+
+/* SRAM2 - Non-cached memory for DMA buffers */
+&sram2 {
+	status = "okay";
+	zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE) )>;
+};
+
+/* Internal ADC1 -- expansion analog inputs: PA1-PA3, PC0, PC1, PC4.
+ * PA4-PA7 carry SPI1; PC5 is the charger PGOOD.
+ */
+&adc1 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/* No adc1_inp8_pc5: PC5 is the charger PGOOD input, and analog mode
+	 * would pin its GPIO read to one value. */
+	pinctrl-0 = <&adc1_inp4_pc4
+	             &adc1_inp10_pc0 &adc1_inp11_pc1 &adc1_inp14_pa2 &adc1_inp15_pa3
+	             &adc1_inp17_pa1>;
+	pinctrl-names = "default";
+
+	/* ADC clock configuration for STM32H7 - use synchronous bus clock */
+	st,adc-clock-source = "SYNC";
+	st,adc-prescaler = <4>;
+
+	/* PC4 - ADC1_INP4 */
+	channel@4 {
+		reg = <4>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PC0 - ADC1_INP10 */
+	channel@a {
+		reg = <10>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PC1 - ADC1_INP11 */
+	channel@b {
+		reg = <11>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PA2 - ADC1_INP14 */
+	channel@e {
+		reg = <14>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PA3 - ADC1_INP15 */
+	channel@f {
+		reg = <15>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PA1 - ADC1_INP17 */
+	channel@11 {
+		reg = <17>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+};
+
+/* v5 power supply: LDO-only (the SMPS path is not populated on this board).
+ *
+ * "ldo" needs no smps-output-voltage property. Do NOT use "smps-ldo" or
+ * "smps-direct" here -- with no SMPS inductor/filter fitted, any SMPS mode
+ * collapses Vcore and deadlocks the part during boot (no debug, no reprogram).
+ */
+&pwr {
+	power-supply = "ldo";
+};

@@ -1,0 +1,18 @@
+identifier: healthypi6_v4/stm32h757xx/m7
+name: HealthyPi 6 v4 (M7)
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+ram: 512
+flash: 1024
+supported:
+  - arduino_gpio
+  - gpio
+  - arduino_spi
+  - spi
+  - qspi
+  - memc
+  - usb_device
+vendor: protocentral

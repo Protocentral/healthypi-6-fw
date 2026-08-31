@@ -1,0 +1,17 @@
+/*
+ * Device tree overlay for M4 core - External Memory Access
+ *
+ * NOTE: MPU is disabled (CONFIG_ARM_MPU=n) so memory-attr properties
+ * are removed to avoid potential issues during early boot.
+ *
+ * SDRAM1 is initialized by M7 before M4 accesses it
+ * (handled by M4's 7-second boot delay in main.c).
+ *
+ * Memory regions defined in base DTS:
+ * - SDRAM1 @ 0xC0000000 (32MB) - W9825G6KH chip, shared M7/M4
+ * - QSPI @ 0x90000000 (128MB) - not defined here, accessed via raw pointers
+ *
+ * NOTE: There is NO SDRAM2. FMC Bank 1 (0xD0000000) is not connected.
+ */
+
+/* Currently empty - using base DTS memory region definitions only */

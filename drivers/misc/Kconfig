@@ -1,0 +1,10 @@
+# Copyright (c) 2025 ProtoCentral Electronics
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Miscellaneous Drivers"
+
+rsource "healthybridge_esp32/Kconfig.healthybridge_esp32"
+rsource "healthylink/Kconfig"
+rsource "mp2696/Kconfig"
+
+endmenu

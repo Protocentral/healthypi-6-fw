@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config GC9503V_DSI
+	bool "GC9503V_DSI display driver"
+	default y
+	depends on DT_HAS_GALAXYCORE_GC9503V_DSI_ENABLED
+	select MIPI_DSI
+	help
+	  Enable driver for GC9503V MIPI-DSI display controller.
+
+if GC9503V_DSI
+
+config DISPLAY_GC9503V_DSI_INIT_PRIORITY
+	int "Initialization priority"
+	default 90
+	help
+	  GC9503V_DSI display driver initialization priority.
+
+endif

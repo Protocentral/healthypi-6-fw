@@ -1,0 +1,9 @@
+# HealthyPi 6 v3 board configuration
+
+# Copyright (c) 2019 Linaro Limited
+# Copyright (c) 2026 ProtoCentral
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_HEALTHYPI6_V3
+
+endif # BOARD_HEALTHYPI6_V3

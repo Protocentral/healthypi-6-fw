@@ -1,0 +1,47 @@
+# Copyright (c) 2021 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+manifest:
+  # No `self: west-commands:` here on purpose. It used to point at
+  # scripts/west-commands.yml, which does not exist and never did — this project
+  # ships no custom west commands, only plain shell scripts. west tolerates the
+  # dangling path silently, so it survived unnoticed; it is removed rather than
+  # satisfied because a public manifest should not reference a missing file.
+  # (Audited 2026-07-25.)
+
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+    - name: protocentral
+      url-base: https://github.com/Protocentral
+
+  # Kept available so an allowlisted module that lives in Zephyr's `optional`
+  # group can still be resolved. `name-allowlist` below is what actually decides
+  # which modules are cloned.
+  group-filter: [+optional]
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.4-branch
+      import:
+        # By using name-allowlist we can clone only the modules that are
+        # strictly needed by the application.
+        name-allowlist:
+          - cmsis-dsp  # M4 algorithms: FFT for HRV, stats, fastmath
+          - cmsis      # required by the ARM port
+          - cmsis_6
+          - hal_st
+          - hal_stm32
+          - littlefs
+          - lvgl
+          - mcuboot
+          - zcbor
+          - tinycrypt
+          - fatfs
+          - libmetal    # Required by OpenAMP
+          - open-amp    # Required for OpenAMP/RPMSG IPC backend
+          - mbedtls
+          - tf-psa-crypto  # Required by mbedtls (added for MCUboot/NPU production build)
+          - picolibc
+          - hal_espressif

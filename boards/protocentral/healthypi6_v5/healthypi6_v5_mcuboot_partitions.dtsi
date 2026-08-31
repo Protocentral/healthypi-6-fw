@@ -1,0 +1,88 @@
+/*
+ * MCUboot partition map for healthypi6_v5 (M7) — SIGNED flavor only.
+ *
+ * Included by healthypi6_v5_mcuboot_boot.overlay (MCUboot image) and
+ * healthypi6_v5_mcuboot_app.overlay (app_m7 image), both passed explicitly by
+ * scripts/build.sh signed. Default builds (scripts/build.sh m7) never see this
+ * file, so the shipping dev DTS is byte-for-byte unchanged.
+ *
+ * Layout:
+ *
+ *   flash0 (internal bank1, 1 MB, 128 KB sectors)
+ *     0x000000  boot_partition   128 KB  MCUboot (1 sector)
+ *     0x020000  slot0_partition  896 KB  M7 primary (7 sectors, XIP)
+ *
+ *   w25q01jv (QSPI NOR, 128 MB, 4 KB sectors)
+ *     0x000000  slot1_partition      896 KB  M7 secondary (upload staging)
+ *     0x100000  m4_staging_partition 384 KB  M4 update staging (NOT an MCUboot slot)
+ *
+ *   bank2 (0x0810_0000, 1 MB) is the M4's execution region. It is deliberately
+ *   NOT a partition here — the M4 is not an MCUboot image; see below.
+ *     0x200000  xip_partition    54 MB  was 56 MB @ 0x0 (shifted +2 MB)
+ *     0x3800000 model_partition  8 MB   unchanged (inherited)
+ *     0x4000000 lfs_partition    64 MB  unchanged (inherited)
+ *
+ * The old 2 KB storage_partition (flash0 @ 0xff800) is deleted — it is
+ * unreferenced by the app (settings live on /lfs) and sits inside slot0.
+ */
+
+/delete-node/ &storage_partition;
+/delete-node/ &xip_partition;
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x0 DT_SIZE_K(128)>;
+			read-only;
+		};
+
+		slot0_partition: partition@20000 {
+			label = "image-0";
+			reg = <0x20000 DT_SIZE_K(896)>;
+		};
+
+	};
+};
+
+&w25q01jv {
+	partitions {
+		/* MUST equal slot0's size: mcuboot's boot_slots_compatible() walks
+		 * primary/secondary sectors in lockstep and rejects a secondary
+		 * larger than the primary ("slots have non-compatible sectors").
+		 * 896 KB is 224 whole 4 KB QSPI sectors. The 0xE0000-0x100000 gap
+		 * stays reserved so the staging region keeps its 1 MB-aligned base. */
+		slot1_partition: partition@0 {
+			label = "image-1";
+			reg = <0x0 DT_SIZE_K(896)>;
+		};
+
+		/*
+		 * M4 update staging — NOT an MCUboot slot.
+		 *
+		 * The M4 is not an MCUboot image. Making it one is not possible on this
+		 * part: its reset vector comes from the BOOT_CM4_ADD0 option byte, which
+		 * encodes address>>16 and so has 64 KB granularity, while bank 2 erases in
+		 * 128 KB sectors. Together those force any MCUboot header to be a multiple
+		 * of 64 KB — but image_header.ih_hdr_size is uint16_t, capping it at
+		 * 65535. Short by one byte, with no slot base that fixes it.
+		 *
+		 * So the M4 stays unsigned at the bank-2 base with BCM4=1, and the M7 owns
+		 * its update: receive into this region, verify, then erase/write bank 2.
+		 * 384 KB against a ~160 KB image leaves room for the image plus metadata.
+		 */
+		m4_staging_partition: partition@100000 {
+			label = "m4-staging";
+			reg = <0x100000 DT_SIZE_K(384)>;
+		};
+
+		xip_partition: partition@200000 {
+			label = "xip";
+			reg = <0x200000 DT_SIZE_M(54)>;
+		};
+	};
+};

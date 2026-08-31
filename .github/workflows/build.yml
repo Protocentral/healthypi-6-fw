@@ -1,0 +1,222 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Everything runs against healthypi6_v5, the default board, through the same
+# scripts a developer uses. CI that builds a different board with a hand-written
+# `west build` line stops catching the things the scripts encode (conf
+# fragments, DT overlays, the signed layer) — which is exactly what happened
+# before: this workflow built healthypi6_v2 and never touched the signed flavor.
+jobs:
+  layer-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce the M7 layer rule (core/ & healthylink/ include no consumers)
+        run: bash tools/ci/check_layer_deps.sh
+
+  healthybridge-codec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The codec is pure C and the ESP32 has a byte-identical copy of the wire
+      # contract. A one-byte drift here is not a build failure and not a wire
+      # failure — the far end sync-hunts and mis-decodes silently — so pin it.
+      - name: HealthyBridge frame codec matches the shipping wire format
+        run: |
+          cc -std=c11 -Wall -Wextra -Wno-unused-parameter \
+             -I drivers/misc/healthybridge_esp32 \
+             drivers/misc/healthybridge_esp32/test_codec.c \
+             drivers/misc/healthybridge_esp32/healthybridge_esp32_codec.c \
+             -o /tmp/hb_codec_test
+          /tmp/hb_codec_test
+
+  no-private-keys:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No signing key may ever be committed
+        run: |
+          # Losing control of the release key means shipped units can no longer
+          # be updated over any non-SWD path. keys/.gitignore is the first line
+          # of defence; this is the second.
+          if git ls-files | grep -E '\.(pem|key|p12|pfx)$'; then
+            echo "::error::a private key is tracked in git — see keys/README.md"
+            exit 1
+          fi
+          echo "no tracked key material."
+
+  build:
+    needs: [layer-check, no-private-keys]
+    runs-on: ubuntu-latest
+    # NOT a job-level `container:`. This used to run in zephyrprojectrtos/ci,
+    # and every run from 2026-07-27 onwards died before a single step with
+    #   failed to register layer: ... no space left on device
+    # That image does not fit the runner's disk. A job-level container is pulled
+    # BEFORE any step, so no amount of cleanup inside the job can help -- the
+    # only fix is not to use one. Installing the SDK directly costs ~164 MB of
+    # downloads (67 MB minimal SDK + 97 MB arm-zephyr-eabi) against a multi-GB
+    # image, and pulls only the one toolchain this project targets.
+    env:
+      ZEPHYR_SDK_VERSION: "1.0.0"
+    steps:
+      - name: Reclaim runner disk
+        # The west workspace plus three build trees is several GB. The runner
+        # ships ~25 GB of toolchains this build never uses.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          path: healthypi-6-fw
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gperf ccache dfu-util device-tree-compiler \
+            wget xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
+          pip install west
+
+      - name: Initialize the west workspace
+        working-directory: healthypi-6-fw
+        run: |
+          west init -l .
+          west update --narrow -o=--depth=1
+          west zephyr-export
+          # imgtool lives here, and the signed build cannot sign without it.
+          pip install -r ../zephyr/scripts/requirements-base.txt
+          pip install imgtool
+
+      - name: Install the Zephyr SDK (arm-zephyr-eabi only)
+        run: |
+          cd "$HOME"
+          base="https://github.com/zephyrproject-rtos/sdk-ng/releases/download"
+          wget -q "${base}/v${ZEPHYR_SDK_VERSION}/zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-x86_64_minimal.tar.xz"
+          tar xf "zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-x86_64_minimal.tar.xz"
+          rm "zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-x86_64_minimal.tar.xz"
+          # -t installs one toolchain; -c registers the SDK with CMake.
+          "zephyr-sdk-${ZEPHYR_SDK_VERSION}/setup.sh" -t arm-zephyr-eabi -c
+          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-${ZEPHYR_SDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build M7 (dev flavor + display)
+        working-directory: healthypi-6-fw
+        run: scripts/build.sh m7 dev
+
+      - name: Build M4
+        working-directory: healthypi-6-fw
+        run: scripts/build.sh m4
+
+
+      - name: Build the SIGNED flavor (MCUboot + serial recovery + M4 update)
+        working-directory: healthypi-6-fw
+        # This is the layer that actually ships, and it is the one that breaks:
+        # it pulls in MCUboot, the retention/boot-mode DT, the M4 signing-key
+        # generation and the img group. A green dev build says nothing about it.
+        run: scripts/build.sh signed prod
+
+      - name: Assert the signed build is fit to ship
+        working-directory: healthypi-6-fw
+        # This used to tolerate a failure on the USB VID while the image still
+        # carried a development one. It now carries the pid.codes VID (0x1209)
+        # and the check passes outright, so the exemption is gone -- a
+        # shippability violation fails the build. The PID remains provisional
+        # until the pid.codes allocation is confirmed; the check warns about
+        # that without failing.
+        run: bash tools/ci/check_prod_surface.sh --release build/m7s
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: healthypi6-firmware
+          path: |
+            healthypi-6-fw/build/m7/zephyr/zephyr.bin
+            healthypi-6-fw/build/m4/zephyr/zephyr.bin
+            healthypi-6-fw/build/m7s/app_m7/zephyr/zephyr.signed.bin
+            healthypi-6-fw/build/m7s/mcuboot/zephyr/zephyr.bin
+
+  host-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install host-tool deps
+        # Installed through the packages' own extras, NOT a hand-written list.
+        # The hand-written one said `pip install smpclient`, which does not pull
+        # pyserial -- that lives behind smpclient's `serial` extra -- so
+        # healthypi.transport.serial_smp failed to import and this job failed on
+        # every run from 2026-07-27 to 2026-08-03. pyproject.toml is the single
+        # source of truth for dependencies, the same way catalog.py is for the
+        # group-64 surface.
+        run: |
+          pip install -e tools/smpgroup -e "tools/healthypi[device,dev]"
+      - name: Host tool test suites
+        # No device needed. The catalog drift tests re-parse the firmware's own
+        # MCUmgr sources, so a device-side command or reply-field change fails
+        # here rather than at a customer's bench.
+        run: |
+          pytest -q tools/smpgroup/tests
+          pytest -q tools/healthypi/tests
+      - name: Smoke-test the host tooling
+        # Catches import errors in the tools people run against shipped
+        # hardware. Every verb group that can be started without a device
+        # belongs here -- the loose scripts these replaced once broke because a
+        # refactor moved a symbol they imported and nothing noticed.
+        run: |
+          python tools/build/gen_m4_pubkey.py --help > /dev/null
+          healthypi --version > /dev/null
+          healthypi catalog > /dev/null
+          for verb in hp6 device stream record transfer wifi module diag lock fw hl test; do
+            healthypi "$verb" --help > /dev/null
+          done
+          healthypi fw bundle create --help > /dev/null
+          healthypi hl eeprom generate --help > /dev/null
+          healthypi test list > /dev/null
+
+      - name: End-to-end bundle create -> verify -> reject
+        # release.sh calls exactly this path, and a bundle that verifies when it
+        # should not is how a wrong image reaches flash.
+        run: |
+          python - <<'EOF'
+          import subprocess, sys, tempfile, zipfile, json
+          from pathlib import Path
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric import ec
+          tmp = Path(tempfile.mkdtemp())
+          key = tmp / "k.pem"
+          k = ec.generate_private_key(ec.SECP256R1())
+          key.write_bytes(k.private_bytes(serialization.Encoding.PEM,
+              serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+          (tmp / "m7.bin").write_bytes(b"\xa5" * 4096)
+          (tmp / "m4.bin").write_bytes(b"\x5a" * 2048)
+          out = tmp / "t.hpifw"
+          subprocess.run(["healthypi", "fw", "bundle", "create", str(out),
+              "--m7", str(tmp/"m7.bin"), "--m7-version", "1.0.0",
+              "--m4", str(tmp/"m4.bin"), "--m4-version", "1.0.0",
+              "--release", "1.0.0", "--key", str(key),
+              "--created", "2026-01-01T00:00:00Z"], check=True)
+          subprocess.run(["healthypi", "fw", "info", "--bundle", str(out),
+                          "--pubkey", str(key)], check=True)
+          # a tampered payload must fail, with a non-zero exit
+          zf = zipfile.ZipFile(out)
+          members = {n: zf.read(n) for n in zf.namelist()}
+          members["m4.bin"] = b"\x00" * 2048
+          bad = tmp / "bad.hpifw"
+          with zipfile.ZipFile(bad, "w", zipfile.ZIP_DEFLATED) as z:
+              for n, b in members.items(): z.writestr(n, b)
+          r = subprocess.run(["healthypi", "fw", "info", "--bundle", str(bad),
+                              "--pubkey", str(key)])
+          sys.exit(0 if r.returncode != 0 else "tampered bundle was ACCEPTED")
+          EOF

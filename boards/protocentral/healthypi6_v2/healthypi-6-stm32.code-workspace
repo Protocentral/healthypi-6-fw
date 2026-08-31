@@ -1,0 +1,23 @@
+{
+	"folders": [
+		{
+			"path": "../../.."
+		},
+		{
+			"path": "../../../app_esp32c6_esp_idf"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"app_version.h": "c",
+			"hpi_common_types.h": "c",
+			"sampling_module.h": "c",
+			"typeinfo": "c",
+			"hpi6_ui.h": "c",
+			"array": "cpp",
+			"string": "cpp",
+			"string_view": "cpp",
+			"vector": "cpp"
+		}
+	}
+}

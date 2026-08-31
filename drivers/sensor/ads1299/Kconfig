@@ -1,0 +1,42 @@
+# Texas Instruments ADS1299 8-Channel EEG AFE Driver
+# Copyright (c) 2025 ProtoCentral Electronics
+# SPDX-License-Identifier: Apache-2.0
+
+config SENSOR_ADS1299
+	bool "ADS1299 8-Channel EEG Analog Front-End"
+	default y
+	depends on SPI
+	depends on GPIO
+	help
+	  Enable driver for the Texas Instruments ADS1299 8-channel, 24-bit
+	  analog front-end designed for EEG and biopotential measurements.
+
+	  The ADS1299 features:
+	  - 8 differential input channels
+	  - 24-bit resolution with low noise (< 1 µVpp at gain=24)
+	  - Programmable gain: 1, 2, 4, 6, 8, 12, 24
+	  - Sample rates: 250 to 16000 SPS
+	  - BIAS drive circuit for patient reference
+	  - SRB1/SRB2 reference routing for EEG montages
+
+	  This driver is separate from ADS129xx (ECG) due to EEG-specific
+	  features and different gain mapping.
+
+if SENSOR_ADS1299
+
+config SENSOR_ADS1299_INIT_PRIORITY
+	int "ADS1299 initialization priority"
+	default 80
+	help
+	  ADS1299 device driver initialization priority.
+	  Should be after SPI (default 50) but before application code.
+
+config SENSOR_ADS1299_TRIGGER
+	bool "Enable ADS1299 DRDY trigger support"
+	default y
+	help
+	  Enable DRDY (Data Ready) interrupt trigger support.
+	  When enabled, the driver uses GPIO interrupts to signal
+	  when new sample data is available.
+
+endif # SENSOR_ADS1299

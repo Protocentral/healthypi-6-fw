@@ -1,0 +1,38 @@
+# Configuration options for TI ADS129x family ADCs
+# Copyright (c) 2025 ProtoCentral Electronics
+# SPDX-License-Identifier: Apache-2.0
+
+config SENSOR_ADS129XX
+	bool "ADS129XX/ADS1299 Driver"
+	default y
+	depends on SPI
+	help
+	  Enable the driver for the TI ADS129XX family of analog front-ends.
+	  This includes:
+	  - ADS1294R: 4-channel 24-bit ECG AFE (used on HealthyPi 6 main board)
+	  - ADS1296R: 6-channel 24-bit ECG AFE
+	  - ADS1298R: 8-channel 24-bit ECG AFE
+	  - ADS1299: 8-channel 24-bit EEG AFE (used on HealthyLink EEG-8CH module)
+
+	  The driver automatically detects the number of channels from the
+	  device ID register and supports both ECG (with respiration on ADS129xR)
+	  and EEG (ADS1299) configurations.
+
+if SENSOR_ADS129XX
+
+config SENSOR_ADS129XX_INIT_PRIORITY
+	int "Init priority"
+	default 80
+	help
+	  ADS129XX device driver initialization priority.
+	  Should be after SPI (default 50) but before application code.
+
+config SENSOR_ADS129XX_TRIGGER
+	bool "Enable trigger support"
+	default y
+	help
+	  Enable DRDY (Data Ready) interrupt trigger support.
+	  When enabled, the driver uses GPIO interrupts to signal
+	  when new sample data is available.
+
+endif # SENSOR_ADS129XX

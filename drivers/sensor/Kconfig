@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
+if SENSOR
+rsource "ads129xx/Kconfig"
+rsource "ads1299/Kconfig"
+rsource "afe4400/Kconfig"
+endif # SENSOR
+
+# BMI323_I2C selects SENSOR itself, so source unconditionally.
+rsource "bmi323_i2c/Kconfig"

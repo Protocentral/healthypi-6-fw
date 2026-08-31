@@ -1,0 +1,86 @@
+/*
+ * Copyright (c) 2019 Linaro Limited
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+#include <st/h7/stm32h757Xi_m4.dtsi>
+#include <st/h7/stm32h757bitx-pinctrl.dtsi>
+#include "healthypi6_v2.dtsi"
+
+/ {
+	model = "Protocentral HealthyPi 6";
+	compatible = "protocentral,healthypi6-v2";
+
+	/* HW resources are split between CM7 and CM4 */
+	chosen {
+		zephyr,console = &usart2;
+		zephyr,shell-uart = &usart2;
+		zephyr,sram = &sram1;
+		zephyr,flash = &flash1;
+	};
+
+	/* W9825G6KH SDRAM: Single 32MB chip on FMC Bank 0
+	 *
+	 * Memory accessible to M4 (after M7 initializes FMC):
+	 * - SDRAM1 @ 0xC0000000 (32 MB) - shared with M7
+	 *
+	 * NOTE: There is NO SDRAM2. FMC Bank 1 (0xD0000000) is not connected.
+	 * The W9825G6KH's 4 internal banks are managed by FMC automatically.
+	 * M4 must boot after M7 has initialized SDRAM (handled by 7s boot delay)
+	 */
+	sdram1: sdram@c0000000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0xc0000000 DT_SIZE_M(32)>;
+		zephyr,memory-region = "SDRAM1";
+	};
+
+	// IPC between CM7 and CM4 - OpenAMP/RPMSG Implementation
+	// MIGRATION: Changed from ICMSG (PBUF-based) to OpenAMP static vrings
+	// M4 role: "remote" (M7 is "host")
+	// Shares same 64KB SRAM4 region as M7 - OpenAMP manages partitioning internally
+	sram_ipc: memory@38000000 {
+		 zephyr,memory-region = "SRAM_IPC";
+		 compatible = "zephyr,memory-region", "mmio-sram";
+		 reg = <0x38000000 0x10000>;  // 64 KB total (full SRAM4)
+		 zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE) )>;
+	 };
+
+	ipc0: ipc0 {
+		compatible = "zephyr,ipc-openamp-static-vrings";
+		memory-region = <&sram_ipc>;
+		mboxes = <&mailbox 10>, <&mailbox 11>;
+		mbox-names = "tx", "rx";
+		role = "remote";  // M4 is OpenAMP remote, M7 is host
+		zephyr,buffer-size = <512>;  // Must match M7 configuration
+		status = "okay";
+	};
+};
+
+/* Power supply must match M7 configuration (M7 controls hardware) */
+&pwr {
+	power-supply = "ldo";
+};
+
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(25)>;
+	status = "okay";
+};
+
+&rcc {
+	clock-frequency = <DT_FREQ_M(200)>;
+};
+
+&mailbox {
+	status = "okay";
+};
+
+&usart1 {
+	status = "okay"; 
+};
+
+&usart2 {
+	status = "okay"; 
+};
+

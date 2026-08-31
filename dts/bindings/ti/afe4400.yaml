@@ -1,0 +1,26 @@
+title: TI AFE4400
+maintainers:
+  - name: YourName
+
+properties:
+  compatible:
+    const: ti,afe4400
+  reg-addr:
+    description: Register address if required for reads
+    type: int
+  drdy-gpios:
+    description: Data ready (DRDY) GPIO
+    required: false
+    $ref: /schemas/gpio.yaml
+  spi-cpha:
+    description: SPI cpha
+    type: boolean
+  spi-cpol:
+    description: SPI cpol
+    type: boolean
+
+required:
+  - compatible
+
+# Minimal example binding for a simple SPI-attached AFE4400
+# This is intentionally small; adjust for your board.

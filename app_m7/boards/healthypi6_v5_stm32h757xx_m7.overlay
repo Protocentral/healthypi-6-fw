@@ -1,0 +1,46 @@
+/*
+ * Copyright (c) 2024-2026 Protocentral Electronics
+ * SPDX-License-Identifier: MIT
+ *
+ * App overlay for app_m7 on healthypi6_v5. Enables the independent watchdog
+ * (IWDG) and exposes it as the `watchdog0` alias so the platform watchdog
+ * module finds it.
+ */
+
+/ {
+    aliases {
+        watchdog0 = &iwdg1;
+    };
+
+    /* Auto-mount a LittleFS at /lfs on the QSPI lfs_partition (64 MB).
+     * Backs persistent settings (/lfs/settings); auto-formats on the first
+     * boot if the partition is blank. */
+    fstab {
+        compatible = "zephyr,fstab";
+        lfs_settings: lfs_settings {
+            compatible = "zephyr,fstab,littlefs";
+            mount-point = "/lfs";
+            partition = <&lfs_partition>;
+            automount;
+            read-size = <256>;
+            prog-size = <256>;
+            cache-size = <4096>;
+            lookahead-size = <32>;
+            block-cycles = <512>;
+        };
+    };
+};
+
+&iwdg1 {
+    status = "okay";
+};
+
+/*
+ * Onboard acquisition (ads129xx, afe4400) and the ESP32-C6 UART4 link keep
+ * their DTS-default "okay"; the connectivity service is gated by
+ * CONFIG_HPI_CONNECTIVITY and idles if the ESP32 is absent.
+ *
+ * The HealthyLink NPU (STM32N657) lives on SPI4 (soft-NSS, no cs-gpios):
+ * mod_npu drives the controller directly with cs.gpio = PE4 (slot-A CS1), so
+ * no DT child node is needed -- see app_m7/src/healthylink/mod_npu.c.
+ */

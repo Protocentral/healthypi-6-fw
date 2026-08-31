@@ -1,0 +1,57 @@
+# Copyright (c) 2025 Protocentral
+# SPDX-License-Identifier: MIT
+
+description: |
+  HealthyBridge-ESP32 WiFi/BLE driver for ESP32-C6 co-processor.
+  
+  This driver provides WiFi connectivity and BLE services via an ESP32-C6
+  running custom Zephyr firmware. Communication uses UART for JSON commands
+  and SPI for high-speed binary data streaming.
+  
+  The device must be declared as a child of an SPI bus node.
+  
+  Example devicetree node:
+  
+  &spi2 {
+      healthybridge_esp32: healthybridge-esp32@0 {
+          compatible = "protocentral,healthybridge-esp32";
+          reg = <0>;
+          spi-max-frequency = <20000000>;
+          status = "okay";
+          
+          uart = <&uart4>;
+          reset-gpios = <&gpioa 11 GPIO_ACTIVE_LOW>;
+          ready-gpios = <&gpiob 1 GPIO_ACTIVE_HIGH>;
+          data-ready-gpios = <&gpiob 13 GPIO_ACTIVE_HIGH>;
+      };
+  };
+
+compatible: "protocentral,healthybridge-esp32"
+
+include: spi-device.yaml
+
+properties:
+  uart:
+    type: phandle
+    required: true
+    description: |
+      UART device used for JSON command protocol.
+      Must be configured with hw-flow-control enabled.
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      GPIO connected to ESP32-C6 EN (reset) pin.
+
+  ready-gpios:
+    type: phandle-array
+    description: |
+      GPIO connected to ESP32-C6 ready signal.
+      Indicates when ESP32 is ready for commands.
+
+  data-ready-gpios:
+    type: phandle-array
+    description: |
+      GPIO connected to ESP32-C6 data-ready signal.
+      Indicates when SPI buffer is ready for data.

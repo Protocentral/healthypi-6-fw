@@ -1,0 +1,146 @@
+
+#include <zephyr/dt-bindings/display/panel.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+    lvgl_pointer {
+        compatible = "zephyr,lvgl-pointer-input";
+        input = <&gt911>;
+    };
+
+    chosen {
+        zephyr,display = &zephyr_lcd_controller;
+        zephyr,touch = &gt911;
+    };
+};
+
+&sdram1 {
+    /* Frame buffer memory when cached causes screen flickering. */
+    zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE) )>;
+};
+
+
+zephyr_lcdif: &zephyr_lcd_controller {};
+
+/* ltdc uses pll3_r as pixel clock */
+&pll3 {
+    status = "okay";
+    clocks = <&clk_hse>;
+    div-m = <2>;
+    mul-n = <54>;
+    div-p = <2>;
+    div-q = <2>;
+    div-r = <25>;
+    // 27 MHz PLL3_R (approx. pixel clock for 480x800@60Hz)
+    // Required pixel clock ≈ 26,839,200 Hz ≈ 26.84 MHz
+};
+
+&zephyr_lcd_controller {
+    status = "okay";
+    width = <480>;
+    height = <800>;
+    pixel-format = <PANEL_PIXEL_FORMAT_RGB_888>;
+
+    ext-sdram = <&sdram1>;
+
+    def-back-color-red = <0>;
+    def-back-color-green = <0>;
+    def-back-color-blue = <0>;
+
+    display-timings {
+        compatible = "zephyr,panel-timing";
+
+        hsync-active = <0>;
+        vsync-active = <0>;
+        de-active = <1>;
+
+        pixelclk-active = <0>;
+
+        /*
+         * Horizontal and Vertical timing values for the GC9503V panel
+         * These values must match the panel's internal timing requirements
+         * for proper synchronization and display centering.
+         */
+        hfront-porch = <20>;
+        hsync-len = <10>;
+        hback-porch = <20>;
+
+        vfront-porch = <12>;
+        vsync-len = <8>;
+        vback-porch = <24>;
+    };
+};
+
+&i2c4 {
+    pinctrl-0 = <&i2c4_scl_pd12 &i2c4_sda_pd13>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_FAST>;
+    status = "okay";
+
+    gt911: gt911@5d {
+        compatible = "goodix,gt911";
+        reg = <0x5d>;
+        alt-addr = <0x14>;
+        /* GT911 reset on PH12; IRQ on PI8. */
+        reset-gpios = <&gpioh 12 GPIO_ACTIVE_LOW>;
+        irq-gpios = <&gpioi 8 (GPIO_ACTIVE_HIGH|GPIO_PULL_DOWN)>;
+    };
+};
+
+&zephyr_mipi_dsi {
+    status = "okay";
+
+    pll-ndiv = <100>;
+    pll-idf = <5>;
+    pll-odf = <0>;
+
+    vs-active-high;
+
+    gc9503v: gc9503v@0 {
+        status = "okay";
+        compatible = "galaxycore,gc9503v-dsi";
+        reg = <0x0>;
+
+        width = <480>;
+        height = <800>;
+        data-lanes = <2>;
+
+        /* GC9503V reset on PA12. The backlight control pin (PC6) is NOT a
+         * panel GPIO -- it is driven as TIM3_CH1 PWM for dimming (see
+         * &timers3 / backlight below); leaving bl-gpios off here stops the
+         * panel driver from owning PC6. */
+        reset-gpios = <&gpioa 12 GPIO_ACTIVE_HIGH>;
+
+        pixel-format = <MIPI_DSI_PIXFMT_RGB888>;
+    };
+};
+
+/* Backlight dimming: TPS61158 control pin on PC6 = TIM3_CH1 PWM.
+ * Driven via the LED PWM API (led_set_brightness 0-100%).
+ * IMPORTANT: the TPS61158 shutdown time is ~1 ms, so the PWM period MUST be
+ * well under that or low-duty cycles look like full brightness (the part never
+ * dims). Use 10 kHz (100 us period): low phase << 1 ms at all duties, and well
+ * within the datasheet's 100 Hz-100 kHz PWM-dimming range. At full timer clock
+ * 100 us fits the 16-bit TIM3 counter, so no prescaler is needed. */
+&timers3 {
+    status = "okay";
+    st,prescaler = <0>;
+
+    bl_pwm: pwm {
+        status = "okay";
+        pinctrl-0 = <&tim3_ch1_pc6>;
+        pinctrl-names = "default";
+    };
+};
+
+/ {
+    backlight: backlight {
+        compatible = "pwm-leds";
+        status = "okay";
+
+        bl_led: bl_led {
+            pwms = <&bl_pwm 1 PWM_USEC(100) PWM_POLARITY_NORMAL>;  /* 10 kHz */
+            label = "LCD Backlight";
+        };
+    };
+};

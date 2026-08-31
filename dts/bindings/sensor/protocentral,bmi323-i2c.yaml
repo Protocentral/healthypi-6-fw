@@ -1,0 +1,32 @@
+# Copyright (c) 2026 Protocentral Electronics
+# SPDX-License-Identifier: MIT
+
+description: |
+  Bosch BMI323 6-axis IMU on I2C. Forked locally because the upstream
+  Zephyr bosch,bmi323 binding/driver is SPI-only (2026-Q2). The wire
+  protocol matches the upstream driver's SPI semantics minus the dummy
+  read byte; the upstream bmi323.c logic is reused unchanged.
+
+  The BMI323 I2C address depends on the SDO pin strap: SDO tied low =
+  0x68 (7-bit), SDO tied high = 0x69.
+
+  Example:
+
+    &i2c2 {
+        imu@68 {
+            compatible = "protocentral,bmi323-i2c";
+            reg = <0x68>;
+            int-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>;
+        };
+    };
+
+compatible: "protocentral,bmi323-i2c"
+
+include: ["i2c-device.yaml", "sensor-device.yaml"]
+
+properties:
+  int-gpios:
+    type: phandle-array
+    description: |
+      INT1 line from the IMU. The upstream BMI323 driver routes every
+      interrupt it uses (DRDY, any-motion) to INT1 only.

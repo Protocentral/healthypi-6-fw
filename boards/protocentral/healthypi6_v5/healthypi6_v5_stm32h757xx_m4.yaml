@@ -1,0 +1,18 @@
+identifier: healthypi6_v5/stm32h757xx/m4
+name: HealthyPi 6 v5 (M4)
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+ram: 288
+flash: 1024
+supported:
+  - arduino_gpio
+  - gpio
+testing:
+  ignore_tags:
+    - mpu
+    - nfc
+    - net
+vendor: protocentral

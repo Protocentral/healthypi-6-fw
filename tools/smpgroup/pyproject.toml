@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smpgroup"
+version = "0.1.0"
+description = "Declarative custom MCUmgr management groups: generate SMP classes from a spec, and check the spec against the Zephyr firmware"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ProtoCentral Electronics" }]
+keywords = ["mcumgr", "smp", "zephyr", "cbor", "embedded", "firmware"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Embedded Systems",
+    "Programming Language :: Python :: 3",
+]
+
+# The spec and drift checker are stdlib-only on purpose: a protocol definition
+# and a firmware consistency check should run in CI without a device stack.
+dependencies = []
+
+[project.optional-dependencies]
+smp = ["smpclient>=2.0"]
+dev = ["pytest>=8", "smpclient>=2.0"]
+
+[project.urls]
+Source = "https://github.com/protocentral/smpgroup"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

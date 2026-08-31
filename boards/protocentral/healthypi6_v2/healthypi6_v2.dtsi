@@ -1,0 +1,145 @@
+/*
+ * Copyright (c) 2019 Linaro Limited
+ * Copyright (c) 2025 ProtoCentral
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/clock/stm32h7_clock.h>
+
+&usart1 {
+	pinctrl-0 = <&usart1_tx_pa9 &usart1_rx_pa10>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+};
+
+&usart2 {
+	pinctrl-0 = <&usart2_tx_pd5 &usart2_rx_pd6 &usart2_rts_pd4 &usart2_cts_pd3>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+};
+
+&mailbox {
+	status = "okay";
+};
+
+&rcc {
+	d1cpre = <1>;
+	hpre = <2>;
+	d1ppre = <2>;
+	d2ppre1 = <2>;
+	d2ppre2 = <2>;
+	d3ppre = <2>;
+};
+
+/*
+ * HealthyLink Expansion Port Base Definitions
+ *
+ * Pin Assignments:
+ *   SPI4:   PE2 (SCK), PE5 (MISO), PE6 (MOSI), PE4 (NSS)
+ *   SPI6:   PG13 (SCK), PG12 (MISO), PG14 (MOSI), software CS
+ *   FDCAN1: PH13 (TX), PH14 (RX)
+ *   I2C3:   PH7 (SCL), PH8 (SDA) - Module EEPROM
+ *   GPIO:   PI2, PI3, PI6, PA9, PA10
+ */
+
+/* I2C3 for module identification EEPROM */
+&i2c3 {
+	status = "okay";
+	pinctrl-0 = <&i2c3_scl_ph7 &i2c3_sda_ph8>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+
+	/* Module ID EEPROM - Microchip 24AA02: 256 bytes @ 0x50 */
+	healthylink_eeprom: eeprom@50 {
+		compatible = "microchip,24aa02", "atmel,at24";
+		reg = <0x50>;
+		size = <256>;
+		pagesize = <8>;
+		address-width = <8>;
+		timeout = <5>;
+		status = "okay";
+	};
+};
+
+/*
+ * SPI4 for HealthyLink high-speed expansion
+ * Enabled by default with ADS1299 child node using deferred-init.
+ * The driver will only initialize if EEPROM identifies EEG-8CH module.
+ *
+ * Note: SPI4 uses PE2 which conflicts with QUADSPI IO2.
+ * The M7 DTS should configure QUADSPI without PE2 (dual-SPI mode).
+ */
+&spi4 {
+	status = "okay";
+	clocks = <&rcc STM32_CLOCK(APB2, 13)>,
+		 <&rcc STM32_SRC_PLL2_Q SPI45_SEL(2)>;
+	pinctrl-0 = <&spi4_sck_pe2 &spi4_miso_pe5 &spi4_mosi_pe6>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioe 4 GPIO_ACTIVE_LOW>;
+
+	/*
+	 * ADS1299 8-Channel EEG AFE (HealthyLink EEG-8CH Module)
+	 * Uses deferred-init: driver skeleton loads at boot, but hardware
+	 * is only initialized when ads1299_hw_init() is called after
+	 * EEPROM identifies the connected module as EEG-8CH (0x0001).
+	 */
+	ads1299: ads1299@0 {
+		compatible = "ti,ads1299";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		drdy-gpios = <&gpiog 12 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpioi 3 GPIO_ACTIVE_HIGH>;
+		pwdn-gpios = <&gpioi 6 GPIO_ACTIVE_HIGH>;
+		start-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>;
+		gain = <24>;      /* EEG standard gain */
+		sample-rate = <250>;
+		bias-enabled;     /* Enable BIAS/DRL for common-mode rejection */
+		srb1-enabled;     /* Enable SRB1: REF electrode connected to SRB1 pin */
+		status = "okay";
+		zephyr,deferred-init;
+	};
+};
+
+/*
+ * SPI6 for secondary expansion (disabled by default)
+ * Note: PI2 is used by ADS1299 START pin when EEG module is active,
+ * so SPI6 CS uses PA10 instead to avoid conflict.
+ */
+&spi6 {
+	status = "disabled";
+	pinctrl-0 = <&spi6_sck_pg13 &spi6_miso_pg12 &spi6_mosi_pg14>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioa 10 GPIO_ACTIVE_LOW>;
+};
+
+/* FDCAN1 for CAN-FD interface (disabled by default) */
+&fdcan1 {
+	status = "disabled";
+	pinctrl-0 = <&fdcan1_tx_ph13 &fdcan1_rx_ph14>;
+	pinctrl-names = "default";
+	sample-point = <875>;
+	sample-point-data = <875>;
+};
+
+/* HealthyLink controller node */
+/ {
+	healthylink: healthylink {
+		compatible = "protocentral,healthylink";
+		status = "okay";
+		zephyr,deferred-init;
+		eeprom = <&healthylink_eeprom>;
+		expansion-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>,
+		                  <&gpioi 3 GPIO_ACTIVE_HIGH>,
+		                  <&gpioi 6 GPIO_ACTIVE_HIGH>,
+		                  <&gpioa 9 GPIO_ACTIVE_HIGH>,
+		                  <&gpioa 10 GPIO_ACTIVE_HIGH>;
+	};
+
+	chosen {
+		healthylink-eeprom = &healthylink_eeprom;
+	};
+};

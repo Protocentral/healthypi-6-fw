@@ -1,0 +1,53 @@
+/*
+ * HealthyLink CAN Interface Module Overlay
+ * Copyright (c) 2025-2026 ProtoCentral
+ * SPDX-License-Identifier: MIT
+ *
+ * FDCAN interface for connecting to lab equipment and research systems
+ * Module ID: 0x0004
+ *
+ * Hardware Connections:
+ *   FDCAN1: PH13 (TX), PH14 (RX)
+ *   GPIO: PA10 (Optional termination control)
+ *
+ * FDCAN1 is enabled by the base dtsi; this overlay adds the CAN module's
+ * configuration.
+ *
+ * Usage:
+ *   scripts/build.sh m7 with
+ *   -DEXTRA_DTC_OVERLAY_FILE="boards/protocentral/healthypi6_v5/healthylink-can.overlay"
+ *
+ * Required Kconfig:
+ *   CONFIG_CAN=y
+ *   CONFIG_CAN_STM32_FDCAN=y
+ */
+
+/* Configure FDCAN1 bus speed */
+&fdcan1 {
+	/* Arbitration phase: 1 Mbit/s */
+	bus-speed = <1000000>;
+	sample-point = <800>;
+
+	/* Data phase (CAN-FD): 4 Mbit/s */
+	bus-speed-data = <4000000>;
+	sample-point-data = <800>;
+};
+
+/ {
+	/* HealthyLink CAN module binding */
+	healthylink_can: healthylink-can {
+		compatible = "protocentral,healthylink-can";
+		status = "okay";
+
+		/* Reference to the FDCAN controller */
+		can-controller = <&fdcan1>;
+
+		/* Module identification */
+		module-id = <0x0004>;
+	};
+
+	/* Update chosen node for CAN module */
+	chosen {
+		healthylink-module = &healthylink_can;
+	};
+};

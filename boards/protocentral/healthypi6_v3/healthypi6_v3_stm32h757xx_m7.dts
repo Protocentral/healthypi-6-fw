@@ -1,0 +1,582 @@
+/*
+ * Copyright (c) 2019 Linaro Limited
+ * Copyright (c) 2025-2026 ProtoCentral
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+#include <st/h7/stm32h757Xi_m7.dtsi>
+#include <st/h7/stm32h757bitx-pinctrl.dtsi>
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include "healthypi6_v3.dtsi"
+
+/* Custom pinctrl for UART4 RX - no pull-up (external resistor on board if needed) */
+&pinctrl {
+	uart4_rx_pi9_nopull: uart4_rx_pi9_nopull {
+		pinmux = <STM32_PINMUX('I', 9, AF8)>;
+		/* bias-pull-up disabled - rely on external pull-up if needed */
+	};
+};
+
+/ {
+	model = "HealthyPi 6 v3 STM32H757";
+	compatible = "protocentral,healthypi6_v3";
+
+	/* HW resources are split between CM7 and CM4 */
+	chosen {
+		zephyr,console = &usart1;
+		zephyr,shell-uart = &usart1;
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,flash-controller = &w25q01jv;
+		/* CDC 0 (cdc_acm_uart0) carries the one-way sample stream;
+		 * CDC 1 (cdc_acm_uart1) carries MCUmgr SMP request/response. */
+		zephyr,uart-mcumgr = &cdc_acm_uart1;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		blue_led: led_blue {
+			gpios = <&gpioh 9 GPIO_ACTIVE_HIGH>;
+			label = "Blue LED";
+			status = "okay";
+		};
+		green_led: led_green {
+			/* v3 hardware: LED is wired between VDD and PH10 via
+			 * a current-limit resistor, so the pin sinks current
+			 * when driven LOW = LED on. Declaring ACTIVE_LOW lets
+			 * drivers use the polarity-agnostic GPIO_OUTPUT_ACTIVE
+			 * / GPIO_OUTPUT_INACTIVE flags without inverting at
+			 * each call site.
+			 */
+			gpios = <&gpioh 10 GPIO_ACTIVE_LOW>;
+			label = "Green LED";
+			status = "okay";
+		};
+	};
+
+	aliases {
+		blue-led = &blue_led;
+		green-led = &green_led;
+		/* Zephyr MCUmgr's os/datetime handler looks up the RTC via
+		 * DT_ALIAS(rtc). Without this alias, datetime_get/set return
+		 * ENOENT from the stock handler. */
+		rtc = &rtc;
+	};
+
+	/* Expansion analog inputs (PA4-PA7 carry SPI1 instead). */
+	zephyr,user {
+		io-channels = <&adc1 4>,   /* PC4 - INP4 */
+		              <&adc1 8>,   /* PC5 - INP8 */
+		              <&adc1 10>,  /* PC0 - INP10 */
+		              <&adc1 11>,  /* PC1 - INP11 */
+		              <&adc1 14>,  /* PA2 - INP14 */
+		              <&adc1 15>,  /* PA3 - INP15 */
+		              <&adc1 17>;  /* PA1 - INP17 */
+		io-channel-names = "PC4", "PC5", "PC0", "PC1",
+		                   "PA2", "PA3", "PA1";
+	};
+
+	/* W9825G6KH SDRAM: 4M x 4 banks x 16 bits = 32 Megabytes
+	 * Single chip connected to FMC SDRAM Bank 0 (SDNE0/SDCKE0)
+	 * Address range: 0xC0000000 - 0xC1FFFFFF (32 MB)
+	 */
+	sdram1: sdram@c0000000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		device_type = "memory";
+		reg = <0xc0000000 DT_SIZE_M(32)>;  /* Full 32 MB of W9825G6KH */
+		zephyr,memory-region = "SDRAM1";
+		zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM) )>;
+	};
+
+	ext_memory: memory@90000000 {
+		compatible = "zephyr,memory-region";
+		reg = <0x90000000 DT_SIZE_M(128)>; /* 1 Gbits */
+		zephyr,memory-region = "EXTMEM";
+		/* The ATTR_MPU_EXTMEM attribut causing a MPU FAULT */
+		zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_IO) )>;
+	};
+
+	// IPC between CM7 and CM4 - OpenAMP/RPMSG Implementation
+	// OpenAMP manages memory internally with static VRINGs (no dynamic allocation)
+	sram_ipc: memory@38000000 {
+		 zephyr,memory-region = "SRAM_IPC";
+		 compatible = "zephyr,memory-region", "mmio-sram";
+		 reg = <0x38000000 0x10000>;  // 64 KB total (full SRAM4)
+		 zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE) )>;
+	 };
+
+	ipc0: ipc0 {
+		compatible = "zephyr,ipc-openamp-static-vrings";
+		memory-region = <&sram_ipc>;
+		mboxes = <&mailbox 11>, <&mailbox 10>;
+		mbox-names = "tx", "rx";
+		role = "host";  // M7 is OpenAMP host, M4 is remote
+		zephyr,buffer-size = <512>;  // Match largest message (ECG: 452 bytes)
+		status = "okay";
+	};
+};
+
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(25)>;
+	status = "okay";
+};
+
+/* LSE 32.768 kHz crystal for RTC - battery-backed via VBAT pin */
+&clk_lse {
+	status = "okay";
+	driving-capability = <3>;
+};
+
+&clk_hsi48 {
+	status = "okay";
+};
+
+/* PLL1: 25 MHz / 5 = 5 MHz input × 160 = 800 MHz VCO
+ *   P = 800/2 = 400 MHz (SYSCLK)
+ *   Q = 800/4 = 200 MHz
+ *   R = 800/2 = 400 MHz
+ */
+&pll {
+	div-m = <5>;
+	mul-n = <160>;
+	div-p = <2>;
+	div-q = <4>;
+	div-r = <2>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+/* PLL2: 25 MHz / 5 = 5 MHz input × 96 = 480 MHz VCO
+ *   R = 480/10 = 48 MHz (SDMMC clock)
+ */
+&pll2 {
+	div-m = <5>;
+	mul-n = <96>;
+	div-p = <2>;
+	div-q = <4>;
+	div-r = <10>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(400)>;
+};
+
+&usart1 {
+	status = "okay";
+};
+
+&usart2 {
+	status = "okay";
+};
+
+&spi1 {
+	status = "okay";
+	pinctrl-0 = <&spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
+
+	ads129xx: ads129xx@0 {
+		compatible = "ti,ads129xx";
+		reg = <0x00>;
+		spi-max-frequency = <DT_FREQ_M(2)>;
+
+		pwdn-gpios = <&gpioi 11 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpioi 7 GPIO_ACTIVE_HIGH>;
+		drdy-gpios = <&gpioi 15 GPIO_ACTIVE_LOW>;
+		start-gpios = <&gpioi 10 GPIO_ACTIVE_HIGH>;
+
+		gain = <6>;
+
+		status = "okay";
+	};
+};
+
+/* Enable DMA controllers for SPI2 */
+&dma1 {
+	status = "okay";
+};
+
+&dma2 {
+	status = "okay";
+};
+
+&dmamux1 {
+	status = "okay";
+};
+
+&spi2 {
+	status = "okay";
+	/* SPI2 configured for MASTER MODE to drive the ESP32-C6 (clock sourced from M7) */
+	pinctrl-0 = <&spi2_nss_pb12 &spi2_sck_pb10
+				&spi2_miso_pc2_c &spi2_mosi_pc3_c>;
+	pinctrl-names = "default";
+
+	/* DMA configuration for SPI2 */
+	dmas = <&dmamux1 0 40 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+		   <&dmamux1 1 39 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+	dma-names = "tx", "rx";
+};
+
+&spi3 {
+    status = "okay";
+    pinctrl-0 = <&spi3_sck_pb3
+		&spi3_miso_pb4 &spi3_mosi_pb2>;
+    pinctrl-names = "default";
+    cs-gpios = <&gpiob 8 GPIO_ACTIVE_LOW>;
+
+	afe4400: afe4400@0 {
+		label = "AFE4400";
+		status = "okay";
+		compatible = "ti,afe4400";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(4)>;
+		drdy-gpios = <&gpiob 9 GPIO_ACTIVE_LOW>;
+		pwdn-gpios = <&gpioc 13 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpiob 5 GPIO_ACTIVE_LOW>;
+	};
+};
+
+&uart4 {
+	/* UART4 for MCUmgr SMP transport (ESP32 TCP-to-UART gateway)
+	 * NOTE: DMA intentionally disabled for MCUmgr. Using interrupt-driven mode.
+	 * FIFO enabled to reduce RX overrun when receiving SMP packets.
+	 */
+	status = "okay";
+	pinctrl-0 = <&uart4_tx_pa0 &uart4_rx_pi9_nopull>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	fifo-enable;
+};
+
+&i2c1 {
+	status = "okay";
+	compatible = "st,stm32-i2c-v2";
+	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	sq-size = <1024>;
+	cq-size = <1024>;
+};
+
+
+&i2c2 {
+	status = "okay";
+	pinctrl-0 = <&i2c2_scl_ph4 &i2c2_sda_pb11>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+
+	max17048: max17048@36 {
+		compatible = "maxim,max17048";
+		status = "okay";
+		reg = <0x36>;
+	};
+
+	max30205: max30205@49 {
+		compatible = "maxim,max30205";
+		status = "okay";
+		reg = <0x49>;
+	};
+
+	/* Bosch BMI323 6-axis IMU. SDO is strapped low on v3, so the
+	 * 7-bit address is 0x68. Uses the local I2C fork of the upstream
+	 * (SPI-only) bosch,bmi323 driver.
+	 */
+	bmi323: imu@68 {
+		compatible = "protocentral,bmi323-i2c";
+		status = "okay";
+		reg = <0x69>;
+	};
+
+	/* MPS MP2696B single-cell Li-ion switching charger with boost. */
+	mp2696: charger@6b {
+		compatible = "mps,mp2696";
+		status = "okay";
+		reg = <0x6b>;
+	};
+};
+
+&usbotg_hs {
+	status = "okay";
+};
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Set 2KB of storage at the end of first 1MB flash */
+		storage_partition: partition@ff800 {
+			label = "storage";
+			reg = <0x000ff800 DT_SIZE_K(2)>;
+		};
+	};
+};
+
+&rng {
+	status = "okay";
+};
+
+/* FMC Configuration for W9825G6KH SDRAM (32 MB) */
+&fmc {
+	status = "okay";
+	pinctrl-0 = <&fmc_nbl0_pe0 &fmc_nbl1_pe1
+	&fmc_sdclk_pg8 &fmc_sdnwe_ph5 &fmc_sdcke0_ph2
+	&fmc_sdne0_ph3 &fmc_sdnras_pf11 &fmc_sdncas_pg15
+
+	&fmc_a0_pf0 &fmc_a1_pf1 &fmc_a2_pf2 &fmc_a3_pf3 &fmc_a4_pf4
+	&fmc_a5_pf5 &fmc_a6_pf12 &fmc_a7_pf13 &fmc_a8_pf14
+	&fmc_a9_pf15 &fmc_a10_pg0 &fmc_a11_pg1 &fmc_a12_pg2
+	/* BA0 */ &fmc_a14_pg4 /*BA1 */ &fmc_a15_pg5
+
+	&fmc_d0_pd14 &fmc_d1_pd15 &fmc_d2_pd0 &fmc_d3_pd1
+	&fmc_d4_pe7 &fmc_d5_pe8 &fmc_d6_pe9 &fmc_d7_pe10
+	&fmc_d8_pe11 &fmc_d9_pe12 &fmc_d10_pe13 &fmc_d11_pe14
+	&fmc_d12_pe15 &fmc_d13_pd8 &fmc_d14_pd9 &fmc_d15_pd10>;
+	pinctrl-names = "default";
+
+	sdram {
+		status = "okay";
+
+		power-up-delay = <100>;
+		num-auto-refresh = <8>;
+		mode-register = <0x220>;
+		refresh-rate = <603>;
+
+		/* W9825G6KH on FMC Bank 0 (SDNE0/SDCKE0) @ 0xC0000000 */
+		bank@0 {
+			reg = <0>;
+			st,sdram-control = <STM32_FMC_SDRAM_NC_9
+			STM32_FMC_SDRAM_NR_13
+			STM32_FMC_SDRAM_MWID_16
+			STM32_FMC_SDRAM_NB_4
+			STM32_FMC_SDRAM_CAS_2
+			STM32_FMC_SDRAM_SDCLK_PERIOD_2
+			STM32_FMC_SDRAM_RBURST_ENABLE
+			STM32_FMC_SDRAM_RPIPE_0>;
+			st,sdram-timing = <2 6 4 6 2 2 2>;
+		};
+	};
+};
+
+&sdmmc1 {
+	status = "okay";
+	clocks = <&rcc STM32_CLOCK_BUS_AHB3 0x00010000>,
+	         <&rcc STM32_SRC_PLL2_R SDMMC_SEL(1)>;
+	pinctrl-0 = <&sdmmc1_d0_pc8 &sdmmc1_d1_pc9
+	&sdmmc1_d2_pc10 &sdmmc1_d3_pc11
+	&sdmmc1_ck_pc12 &sdmmc1_cmd_pd2>;
+	bus-width = <4>;
+	disk-name = "SD";
+	pinctrl-names = "default";
+	/* No card detect pin on v3 hardware - card assumed always present */
+};
+
+&clk_hsi48 {
+	status = "okay";
+};
+
+
+zephyr_udc0: &usbotg_hs {
+	status = "okay";
+	pinctrl-0 = <&usb_otg_hs_dm_pb14 &usb_otg_hs_dp_pb15>;
+	pinctrl-names = "default";
+	/* CDC 0 -- one-way sample-stream pipe (device -> host). */
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+	/* CDC 1 -- MCUmgr SMP control pipe (bidirectional); bound to
+	 * zephyr,uart-mcumgr in the `chosen` node above. */
+	cdc_acm_uart1: cdc_acm_uart1 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+&mailbox {
+	status = "okay";
+};
+
+&backup_sram{
+	status = "okay";
+};
+
+/* RTC - Real-Time Clock with battery backup */
+&rtc {
+	status = "okay";
+	clocks = <&rcc STM32_CLOCK_BUS_APB4 0x00010000>,
+	         <&rcc STM32_SRC_LSE RTC_SEL(1)>;
+};
+
+/*
+ * QUADSPI Configuration - Full Quad-SPI Mode (v3)
+ *
+ * v3 restores full quad-SPI (4-bit) mode by routing IO2/IO3 to PF7/PF6,
+ * eliminating the PE2 conflict with SPI4 that forced dual-SPI in v2.
+ *
+ * Quad reads are ~4x dual. writeoc MUST stay PP_1_1_4: the W25Q01JV does not
+ * implement the default PP_1_4_4 (0x38) opcode, and writes through it are
+ * corrupted.
+ */
+&quadspi {
+	pinctrl-0 = <&quadspi_clk_pf10 &quadspi_bk1_ncs_pg6
+	&quadspi_bk1_io0_pf8 &quadspi_bk1_io1_pf9
+	&quadspi_bk1_io2_pf7 &quadspi_bk1_io3_pf6>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	w25q01jv: qspi-nor-flash-1@90000000 {
+		compatible = "st,stm32-qspi-nor";
+		reg = <0x90000000>;
+		size = <1073741824>; /* 128 MBytes */
+		qspi-max-frequency = <48000000>;
+		spi-bus-width = <4>;
+		quad-enable-requirements = "S2B1v1";
+		writeoc = "PP_1_1_4";
+		status = "okay";
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/* XIP (Execute In Place) partition - 56MB for code/assets */
+			xip_partition: partition@0 {
+				label = "xip";
+				reg = <0x0 DT_SIZE_M(56)>;
+			};
+
+			/* Model storage - 8 MB, XIP-addressable */
+			model_partition: partition@3800000 {
+				label = "tflite_model";
+				reg = <0x3800000 DT_SIZE_M(8)>;
+			};
+
+			/* LittleFS storage partition - Second 64MB */
+			lfs_partition: partition@4000000 {
+				label = "lfs_storage";
+				reg = <0x4000000 DT_SIZE_M(64)>;
+			};
+		};
+	};
+};
+
+/* alias used by display shields with touch control */
+qsh_030_i2c: &i2c4 {
+	pinctrl-0 = <&i2c4_scl_pd12 &i2c4_sda_pd13>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	status = "okay";
+};
+
+/* aliases used by display configuration */
+zephyr_mipi_dsi: &mipi_dsi {};
+zephyr_lcd_controller: &ltdc {};
+
+/* SRAM2 - Non-cached memory for DMA buffers */
+&sram2 {
+	status = "okay";
+	zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE) )>;
+};
+
+/* Internal ADC1 for biosignal acquisition
+ * v3: PA4/PA5/PA6/PA7 removed (reassigned to SPI1 for ADS1292R)
+ * Remaining channels: PA1-PA3, PC0, PC1, PC4, PC5
+ */
+&adc1 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	pinctrl-0 = <&adc1_inp4_pc4 &adc1_inp8_pc5
+	             &adc1_inp10_pc0 &adc1_inp11_pc1 &adc1_inp14_pa2 &adc1_inp15_pa3
+	             &adc1_inp17_pa1>;
+	pinctrl-names = "default";
+
+	/* ADC clock configuration for STM32H7 - use synchronous bus clock */
+	st,adc-clock-source = "SYNC";
+	st,adc-prescaler = <4>;
+
+	/* PC4 - ADC1_INP4 */
+	channel@4 {
+		reg = <4>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PC5 - ADC1_INP8 */
+	channel@8 {
+		reg = <8>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PC0 - ADC1_INP10 */
+	channel@a {
+		reg = <10>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PC1 - ADC1_INP11 */
+	channel@b {
+		reg = <11>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PA2 - ADC1_INP14 */
+	channel@e {
+		reg = <14>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PA3 - ADC1_INP15 */
+	channel@f {
+		reg = <15>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+
+	/* PA1 - ADC1_INP17 */
+	channel@11 {
+		reg = <17>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 811)>;
+		zephyr,resolution = <16>;
+	};
+};
+
+/* HealthyPi 6 v3 power supply: SMPS + LDO cascade mode.
+ *
+ * The v3 board has SMPS inductor + filter populated. The SMPS generates 1.8V
+ * which feeds the internal LDO; the LDO then regulates Vcore to ~1.0V.
+ * This matches the reset default (SMPSEN=1, LDOEN=1) and is proven stable
+ * by the system bootloader running in this mode.
+ *
+ * Do NOT use "smps-direct" — the external LC filter is designed for cascade
+ * topology, not direct SMPS-to-Vcore regulation.
+ */
+&pwr {
+	power-supply = "smps-ldo";
+	smps-output-voltage = "1V8";
+};

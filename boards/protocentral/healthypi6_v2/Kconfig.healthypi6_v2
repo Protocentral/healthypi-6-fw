@@ -1,0 +1,8 @@
+# STM32H747I DISCOVERY board configuration
+
+# Copyright (c) 2019 Linaro Limited
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_HEALTHYPI6_V2
+	select SOC_STM32H757XX_M7 if BOARD_HEALTHYPI6_V2_STM32H757XX_M7
+	select SOC_STM32H757XX_M4 if BOARD_HEALTHYPI6_V2_STM32H757XX_M4

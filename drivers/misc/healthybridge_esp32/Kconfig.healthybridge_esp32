@@ -1,0 +1,70 @@
+# HealthyBridge-ESP32 co-processor host link
+
+# Copyright (c) 2025-2026 Protocentral
+# SPDX-License-Identifier: Apache-2.0
+
+# The link is enabled by devicetree (the healthybridge_esp32_uart node), not by
+# Kconfig.
+
+config HEALTHYBRIDGE_ESP32_UART
+	bool
+	default y
+	depends on DT_HAS_PROTOCENTRAL_HEALTHYBRIDGE_ESP32_UART_ENABLED
+	select UART_ASYNC_API
+	help
+	  Selected automatically when the healthybridge_esp32_uart devicetree
+	  node is enabled. Not user-settable.
+
+	  UART_ASYNC_API is a hard requirement, not a preference: the transmit
+	  path is DMA, and at 2 Mbaud an interrupt-per-byte transmitter would
+	  cost roughly 200k interrupts per second. The driver carries a
+	  BUILD_ASSERT so a build that somehow loses the symbol fails loudly
+	  instead of quietly running the stream off the CPU.
+
+config HEALTHYBRIDGE_ESP32_INIT_PRIORITY
+	int "HealthyBridge driver initialization priority"
+	default 90
+	help
+	  Initialization priority for the HealthyBridge-ESP32 driver.
+	  Must be higher than the UART controller driver.
+
+config HEALTHYBRIDGE_ESP32_HOLD_RESET_AT_BOOT
+	bool "Hold the ESP32-C6 in reset until connectivity is enabled"
+	default y
+	help
+	  Leave the co-processor's EN/reset line ASSERTED when the driver
+	  initialises, so the C6 never boots unless something asks for it via
+	  healthybridge_link_power() (services/connectivity ->
+	  hpi_connectivity_enable()).
+
+	  This is a power decision, not a convenience. The C6 brings both radios
+	  up on its own at boot -- an unprovisioned unit opens a sticky SoftAP and
+	  beacons forever -- and it does so ~220 ms into M7 bring-up, concurrent
+	  with SDRAM, the backlight, sensor init and USB enumeration. On a unit
+	  powered only from USB that peak is enough to brown out the 3V3 rail and
+	  reset the board. The BQ24074's input ceiling is strapped by EN1/EN2 and
+	  the part has no register interface, so drawing less is the only lever
+	  firmware has.
+
+	  Say n to restore the pre-2026-08 behaviour (pulse reset at init, let the
+	  C6 boot immediately). Useful on the bench when the co-processor is the
+	  thing under test -- note that with y, the C6 is held in reset and cannot
+	  be flashed over its own USB port while the M7 application is running.
+
+config HEALTHYBRIDGE_ESP32_BOOT_DELAY_MS
+	int "ESP32-C6 boot delay in milliseconds"
+	default 800
+	help
+	  Time to wait after releasing reset before the ESP32-C6 is expected to
+	  answer a control command.
+
+	  Read by healthybridge_link_power(dev, true). Until 2026-08 this symbol
+	  was declared but never referenced by any code -- the real wait was a
+	  hardcoded 200 ms in hb_uart_init(), a 15x shorter window than the
+	  default here claimed -- so the default came down from 3000 to a value
+	  that reflects what the part actually needs.
+
+config HEALTHYBRIDGE_ESP32_DEBUG
+	bool "Enable HealthyBridge debug logging"
+	help
+	  Enable verbose debug logging for the HealthyBridge-ESP32 driver.

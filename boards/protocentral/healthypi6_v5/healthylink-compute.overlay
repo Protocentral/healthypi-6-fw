@@ -1,0 +1,50 @@
+/*
+ * HealthyLink Compute Module Overlay
+ * Copyright (c) 2025-2026 ProtoCentral
+ * SPDX-License-Identifier: MIT
+ *
+ * External AI/ML compute module for inference offload.
+ * Module ID: 0x0005
+ *
+ * Wiring (HealthyPi 6 main board, STM32H757 master):
+ *   SPI4: PE2 (SCK), PE5 (MISO), PE6 (MOSI), PE4 (NSS/CS, software-driven)
+ *   GPIO: PI12 (IRQ from module, active-low, aux-gpios[0])
+ *         PI2  (MOD_RESET_A) - slot A reset; slot B is PI5
+ *         PI6  (module PWDN)  - shared with EEG module PWDN line
+ *   Power: PI1 (EN_MOD_A) / PH11 (MOD_A_FLT) - owned by healthylink_slot_a
+ *
+ * HealthyLink Compute (STM32N657 slave) speaks SPI slave at the other end of
+ * the same connector pins (its local pin names are N6-side and do NOT appear
+ * on the H7). Communication is SPI mode 0 @ 20 MHz with the 1-byte command
+ * protocol in `spi_slave_handler.h` (AI_CMD_NOP / STATUS / GET_INFO / ...).
+ *
+ * scripts/build.sh m7 adds this overlay to the default build.
+ */
+
+/* SPI4 is enabled by the base DTS with the EEG ADS1299 child node using
+ * zephyr,deferred-init - both module drivers coexist in one binary and only
+ * the one matching the EEPROM module ID is brought up. We only need to
+ * attach the HealthyLink Compute child node here. */
+&spi4 {
+	/* HealthyLink Compute SPI Device (deferred-init: only brought up when the
+	 * slot EEPROM reports module ID 0x0005). */
+	healthylink_compute: compute@0 {
+		compatible = "protocentral,healthylink-compute";
+		reg = <0>;
+		spi-max-frequency = <20000000>;  /* 20 MHz, Mode 0 */
+
+		/* IRQ from module: aux-gpios[0] (PI12). Module asserts low to
+		 * signal inference complete / heartbeat. */
+		irq-gpios = <&gpioi 12 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+
+		/* Reset is per slot: this module sits in slot A, so MOD_RESET_A
+		 * (PI2). Move it to PI5 (MOD_RESET_B) for a module in slot B. PWDN
+		 * is still shared with the EEG module's line -- only one module
+		 * occupies a slot at a time, so they never contend. */
+		reset-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>;
+		pwdn-gpios  = <&gpioi 6 GPIO_ACTIVE_HIGH>;
+
+		status = "okay";
+		zephyr,deferred-init;
+	};
+};

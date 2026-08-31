@@ -1,0 +1,6 @@
+board:
+  name: healthypi6_v5
+  full_name: Protocentral HealthyPi 6 v5
+  vendor: protocentral
+  socs:
+    - name: stm32h757xx

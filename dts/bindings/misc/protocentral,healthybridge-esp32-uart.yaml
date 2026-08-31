@@ -1,0 +1,49 @@
+# Copyright (c) 2025-2026 Protocentral
+# SPDX-License-Identifier: MIT
+
+description: |
+  HealthyBridge-ESP32 host link over UART -- the framed binary transport to the
+  ESP32-C6 co-processor (WiFi/BLE re-streaming).
+
+  Declared as a child of the UART node that carries the link. The parent UART
+  supplies the baud rate, the RTS/CTS pinmux and `hw-flow-control`; this node
+  only marks which UART is the HealthyBridge link and carries the co-processor's
+  control GPIOs.
+
+  Carries the same frame codec as the SPI transport
+  (protocentral,healthybridge-esp32-spi) -- sync 0xAA55, 8-byte header,
+  CRC-16/CCITT reflected, identical payload structs. Exactly ONE of the two
+  nodes may be enabled at a time; they are alternative physical transports for
+  an identical wire contract. See docs/connectivity/SPI_TO_UART_MIGRATION.md.
+
+  Example devicetree node:
+
+    &uart4 {
+        current-speed = <921600>;
+        hw-flow-control;
+
+        healthybridge_esp32_uart: healthybridge-esp32-uart {
+            compatible = "protocentral,healthybridge-esp32-uart";
+            reset-gpios = <&gpioa 11 GPIO_ACTIVE_LOW>;
+            status = "okay";
+        };
+    };
+
+compatible: "protocentral,healthybridge-esp32-uart"
+
+include: base.yaml
+
+properties:
+  reset-gpios:
+    type: phandle-array
+    description: |
+      ESP32-C6 reset line (active low). Driven at init to bring the
+      co-processor up in a known state; the driver then waits
+      CONFIG_HEALTHYBRIDGE_ESP32_BOOT_DELAY_MS before transmitting.
+
+  ready-gpios:
+    type: phandle-array
+    description: |
+      Optional ESP32-C6 "ready" indication, input to the M7. Not required for
+      the UART transport -- hardware RTS/CTS provides flow control -- but kept
+      available where the board routes it.

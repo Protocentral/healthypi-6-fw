@@ -1,0 +1,127 @@
+# Copyright (c) 2025 ProtoCentral Electronics
+# SPDX-License-Identifier: MIT
+
+description: |
+  Texas Instruments ADS1299 - 8-Channel 24-Bit Low-Noise ADC for EEG/Biopotential
+
+  The ADS1299 is a low-noise, 8-channel, 24-bit analog-to-digital converter
+  designed specifically for EEG and biopotential measurements.
+
+  This is a separate driver from ADS129xx (ECG) due to EEG-specific features:
+  - 8 fixed channels
+  - Different gain mapping (includes 24x for EEG)
+  - BIAS drive circuit for patient reference
+  - SRB1/SRB2 reference routing for EEG montages
+  - No respiration demodulation
+
+  Key Specifications:
+  - 8 differential input channels
+  - 24-bit resolution (< 1 µVpp noise @ gain=24)
+  - Sample rates: 250, 500, 1000, 2000, 4000, 8000, 16000 SPS
+  - Programmable gain: 1, 2, 4, 6, 8, 12, 24
+  - Internal 2.4V reference
+  - SPI interface (Mode 1: CPOL=0, CPHA=1)
+  - SPI clock: 4 MHz max
+
+  Example:
+    &spi4 {
+        ads1299: ads1299@0 {
+            compatible = "ti,ads1299";
+            reg = <0>;
+            spi-max-frequency = <4000000>;
+            drdy-gpios = <&gpioi 2 GPIO_ACTIVE_LOW>;
+            reset-gpios = <&gpioi 3 GPIO_ACTIVE_LOW>;
+            pwdn-gpios = <&gpioi 6 GPIO_ACTIVE_LOW>;
+            start-gpios = <&gpioa 9 GPIO_ACTIVE_HIGH>;
+            gain = <24>;
+            sample-rate = <250>;
+            bias-enabled;
+            srb1-enabled;
+        };
+    };
+
+compatible: "ti,ads1299"
+
+include: [sensor-device.yaml, spi-device.yaml]
+
+properties:
+  drdy-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Data Ready GPIO. Active low, pulses when new sample data is available.
+      Connect to an interrupt-capable GPIO for efficient data acquisition.
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Reset GPIO. Active low. Asserting low resets all internal registers
+      to their default values. Hold low for at least 2 tCLK cycles.
+
+  pwdn-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Power Down GPIO. Active low. Asserting low puts the device into
+      a low-power standby mode. All analog circuitry is powered down.
+
+  start-gpios:
+    type: phandle-array
+    required: false
+    description: |
+      Start/Stop GPIO. Active high. When high, enables continuous
+      data conversion. When low, conversions stop after current sample.
+
+      Optional: the ADS1299 can equally be started and stopped with the START
+      and STOP SPI opcodes, which the driver already issues alongside this pin.
+      Omit the property on a board that does not route START to the MCU (v5 does
+      not -- PI2 became MOD_RESET_A) and the driver uses the commands alone.
+
+  gain:
+    type: int
+    default: 24
+    description: |
+      PGA gain for all channels. For EEG applications, gain of 24 is typical.
+      Valid values: 1, 2, 4, 6, 8, 12, 24
+      - Gain 24: ±187.5mV input range, optimal for EEG
+      - Gain 12: ±375mV input range
+      - Gain 1: ±4.5V input range
+    enum:
+      - 1
+      - 2
+      - 4
+      - 6
+      - 8
+      - 12
+      - 24
+
+  sample-rate:
+    type: int
+    default: 250
+    description: |
+      Output data rate in samples per second.
+      Higher rates have higher noise floor.
+      250 SPS is recommended for most EEG applications.
+    enum:
+      - 250
+      - 500
+      - 1000
+      - 2000
+      - 4000
+      - 8000
+      - 16000
+
+  bias-enabled:
+    type: boolean
+    description: |
+      Enable BIAS (patient reference) drive circuit.
+      When enabled, the BIAS electrode provides a reference potential
+      to reduce common-mode interference. Recommended for EEG.
+
+  srb1-enabled:
+    type: boolean
+    description: |
+      Enable SRB1 as reference for all negative inputs.
+      Useful for common reference montage where all channels share
+      a single reference electrode. Common in clinical EEG setups.

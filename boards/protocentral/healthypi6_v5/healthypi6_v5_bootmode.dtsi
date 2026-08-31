@@ -1,0 +1,61 @@
+/*
+ * Shared boot-mode retention area — SIGNED flavor only.
+ *
+ * Included by BOTH healthypi6_v5_mcuboot_boot.overlay (MCUboot) and
+ * healthypi6_v5_mcuboot_app.overlay (app_m7). The two images have to agree
+ * byte-for-byte on where the flag lives and how it is validated, so it is
+ * declared exactly once here rather than copied into each overlay.
+ *
+ * What it is for: MCUboot serial recovery.
+ * The app writes BOOT_MODE_TYPE_BOOTLOADER here and reboots; MCUboot reads it
+ * (CONFIG_BOOT_SERIAL_BOOT_MODE) and stays in serial recovery instead of
+ * jumping to slot0. That is the "device is healthy but the user wants to
+ * reflash" entry. The "device has no bootable image" entry needs no flag —
+ * CONFIG_BOOT_SERIAL_NO_APPLICATION covers it.
+ *
+ * Why backup SRAM and not ordinary RAM: it is in the D3 domain, VBAT-backed
+ * (the board has the coin cell for the RTC), and — unlike SRAM4 — nothing else
+ * claims it. SRAM4 is fully allocated to the OpenAMP IPC vrings and is
+ * mirrored in the M4's DTS, so carving a slice out of it would be a two-core
+ * change for no gain. Backup SRAM measured 0 B used in the signed build.
+ *
+ * NOTE: CONFIG_STM32_BACKUP_SRAM also creates a BACKUP_SRAM linker region over
+ * the same 4 KB. Nothing may be placed there with __stm32_backup_sram_section
+ * while this retention area exists — the retained-ram driver addresses the
+ * parent's reg directly and does not participate in linker allocation.
+ */
+
+&backup_sram {
+	status = "okay";
+
+	retainedmem0: retainedmem {
+		compatible = "zephyr,retained-ram";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/*
+		 * 16 bytes: 4-byte "HP6B" prefix + 1 user byte (the boot mode) +
+		 * 1-byte checksum, the rest reserved for later retained state.
+		 *
+		 * The prefix and checksum are not optional here. Backup SRAM comes
+		 * up with undefined contents on a first power-on with no coin cell,
+		 * and an unvalidated area would let random bytes read as "enter
+		 * recovery" — a device that boots into the bootloader out of the
+		 * box. retention_is_valid() gates on both.
+		 */
+		boot_mode0: retention@0 {
+			compatible = "zephyr,retention";
+			status = "okay";
+			reg = <0x0 0x10>;
+			prefix = [48 50 36 42];   /* "HP6B" */
+			checksum = <1>;
+		};
+	};
+};
+
+/ {
+	chosen {
+		zephyr,boot-mode = &boot_mode0;
+	};
+};

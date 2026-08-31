@@ -1,0 +1,78 @@
+/*
+ * HealthyLink Compute Module Overlay
+ * Copyright (c) 2025-2026 ProtoCentral
+ * SPDX-License-Identifier: MIT
+ *
+ * External AI/ML compute module for inference offload
+ * Module ID: 0x0005
+ *
+ * Supported Accelerators:
+ *   - Google Coral Edge TPU (USB or SPI variants)
+ *   - Custom FPGA/ASIC accelerators
+ *   - Secondary MCU with dedicated ML capabilities
+ *
+ * Hardware Connections (STM32H757 Master):
+ *   SPI4: PG12 (SCK), PD4 (MISO), PF11 (MOSI), PA3 (CS)
+ *   GPIO: PI3 (IRQ/BUSY), PI6 (RESET)
+ *
+ * NPU Module (STM32N657 Slave):
+ *   SPI5: PG12 (SCK), PD4 (MISO), PF11 (MOSI), PA3 (CS)
+ *
+ * Communication Protocol:
+ *   SPI at up to 20 MHz for model input/output transfer
+ *   IRQ signal indicates inference completion
+ *
+ * Usage:
+ *   west build -b healthypi6_v3/stm32h757xx/m7 app_m7 \
+ *       -DEXTRA_DTC_OVERLAY_FILE="boards/protocentral/healthypi6_v3/healthylink-compute.overlay"
+ */
+
+/* Include base HealthyLink definitions */
+#include "healthylink.dtsi"
+
+/* Enable SPI4 for HealthyLink Compute communication */
+&spi4 {
+	status = "okay";
+	pinctrl-0 = <&spi4_sck_pg12 &spi4_miso_pd4 &spi4_mosi_pf11>;
+	pinctrl-names = "default";
+
+	/* Software chip select on PA3 */
+	cs-gpios = <&gpioa 3 GPIO_ACTIVE_LOW>;
+
+	/* HealthyLink Compute SPI Device */
+	healthylink_compute: compute@0 {
+		compatible = "protocentral,healthylink-compute";
+		reg = <0>;
+		spi-max-frequency = <20000000>;  /* 20 MHz */
+
+		irq-gpios = <&gpioi 3 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpioi 6 GPIO_ACTIVE_LOW>;
+
+		status = "okay";
+	};
+};
+
+/ {
+	/* HealthyLink Compute module binding */
+	healthylink_compute: healthylink-compute {
+		compatible = "protocentral,healthylink-compute";
+		status = "okay";
+
+		/* Reference to the SPI accelerator device */
+		accelerator = <&healthylink_compute>;
+
+		/* Module identification */
+		module-id = <0x0005>;
+
+		inference-offload;
+		inference-timeout-ms = <1000>;
+
+		input-buffer-size = <4096>;
+		output-buffer-size = <256>;
+	};
+
+	/* Update chosen node for AI module */
+	chosen {
+		healthylink-module = &healthylink_compute;
+	};
+};
