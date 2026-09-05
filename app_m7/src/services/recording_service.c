@@ -148,15 +148,24 @@ static void mkdir_one(const char *path)
     if (fs_stat(path, &ent) == 0) {
         return;   /* already exists */
     }
-    (void)fs_mkdir(path);
+    int rc = fs_mkdir(path);
+    if (rc != 0 && rc != -EEXIST) {
+        LOG_WRN("mkdir %s failed (%d)", path, rc);
+    }
 }
 
 /* Best-effort mkdir -p, starting BELOW the "/SD:" mount point (you can't mkdir
  * the volume root -- that produced the -ENOENT noise in the log). */
 static void mkdir_p(const char *dir)
 {
-    char tmp[64];
-    strncpy(tmp, dir, sizeof(tmp) - 1);
+    /* Allow reasonably long paths under the mount point. */
+    char tmp[128];
+    size_t n = strlen(dir);
+    if (n >= sizeof(tmp)) {
+        LOG_WRN("mkdir_p: path too long (%zu)", n);
+        return;
+    }
+    strncpy(tmp, dir, sizeof(tmp));
     tmp[sizeof(tmp) - 1] = '\0';
 
     /* Skip the mount point: advance past the '/' that follows "/SD:". */
@@ -164,6 +173,8 @@ static void mkdir_p(const char *dir)
     if (start == NULL) {
         return;   /* nothing below the volume to create */
     }
+
+    /* Create each directory component below the mount point. */
     for (char *p = start + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
@@ -172,6 +183,30 @@ static void mkdir_p(const char *dir)
         }
     }
     mkdir_one(tmp);
+}
+
+/* Diagnostic helper: log stat results for the path, its parent, and the SD mount. */
+static void log_path_status(const char *path)
+{
+    struct fs_dirent ent;
+    int rc;
+
+    rc = fs_stat(path, &ent);
+    LOG_WRN("diag: fs_stat %s -> %d", path, rc);
+
+    char tmp[128];
+    strncpy(tmp, path, sizeof(tmp));
+    tmp[sizeof(tmp) - 1] = '\0';
+    char *slash = strrchr(tmp, '/');
+    if (slash != NULL && slash != tmp) {
+        *slash = '\0';
+        rc = fs_stat(tmp, &ent);
+        LOG_WRN("diag: fs_stat parent %s -> %d", tmp, rc);
+    }
+
+    struct fs_statvfs sv;
+    rc = fs_statvfs("/SD:", &sv);
+    LOG_WRN("diag: fs_statvfs /SD: -> %d", rc);
 }
 
 /* Build the dated path + create dirs. Uses the RTC if available. */
@@ -192,8 +227,9 @@ static void build_path(void)
     } else {
         snprintf(daydir, sizeof(daydir), REC_ROOT "/UNDATED");
         mkdir_p(daydir);
-        snprintf(file, sizeof(file), "%s/UPT_%06u.HP6", daydir,
-                 (unsigned)(++g_undated_seq));
+        /* Use an 8.3-compatible filename when FAT LFN is disabled. */
+        snprintf(file, sizeof(file), "%s/UP%06u.HP6", daydir,
+             (unsigned)(++g_undated_seq));
     }
     strncpy(g_path, file, sizeof(g_path) - 1);
     g_path[sizeof(g_path) - 1] = '\0';
@@ -531,6 +567,7 @@ int hpi_recording_start(const char *session_name)
     rc = fs_open(&g_file, g_path, FS_O_CREATE | FS_O_WRITE);
     if (rc != 0) {
         LOG_ERR("fs_open %s failed (%d)", g_path, rc);
+        log_path_status(g_path);
         goto out;
     }
     ssize_t w = fs_write(&g_file, &g_hdr, sizeof(g_hdr));
