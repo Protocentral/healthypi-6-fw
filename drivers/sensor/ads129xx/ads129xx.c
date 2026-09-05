@@ -563,6 +563,7 @@ static int ads129xx_chip_init(const struct device *dev)
      * this ships.
      */
     _ads129xx_reg_write(dev, ADS129XX_REG_LOFF, 0xC4);
+  //  _ads129xx_reg_write(dev, ADS129XX_REG_LOFF, 0x00);
     k_sleep(K_MSEC(10));
 
     /* Select WHICH electrodes the lead-off comparators watch (LOFF_SENSP 0x0F /
@@ -579,6 +580,8 @@ static int ads129xx_chip_init(const struct device *dev)
      */
     _ads129xx_reg_write(dev, ADS129XX_REG_LOFF_SENSP, 0x0E);
     _ads129xx_reg_write(dev, ADS129XX_REG_LOFF_SENSN, 0x02);
+    // _ads129xx_reg_write(dev, ADS129XX_REG_LOFF_SENSP, 0x00);
+    // _ads129xx_reg_write(dev, ADS129XX_REG_LOFF_SENSN, 0x00);
     k_sleep(K_MSEC(10));
 
     /* ===================================================================
@@ -627,8 +630,10 @@ static int ads129xx_chip_init(const struct device *dev)
      * RLD_SENSN (0x0E) = 0x02: RLD2N (RA, IN2N) only - RA is also on IN3N
      *   but must be counted once
      */
-    _ads129xx_reg_write(dev, ADS129XX_REG_RLD_SENSP, 0x06); // RLD+ from LA(IN2P), LL(IN3P)
-    _ads129xx_reg_write(dev, ADS129XX_REG_RLD_SENSN, 0x02); // RLD- from RA(IN2N)
+    // _ads129xx_reg_write(dev, ADS129XX_REG_RLD_SENSP, 0x06); // RLD+ from LA(IN2P), LL(IN3P)
+    // _ads129xx_reg_write(dev, ADS129XX_REG_RLD_SENSN, 0x02); // RLD- from RA(IN2N)
+    _ads129xx_reg_write(dev, ADS129XX_REG_RLD_SENSP, 0x0E); // RLD+ from LA(IN2P), LL(IN3P)
+    _ads129xx_reg_write(dev, ADS129XX_REG_RLD_SENSN, 0x0E); // RLD- from RA(IN2N)
 
     /* WCT (Wilson Central Terminal) - ADS1294R
      *
@@ -652,8 +657,11 @@ static int ads129xx_chip_init(const struct device *dev)
      * NOTE WCT2 layout is PD_WCTC[7] PD_WCTB[6] WCTB[5:3] WCTC[2:0] - NOT
      * WCTC[6:4]/WCTB[2:0].
      */
-    _ads129xx_reg_write(dev, ADS129XX_REG_WCT1, 0x0B); // PD_WCTA on; WCTA=RA(IN2N)
-    _ads129xx_reg_write(dev, ADS129XX_REG_WCT2, 0xD4); // PD_WCTC+PD_WCTB on; WCTB=LA(IN2P), WCTC=LL(IN3P)
+    // _ads129xx_reg_write(dev, ADS129XX_REG_WCT1, 0x0B); // PD_WCTA on; WCTA=RA(IN2N)
+    // _ads129xx_reg_write(dev, ADS129XX_REG_WCT2, 0xD4); // PD_WCTC+PD_WCTB on; WCTB=LA(IN2P), WCTC=LL(IN3P)
+
+    _ads129xx_reg_write(dev, ADS129XX_REG_WCT1, 0x01); // PD_WCTA on; WCTA=RA(IN2N)
+    _ads129xx_reg_write(dev, ADS129XX_REG_WCT2, 0x32); // PD_WCTC+PD_WCTB on; WCTB=LA(IN2P), WCTC=LL(IN3P)
 
     /* Respiration detection (ADS1294R): circuit on Channel 1 (IN1P/IN1N),
      * RESPMODP/RESPMODN via RC network per ADS1292R Figure 97; internal
@@ -678,7 +686,8 @@ static int ads129xx_chip_init(const struct device *dev)
      *          1 = enabled.
      *   Other bits: default 0
      */
-    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG4, PD_LOFF_COMP);
+   // _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG4, PD_LOFF_COMP);
+    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG4, 0x00);
     k_sleep(K_MSEC(10));
 
     /* Read back and LOG the respiration + lead-off config: the lead-off path
