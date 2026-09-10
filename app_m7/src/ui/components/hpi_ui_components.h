@@ -66,6 +66,20 @@ void hpi_ui_navbar_set_active(lv_obj_t *bar, int active);
  * for mask 0. Shared so Home and Live say the same thing. */
 void hpi_ui_lead_off_text(uint8_t mask, char *buf, size_t len);
 
+/* Pill-shaped status chip: a short upper-case word tinted with the state's own
+ * colour ("ACTIVE" in HPI_M3_SUCCESS, "NO LINK" in HPI_M3_ERROR). The tint is
+ * applied to both the text and a 20 % wash behind it, so one token carries the
+ * whole state.
+ *
+ * Returns the LABEL, not the container — that is what hpi_ui_chip_set() takes,
+ * and holding the label is what lets a screen keep one handle per chip. */
+lv_obj_t *hpi_ui_chip_create(lv_obj_t *parent, const char *text, lv_color_t col);
+
+/* Retext/recolour a chip. Skips the work when neither moved: lv_label_set_text()
+ * reallocates and invalidates unconditionally, and these are repainted ~2 Hz on
+ * screens carrying several of them. */
+void hpi_ui_chip_set(lv_obj_t *chip_label, const char *text, lv_color_t col);
+
 /* [ − ] value [ + ] stepper — the touch-friendly way to set a number.
  *
  * Prefer this to lv_slider: a slider's track is ~10 px tall and emits a

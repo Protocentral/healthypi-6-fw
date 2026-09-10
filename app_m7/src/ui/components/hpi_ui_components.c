@@ -451,6 +451,45 @@ void hpi_ui_lead_off_text(uint8_t mask, char *buf, size_t len)
 	}
 }
 
+/* ---- status chip ---- */
+lv_obj_t *hpi_ui_chip_create(lv_obj_t *parent, const char *text, lv_color_t col)
+{
+	lv_obj_t *c = lv_obj_create(parent);
+
+	lv_obj_set_size(c, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+	lv_obj_set_style_bg_color(c, col, 0);
+	lv_obj_set_style_bg_opa(c, LV_OPA_20, 0);
+	lv_obj_set_style_radius(c, HPI_M3_RADIUS_PILL, 0);
+	lv_obj_set_style_border_width(c, 0, 0);
+	lv_obj_set_style_pad_hor(c, HPI_M3_SPACE_2, 0);
+	lv_obj_set_style_pad_ver(c, HPI_M3_SPACE_1, 0);
+	lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+
+	lv_obj_t *l = lv_label_create(c);
+
+	lv_label_set_text(l, text);
+	lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
+	lv_obj_set_style_text_color(l, col, 0);
+	return l;   /* the label: what hpi_ui_chip_set() retexts */
+}
+
+void hpi_ui_chip_set(lv_obj_t *chip_label, const char *text, lv_color_t col)
+{
+	if (chip_label == NULL) {
+		return;
+	}
+	/* Same reasoning as sb_label_set(): only touch what actually moved. The
+	 * wash behind the text lives on the parent, so recolour both or neither. */
+	if (strcmp(lv_label_get_text(chip_label), text) != 0) {
+		lv_label_set_text(chip_label, text);
+	}
+	if (lv_color_to_u32(lv_obj_get_style_text_color(chip_label, 0)) !=
+	    lv_color_to_u32(col)) {
+		lv_obj_set_style_text_color(chip_label, col, 0);
+		lv_obj_set_style_bg_color(lv_obj_get_parent(chip_label), col, 0);
+	}
+}
+
 /* ---- stepper ---- */
 
 /* One key of the stepper: a HPI_M3_TOUCH_MIN square, so the tap area is the

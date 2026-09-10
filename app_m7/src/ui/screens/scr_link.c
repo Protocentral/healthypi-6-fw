@@ -32,25 +32,6 @@ static struct {
 	lv_obj_t *ble_knob;
 } s_ln;
 
-/* A small pill-shaped status chip. */
-static lv_obj_t *chip(lv_obj_t *parent, const char *text, lv_color_t col)
-{
-	lv_obj_t *c = lv_obj_create(parent);
-	lv_obj_set_size(c, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-	lv_obj_set_style_bg_color(c, col, 0);
-	lv_obj_set_style_bg_opa(c, LV_OPA_20, 0);
-	lv_obj_set_style_radius(c, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(c, 0, 0);
-	lv_obj_set_style_pad_hor(c, HPI_M3_SPACE_2, 0);
-	lv_obj_set_style_pad_ver(c, HPI_M3_SPACE_1, 0);
-	lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_t *l = lv_label_create(c);
-	lv_label_set_text(l, text);
-	lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
-	lv_obj_set_style_text_color(l, col, 0);
-	return l;   /* return the label so callers can retext it */
-}
-
 /* A 44x24 visual toggle; returns the track, writes the knob to *knob_out.
  *
  * Do NOT use hpi_m3_apply_touch() here -- its min sizes would deform the
@@ -203,7 +184,7 @@ lv_obj_t *hpi_scr_link_create(lv_obj_t *parent)
 	/* Wi-Fi (live). */
 	lv_obj_t *whdr;
 	lv_obj_t *wc = link_card(body, HPI_SYM_WIFI, HPI_M3_PRIMARY, "WI-FI", &whdr);
-	s_ln.wifi_pill = chip(whdr, "OFF", HPI_M3_ON_SURFACE_VARIANT);
+	s_ln.wifi_pill = hpi_ui_chip_create(whdr, "OFF", HPI_M3_ON_SURFACE_VARIANT);
 	s_ln.wifi_sw = toggle(whdr, false, &s_ln.wifi_knob);
 	lv_obj_add_flag(s_ln.wifi_sw, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_add_event_cb(s_ln.wifi_sw, wifi_toggle_cb, LV_EVENT_CLICKED, NULL);
@@ -235,7 +216,7 @@ lv_obj_t *hpi_scr_link_create(lv_obj_t *parent)
 	/* BLE (live -- the co-processor handles BLE_ADV_START/_STOP). */
 	lv_obj_t *bhdr;
 	lv_obj_t *bc = link_card(body, HPI_SYM_BT, HPI_M3_PRIMARY, "BLE", &bhdr);
-	s_ln.ble_pill = chip(bhdr, "OFF", HPI_M3_ON_SURFACE_VARIANT);
+	s_ln.ble_pill = hpi_ui_chip_create(bhdr, "OFF", HPI_M3_ON_SURFACE_VARIANT);
 	s_ln.ble_sw = toggle(bhdr, false, &s_ln.ble_knob);
 	lv_obj_add_flag(s_ln.ble_sw, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_add_event_cb(s_ln.ble_sw, ble_toggle_cb, LV_EVENT_CLICKED, NULL);
@@ -247,7 +228,7 @@ lv_obj_t *hpi_scr_link_create(lv_obj_t *parent)
 	/* USB CDC (capability — composite always enumerated). */
 	lv_obj_t *uhdr;
 	link_card(body, HPI_SYM_USB, HPI_M3_ON_SURFACE_VARIANT, "USB CDC", &uhdr);
-	chip(uhdr, "COMPOSITE", HPI_M3_SUCCESS);
+	hpi_ui_chip_create(uhdr, "COMPOSITE", HPI_M3_SUCCESS);
 
 	/* Footer note. */
 	lv_obj_t *note = lv_label_create(body);
@@ -260,12 +241,6 @@ lv_obj_t *hpi_scr_link_create(lv_obj_t *parent)
 
 	hpi_scr_link_refresh();
 	return root;
-}
-
-static void pill_set(lv_obj_t *pill, const char *text, lv_color_t col)
-{
-	lv_label_set_text(pill, text);
-	lv_obj_set_style_text_color(pill, col, 0);
 }
 
 /*
@@ -290,34 +265,34 @@ void hpi_scr_link_refresh(void)
 	if (st.link_state == HPI_CONN_LINK_OFF) {
 		/* The normal resting state, not an error: the device boots this
 		 * way on purpose. Say what to do, not what is broken. */
-		pill_set(s_ln.wifi_pill, "OFF", HPI_M3_ON_SURFACE_VARIANT);
+		hpi_ui_chip_set(s_ln.wifi_pill, "OFF", HPI_M3_ON_SURFACE_VARIANT);
 		lv_label_set_text(s_ln.wifi_detail,
 				  "Radio off. Turn it on when you need it — it is the "
 				  "largest draw on the battery.");
 	} else if (st.link_state == HPI_CONN_LINK_STARTING) {
-		pill_set(s_ln.wifi_pill, "STARTING", HPI_M3_WARNING);
+		hpi_ui_chip_set(s_ln.wifi_pill, "STARTING", HPI_M3_WARNING);
 		lv_label_set_text(s_ln.wifi_detail, "Powering the co-processor...");
 	} else if (st.link_state == HPI_CONN_LINK_FAULT) {
-		pill_set(s_ln.wifi_pill, "NO LINK", HPI_M3_ERROR);
+		hpi_ui_chip_set(s_ln.wifi_pill, "NO LINK", HPI_M3_ERROR);
 		lv_label_set_text(s_ln.wifi_detail, "Co-processor is not responding");
 	} else if (st.wifi_state == HPI_CONN_WIFI_CONNECTED) {
-		pill_set(s_ln.wifi_pill, "CONNECTED", HPI_M3_SUCCESS);
+		hpi_ui_chip_set(s_ln.wifi_pill, "CONNECTED", HPI_M3_SUCCESS);
 		snprintf(buf, sizeof(buf), "%s  %d dBm  %u.%u.%u.%u", st.ssid, st.rssi,
 			 st.ip[0], st.ip[1], st.ip[2], st.ip[3]);
 		lv_label_set_text(s_ln.wifi_detail, buf);
 	} else if (st.wifi_state == HPI_CONN_WIFI_CONNECTING) {
-		pill_set(s_ln.wifi_pill, "CONNECTING", HPI_M3_WARNING);
+		hpi_ui_chip_set(s_ln.wifi_pill, "CONNECTING", HPI_M3_WARNING);
 		lv_label_set_text(s_ln.wifi_detail, "Associating...");
 	} else if (st.wifi_state == HPI_CONN_WIFI_AP_MODE) {
-		pill_set(s_ln.wifi_pill, "SETUP", HPI_M3_PRIMARY);
+		hpi_ui_chip_set(s_ln.wifi_pill, "SETUP", HPI_M3_PRIMARY);
 		lv_label_set_text(s_ln.wifi_detail,
 				  "Join the \"HealthyPi-...\" network, then open "
 				  "192.168.4.1 to choose your Wi-Fi.");
 	} else if (st.wifi_state == HPI_CONN_WIFI_ERROR) {
-		pill_set(s_ln.wifi_pill, "ERROR", HPI_M3_ERROR);
+		hpi_ui_chip_set(s_ln.wifi_pill, "ERROR", HPI_M3_ERROR);
 		lv_label_set_text(s_ln.wifi_detail, "The radio failed to start");
 	} else {
-		pill_set(s_ln.wifi_pill, "IDLE", HPI_M3_ON_SURFACE_VARIANT);
+		hpi_ui_chip_set(s_ln.wifi_pill, "IDLE", HPI_M3_ON_SURFACE_VARIANT);
 		lv_label_set_text(s_ln.wifi_detail,
 				  (st.radios & HPI_CONN_RADIO_WIFI)
 					  ? "No stored network — use SET UP WI-FI"
@@ -326,16 +301,16 @@ void hpi_scr_link_refresh(void)
 
 	/* ---- BLE ---- */
 	if (st.link_state != HPI_CONN_LINK_UP) {
-		pill_set(s_ln.ble_pill, "OFF", HPI_M3_ON_SURFACE_VARIANT);
+		hpi_ui_chip_set(s_ln.ble_pill, "OFF", HPI_M3_ON_SURFACE_VARIANT);
 		lv_label_set_text(s_ln.ble_detail, "Not advertising");
 	} else if (st.ble_conn) {
-		pill_set(s_ln.ble_pill, "CONNECTED", HPI_M3_SUCCESS);
+		hpi_ui_chip_set(s_ln.ble_pill, "CONNECTED", HPI_M3_SUCCESS);
 		lv_label_set_text(s_ln.ble_detail, "A device is receiving vitals");
 	} else if (st.ble_adv) {
-		pill_set(s_ln.ble_pill, "ADVERTISING", HPI_M3_PRIMARY);
+		hpi_ui_chip_set(s_ln.ble_pill, "ADVERTISING", HPI_M3_PRIMARY);
 		lv_label_set_text(s_ln.ble_detail, "Discoverable — open the app to pair");
 	} else {
-		pill_set(s_ln.ble_pill, "OFF", HPI_M3_ON_SURFACE_VARIANT);
+		hpi_ui_chip_set(s_ln.ble_pill, "OFF", HPI_M3_ON_SURFACE_VARIANT);
 		lv_label_set_text(s_ln.ble_detail, "Not advertising");
 	}
 }
