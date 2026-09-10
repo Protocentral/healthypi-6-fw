@@ -68,6 +68,7 @@ lv_obj_t *hpi_scr_more_create(lv_obj_t *parent)
 	lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
 
 	more_add_row(list, "Link",     HPI_UI_SCREEN_LINK);
+	more_add_row(list, "HealthyLink", HPI_UI_SCREEN_HEALTHYLINK);
 	more_add_row(list, "HRV",      HPI_UI_SCREEN_HRV);
 	more_add_row(list, "Settings", HPI_UI_SCREEN_SETTINGS);
 	more_add_row(list, "OTA",      HPI_UI_SCREEN_OTA);

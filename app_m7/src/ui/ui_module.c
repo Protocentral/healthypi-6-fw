@@ -26,6 +26,7 @@
 #include "screens/scr_boot.h"
 #include "screens/scr_trends.h"
 #include "screens/scr_link.h"
+#include "screens/scr_healthylink.h"
 #include "screens/scr_settings.h"
 #include "screens/scr_ambient.h"
 #include "screens/scr_power.h"
@@ -262,6 +263,8 @@ static void ui_build_screens(void)
 	ui_trace("alert");
 	s_screen[HPI_UI_SCREEN_OTA]      = hpi_scr_ota_create(s_content);
 	ui_trace("ota");
+	s_screen[HPI_UI_SCREEN_HEALTHYLINK] = hpi_scr_healthylink_create(s_content);
+	ui_trace("hlink");
 
 	s_navbar = hpi_ui_navbar_create(scr, HPI_UI_SCREEN_HOME);
 	ui_trace("navbar");
@@ -567,6 +570,8 @@ static void ui_thread(void *a, void *b, void *c)
 				hpi_scr_record_refresh();
 			} else if (s_active == HPI_UI_SCREEN_LINK) {
 				hpi_scr_link_refresh();   /* Wi-Fi status */
+			} else if (s_active == HPI_UI_SCREEN_HEALTHYLINK) {
+				hpi_scr_healthylink_refresh();   /* module + link */
 			}
 		}
 
