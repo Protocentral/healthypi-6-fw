@@ -81,6 +81,7 @@ target_sources_ifdef(CONFIG_HPI_DISPLAY_ENABLED app PRIVATE
     src/ui/screens/scr_boot.c
     src/ui/screens/scr_trends.c
     src/ui/screens/scr_link.c
+    src/ui/screens/scr_healthylink.c
     src/ui/screens/scr_settings.c
     src/ui/screens/scr_ambient.c
     src/ui/screens/scr_power.c
@@ -143,6 +144,7 @@ target_sources(app PRIVATE
 target_sources(app PRIVATE
     src/healthylink/hl_arbiter.c
     src/healthylink/healthylink_service.c
+    src/healthylink/hlink_proto.c
     src/healthylink/mod_eeg.c
     src/healthylink/mod_npu.c
     src/healthylink/npu_uart_host.c
