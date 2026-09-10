@@ -47,4 +47,10 @@
 #define HPI_SYM_POWER      "\xEE\x98\xBC"   /* power U+E63C */
 #define HPI_SYM_ARROW      "\xEE\x97\x88"   /* arrow_forward U+E5C8 */
 
+/* Status bar: shown beside the battery percentage while a charge cycle is
+ * actually running. Distinct from HPI_SYM_USB, which says a host is attached
+ * -- on this hardware those are genuinely different states and a board can
+ * sit in either one without the other. */
+#define HPI_SYM_CHARGE     "\xEE\xA8\x8B"   /* bolt U+EA0B */
+
 #endif /* HPI_UI_SYMBOLS_H */

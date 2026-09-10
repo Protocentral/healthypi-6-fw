@@ -130,6 +130,10 @@ static void power_thread(void *a, void *b, void *c)
         g_status.charge_state = cs;
         /* Measured (PGOOD), not inferred from charge_state. */
         g_status.usb_present = usb;
+        /* Enumeration, kept separate from the supply above -- see the header.
+         * Reported unconditionally, so a host that is plainly connected is
+         * still visible on a board whose PGOOD never asserts. */
+        g_status.usb_attached = hpi_usb_attached();
         k_mutex_unlock(&g_lock);
 
         if (ok) {

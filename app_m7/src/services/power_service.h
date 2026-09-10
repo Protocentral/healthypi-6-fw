@@ -34,7 +34,22 @@ struct hpi_power_status {
     int32_t  ibat_ma;
     uint32_t soc_pct;
     uint8_t  charge_state; /* enum hpi_charge_state */
+    /*
+     * TWO DIFFERENT QUESTIONS, and a board can answer them differently.
+     *
+     * usb_present  -- is a valid INPUT SUPPLY at the charger? Measured from the
+     *                 BQ24074's PGOOD pin, which also sees a dumb wall charger
+     *                 that never enumerates.
+     * usb_attached -- is a USB HOST talking to us? From enumeration, which sees
+     *                 a host that supplies no power (a bus-powered hub that
+     *                 cannot source, or a board whose VBUS path is broken)
+     *                 exactly as well as one that does.
+     *
+     * Collapsing them was how a unit that could hold a CDC session while
+     * running its battery flat still showed nothing on the status bar.
+     */
     bool     usb_present;
+    bool     usb_attached;
 };
 
 int  hpi_power_service_init(void);
