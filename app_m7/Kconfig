@@ -83,31 +83,51 @@ config HPI_NPU_UART
 	  path and logs the result.
 
 config HPI_NPU_COMMS_CHECK
-	bool "Probe the HealthyLink NPU (STM32N657) over SPI4 at module start"
+	bool "Run the HLink v2 handshake with the Compute module over SPI4"
 	default n
 	depends on !HPI_NPU_UART
 	help
-	  Dev/bring-up aid: when an HealthyLink Compute module is detected, perform a
-	  SPI4 STATUS + GET_INFO transaction with the N657 and log the link state.
+	  When a HealthyLink Compute module is detected, run the HLink v2
+	  handshake over SPI4 -- alive signature, GET_INFO, STATUS -- and cache
+	  the result for hpi_npu_link_get(), the group-64 self-test and the
+	  HealthyLink screen.
 
-	  OFF by default: SPI4 transfers are not yet proven on this hardware and a
-	  faulting transceive resets the board (boot loop). The NPU is still
+	  OFF by default: SPI4 transfers are not yet proven on this hardware and
+	  a faulting transceive resets the board (boot loop). The module is still
 	  detected, registered and marked active without this; enable only for
-	  focused SPI4 bring-up, ideally with a debugger/RTT attached to catch any
-	  fault. The check runs on a dedicated low-priority work queue so it cannot
-	  starve the watchdog, but a CPU exception in the SPI driver will still
-	  reset regardless of thread.
+	  focused SPI4 bring-up, ideally with a debugger/RTT attached to catch
+	  any fault. The handshake runs on a dedicated low-priority work queue so
+	  it cannot starve the watchdog, but a CPU exception in the SPI driver
+	  will still reset regardless of thread.
 
-config HPI_NPU_INFERENCE_TEST
-	bool "Run one NPU inference round-trip after the comms check (bring-up)"
-	default n
+	  NOTE: the module side has never been driven by any HLink v2 master --
+	  the PC harness exercises its USB CDC link, not SPI. Turning this on is
+	  joint bring-up of both halves, not a test against a proven peer.
+
+config HPI_NPU_SPI_FREQ_HZ
+	int "SPI4 clock for the HealthyLink Compute link (Hz)"
+	default 1000000
 	depends on HPI_NPU_COMMS_CHECK
 	help
-	  Bring-up aid: once the SPI4 link is alive, run a full inference
-	  round-trip against the HealthyLink Compute (N657) beat-classifier model --
-	  LOAD_INPUT (187 INT8 ECG samples, synthetic ramp) -> RUN_INFERENCE -> wait
-	  for the module IRQ (PI12) -> READ_OUTPUT (5 AAMI class scores) -- and log
-	  the result. Runs once on the npu_comms work queue; dev only.
+	  Conservative by default: 1 MHz rules out the >200 MHz-core CS/clock
+	  latch errata (zephyr#57219). The link is specified for 20 MHz; ratchet
+	  1 -> 8 -> 20 as it proves itself, here rather than in the source.
+
+	  The host SPI4 minimum is 390625 Hz -- a lower value returns -EINVAL and
+	  never clocks the bus.
+
+config HPI_NPU_IRQ_WAIT_MS
+	int "How long to wait for the module to stage a reply (ms)"
+	default 50
+	depends on HPI_NPU_COMMS_CHECK
+	help
+	  The module asserts its IRQ line when a reply is staged. This is the
+	  fallback timeout for when that edge does not arrive, and the exchange
+	  proceeds either way -- a missing IRQ costs latency, never the reply.
+
+	  That tolerance is deliberate: which pin the IRQ actually is has four
+	  non-agreeing answers across the host overlay, the DF9 connector table
+	  and the module schematic. 50 ms is what the v1 host slept unconditionally.
 
 config HPI_SPI4_LOOPBACK_TEST
 	bool "Run a SPI4 loopback self-test at boot (bring-up diagnostic)"
