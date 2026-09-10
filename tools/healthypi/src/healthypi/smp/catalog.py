@@ -162,8 +162,18 @@ COMMANDS: tuple[Command, ...] = (
             Field("soc", T.UINT, "state of charge, %"),
             Field("tc_x10", T.INT, "always the unavailable sentinel in 1.0.0"),
             Field("charge", T.UINT),
-            Field("usb", T.BOOL),
+            Field("usb", T.BOOL, "input supply present (charger PGOOD)"),
             Field("batt", T.BOOL, "literally !usb"),
+            # Optional so this CLI still parses a reply from firmware built
+            # before the field existed. Responses are extra="forbid" AND
+            # required-by-default, so a required field here would break
+            # telemetry outright against every older image.
+            Field(
+                "usb_att",
+                T.BOOL,
+                "a USB host is enumerated -- NOT the same as usb",
+                optional=True,
+            ),
             Field("ok", T.BOOL),
         ),
     ),

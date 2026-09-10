@@ -26,6 +26,11 @@ int hpi_telemetry_read(struct smp_streamer *ctxt)
     struct hpi_power_status p;
     hpi_power_get(&p);
 
+    /* `usb` is the INPUT SUPPLY (charger PGOOD); `usb_att` is a HOST talking to
+     * us (enumeration). They are different questions and a board can answer
+     * them differently -- a unit whose VBUS path is broken holds this very SMP
+     * session with usb=false. Without both, that case is undiagnosable from a
+     * host. See services/power_service.h. */
     bool usb = p.usb_present;
     bool ok =
         zcbor_tstr_put_lit(zse, "vbat_mv") && zcbor_uint32_put(zse, p.vbat_mv) &&
@@ -35,6 +40,7 @@ int hpi_telemetry_read(struct smp_streamer *ctxt)
         zcbor_tstr_put_lit(zse, "charge")  && zcbor_uint32_put(zse, p.charge_state) &&
         zcbor_tstr_put_lit(zse, "usb")     && zcbor_bool_put(zse, usb) &&
         zcbor_tstr_put_lit(zse, "batt")    && zcbor_bool_put(zse, !usb) &&
+        zcbor_tstr_put_lit(zse, "usb_att") && zcbor_bool_put(zse, p.usb_attached) &&
         zcbor_tstr_put_lit(zse, "ok")      && zcbor_bool_put(zse, p.valid);
 
     return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
