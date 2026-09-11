@@ -6,11 +6,10 @@
  * Registers in the iterable provider section; the framework starts it when a
  * HealthyLink Compute module is detected.
  *
- * Bus: the NPU lives on **SPI4** (the HealthyLink slot-A high-speed bus), NOT
- * SPI6 -- touching SPI6 wedges the next SPI4 transceive. SPI4 is `st,soft-nss`
- * with NO cs-gpios, so the caller must supply the chip-select itself: slot A is
- * PE4 (CS1), slot B PE3 (CS2). spi_dt_spec is the wrong tool here (it would
- * carry no CS); this file drives the SPI4 controller directly.
+ * Bus: the NPU lives on **SPI4** (shared by both slots), NOT SPI6 -- touching
+ * SPI6 wedges the next SPI4 transceive. SPI4 is `st,soft-nss` with NO cs-gpios,
+ * so this file drives the controller directly and supplies the chip-select
+ * itself (see npu_cs_lines).
  *
  * PROTOCOL: HLink v2 (hlink_proto.h). start() runs a handshake off the boot
  * path -- alive signature, GET_INFO, STATUS -- and caches the result for
@@ -78,13 +77,26 @@ int hpi_npu_link_get(struct hpi_npu_link_info *out)
 
 #if NPU_SPI_AVAILABLE
 
+/* Bumped by start() and stop(). A handshake that outlives its module drops its
+ * result rather than overwrite the snapshot of the one that replaced it. */
+static atomic_t npu_gen;
+static atomic_val_t npu_run_gen;      /* the generation the handshake belongs to */
+static int64_t npu_powered_ms;        /* uptime at start() */
+
+static bool npu_stale(void)
+{
+	return atomic_get(&npu_gen) != npu_run_gen;
+}
+
 /* Publish a snapshot built on the stack. The lock is never held across a
  * transfer -- only across this copy. */
 static void npu_link_publish(const struct hpi_npu_link_info *snap)
 {
 	k_mutex_lock(&g_link_lock, K_FOREVER);
-	g_link = *snap;
-	g_link.checked_at_ms = k_uptime_get();
+	if (!npu_stale()) {
+		g_link = *snap;
+		g_link.checked_at_ms = k_uptime_get();
+	}
 	k_mutex_unlock(&g_link_lock);
 }
 
@@ -98,29 +110,35 @@ static void npu_link_set_state(uint8_t state)
 static const struct device *const npu_spi = DEVICE_DT_GET(NPU_SPI_NODE);
 
 /*
- * SPI4 is soft-NSS with no cs-gpios, so we own the chip-select: slot A = PE4
- * (CS1), active-low, driven as a *plain GPIO* around each transfer. Do not
- * route it via spi_config.cs.gpio -- the soft-nss CS path faults.
+ * Chip-select follows the module, not the slot. Both SPI4 chip-selects reach
+ * both slots (connector pin 9 CS_A = PE4, pin 10 CS_B = PE3), and a module
+ * selects on the one its own board wires to NSS. The Compute module uses CS_A,
+ * so PE4 is tried first in either slot and PE3 once as a fallback.
+ *
+ * CS is active-low, driven as a *plain GPIO* around each transfer. Do not route
+ * it via spi_config.cs.gpio -- the soft-nss CS path faults.
  */
-static const struct gpio_dt_spec npu_cs = {
-	.port = DEVICE_DT_GET(DT_NODELABEL(gpioe)),
-	.pin = 4,
-	.dt_flags = GPIO_ACTIVE_LOW,
+struct npu_cs_line {
+	struct gpio_dt_spec cs;
+	const char *name;
 };
-static const struct spi_config npu_cfg = {
-	/* Bring-up default 1 MHz (conservative -- rules out the >200 MHz-core
-	 * CS/clock latch errata, zephyr#57219). Ratchet via Kconfig, not an
-	 * edit here: 1 -> 8 -> 20 MHz as the link proves itself. */
-	.frequency = CONFIG_HPI_NPU_SPI_FREQ_HZ,
-	.operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_OP_MODE_MASTER,
-	.slave = 0,
-	/* no .cs -- PE4 toggled manually in npu_xfer_frame() */
+
+static const struct npu_cs_line npu_cs_lines[] = {
+	{ .cs = { .port = DEVICE_DT_GET(DT_NODELABEL(gpioe)), .pin = 4,
+		  .dt_flags = GPIO_ACTIVE_LOW },
+	  .name = "PE4 (CS_A)" },
+	{ .cs = { .port = DEVICE_DT_GET(DT_NODELABEL(gpioe)), .pin = 3,
+		  .dt_flags = GPIO_ACTIVE_LOW },
+	  .name = "PE3 (CS_B)" },
 };
-static bool npu_cs_ready;
+
+/* The CS line in use. Reset to CS_A by start(); moved by the fallback. */
+static const struct npu_cs_line *npu_cur = &npu_cs_lines[0];
 
 /*
- * Module IRQ to host: slot A = PI12, active-low. In v2 the module asserts it
- * when a REPLY IS STAGED and releases it as that reply is clocked out.
+ * Module IRQ to host: PI12 (aux GPIO 0), active-low. Like the CS lines, the aux
+ * GPIOs reach both slots in parallel. In v2 the module asserts it when a REPLY
+ * IS STAGED and releases it as that reply is clocked out.
  *
  * TREAT IT AS AN OPTIMISATION, NEVER A REQUIREMENT. Which pin this really is
  * has four answers that do not agree: this driver and the board overlay say
@@ -136,6 +154,17 @@ static const struct gpio_dt_spec npu_irq = {
 	.pin = 12,
 	.dt_flags = GPIO_ACTIVE_LOW | GPIO_PULL_UP,
 };
+
+static const struct spi_config npu_cfg = {
+	/* Bring-up default 1 MHz (conservative -- rules out the >200 MHz-core
+	 * CS/clock latch errata, zephyr#57219). Ratchet via Kconfig, not an
+	 * edit here: 1 -> 8 -> 20 MHz as the link proves itself. */
+	.frequency = CONFIG_HPI_NPU_SPI_FREQ_HZ,
+	.operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_OP_MODE_MASTER,
+	.slave = 0,
+	/* no .cs -- npu_cur->cs toggled manually in npu_xfer_frame() */
+};
+static bool npu_cs_ready;
 static bool npu_irq_ready;
 
 /*
@@ -159,13 +188,20 @@ BUILD_ASSERT(NPU_SPI_FRAME_SIZE >= HLINK_OVERHEAD + HLINK_STATUS_LEN,
 static int npu_xfer_frame(void)
 {
 	if (!npu_cs_ready) {
-		if (!device_is_ready(npu_cs.port)) {
-			LOG_ERR("npu_xfer: CS port (gpioe) not ready");
-			return -ENODEV;
-		}
-		if (gpio_pin_configure_dt(&npu_cs, GPIO_OUTPUT_INACTIVE) != 0) {
-			LOG_ERR("npu_xfer: CS configure failed");
-			return -EIO;
+		/* Drive BOTH CS lines inactive, not just ours: SPI4 is shared,
+		 * and a floating CS could let another module answer over ours on
+		 * MISO. */
+		for (size_t i = 0; i < ARRAY_SIZE(npu_cs_lines); i++) {
+			if (!device_is_ready(npu_cs_lines[i].cs.port)) {
+				LOG_ERR("npu_xfer: CS port (gpioe) not ready");
+				return -ENODEV;
+			}
+			if (gpio_pin_configure_dt(&npu_cs_lines[i].cs,
+						  GPIO_OUTPUT_INACTIVE) != 0) {
+				LOG_ERR("npu_xfer: CS %s configure failed",
+					npu_cs_lines[i].name);
+				return -EIO;
+			}
 		}
 		npu_cs_ready = true;
 	}
@@ -177,9 +213,9 @@ static int npu_xfer_frame(void)
 	struct spi_buf_set txs = { .buffers = &txb, .count = 1 };
 	struct spi_buf_set rxs = { .buffers = &rxb, .count = 1 };
 
-	gpio_pin_set_dt(&npu_cs, 1);   /* assert (active-low: drives PE4 low) */
+	gpio_pin_set_dt(&npu_cur->cs, 1);   /* assert (active-low: drives it low) */
 	int rc = spi_transceive(npu_spi, &npu_cfg, &txs, &rxs);
-	gpio_pin_set_dt(&npu_cs, 0);   /* deassert */
+	gpio_pin_set_dt(&npu_cur->cs, 0);   /* deassert */
 
 	return rc;
 }
@@ -193,14 +229,16 @@ static void npu_frame_nop(void)
 }
 
 /* Wait for the module to signal that a reply is staged. Returns 0 on assert,
- * -ETIMEDOUT otherwise -- and the caller proceeds either way (see npu_irq). */
+ * -ETIMEDOUT otherwise -- and the caller proceeds either way (see npu_irq).
+ * Without a usable IRQ the whole timeout is slept: that is the turnaround the
+ * module needs, and reading sooner returns an all-zero frame. */
 static int npu_wait_reply_ready(int timeout_ms)
 {
 	if (!npu_irq_ready) {
 		if (!device_is_ready(npu_irq.port) ||
 		    gpio_pin_configure_dt(&npu_irq, GPIO_INPUT) != 0) {
-			LOG_WRN("NPU: IRQ (PI12) unavailable; using the timeout only");
-			return -ENODEV;
+			k_msleep(timeout_ms);
+			return -ETIMEDOUT;
 		}
 		npu_irq_ready = true;
 	}
@@ -343,8 +381,45 @@ static int npu_alive_probe(struct hpi_npu_link_info *snap)
 		return 0;
 	}
 
-	LOG_WRN("NPU: no HLNK signature in the frame. Module firmware running? "
-		"SPI4 CS (PE4) and MISO wiring?");
+	/* A frame of one repeated byte is a MISO line nobody drives; anything
+	 * else is a module answering out of phase or at the wrong rate. */
+	size_t same = 1;
+
+	while (same < sizeof(npu_frame_rx) && npu_frame_rx[same] == npu_frame_rx[0]) {
+		same++;
+	}
+	if (same == sizeof(npu_frame_rx)) {
+		LOG_WRN("NPU: no HLNK signature on CS %s; all %u bytes read 0x%02x "
+			"-- MISO undriven", npu_cur->name,
+			(unsigned int)sizeof(npu_frame_rx), npu_frame_rx[0]);
+	} else {
+		LOG_WRN("NPU: no HLNK signature, but MISO is toggling (CS %s) -- "
+			"module out of phase, or the wrong clock rate?", npu_cur->name);
+		LOG_HEXDUMP_WRN(npu_frame_rx, 32, "NPU rx (first 32 B)");
+	}
+	return -ENODEV;
+}
+
+/* Run once when CS_A drew nothing: a module wired to CS_B answers there. */
+static int npu_alive_probe_other_cs(struct hpi_npu_link_info *snap)
+{
+	const struct npu_cs_line *first = npu_cur;
+
+	for (size_t i = 0; i < ARRAY_SIZE(npu_cs_lines); i++) {
+		if (&npu_cs_lines[i] == first || npu_stale()) {
+			continue;
+		}
+		npu_cur = &npu_cs_lines[i];
+		if (npu_alive_probe(snap) == 0) {
+			LOG_WRN("NPU: the module answers on CS %s, not %s -- it is "
+				"wired to the other chip-select pin. Using CS %s.",
+				npu_cur->name, first->name, npu_cur->name);
+			return 0;
+		}
+	}
+	npu_cur = first;
+	LOG_WRN("NPU: nothing answers on either CS line. Module firmware running? "
+		"SPI4 SCK/MOSI/MISO reaching the slot?");
 	return -ENODEV;
 }
 
@@ -421,10 +496,21 @@ static int npu_comms_check(void)
 		return rc;
 	}
 
-	LOG_INF("NPU comms: begin (SPI4 ready, freq=%u Hz, CS=PE4, frame=%d B)",
-		npu_cfg.frequency, NPU_SPI_FRAME_SIZE);
+	LOG_INF("NPU comms: begin (SPI4 ready, freq=%u Hz, CS=%s, frame=%d B)",
+		npu_cfg.frequency, npu_cur->name, NPU_SPI_FRAME_SIZE);
 
-	rc = npu_alive_probe(&snap);
+	/* A few looks, because a module that is still booting and one that is not
+	 * there read the same from a single frame. */
+	for (int attempt = 0; ; attempt++) {
+		rc = npu_alive_probe(&snap);
+		if (rc == 0 || attempt == 2 || npu_stale()) {
+			break;
+		}
+		k_msleep(250);
+	}
+	if (rc != 0 && !npu_stale()) {
+		rc = npu_alive_probe_other_cs(&snap);
+	}
 	if (rc != 0) {
 		snap.link_state = HPI_NPU_LINK_NO_SIGNATURE;
 		snap.last_rc = rc;
@@ -496,6 +582,18 @@ static bool npu_wq_started;
 static void npu_comms_work_fn(struct k_work *w)
 {
 	ARG_UNUSED(w);
+	npu_run_gen = atomic_get(&npu_gen);
+
+	/* The slot was powered only after identification, so the module is still
+	 * booting. Wait in slices so a stop() ends the wait at once. */
+	int64_t ready_at = npu_powered_ms + CONFIG_HPI_NPU_BOOT_WAIT_MS;
+
+	while (k_uptime_get() < ready_at) {
+		if (npu_stale()) {
+			return;
+		}
+		k_msleep(50);
+	}
 	(void)npu_comms_check();
 }
 
@@ -518,10 +616,10 @@ static void npu_comms_kick(void)
 static int npu_probe(struct hl_ctx *ctx)
 {
 #if IS_ENABLED(CONFIG_HPI_NPU_UART)
-	LOG_INF("NPU probe (slot %d): UART transport (USART2); reserving slot-A",
-		ctx->slot);
+	LOG_INF("NPU probe (slot %c): UART transport (USART2); reserving slot-A",
+		'A' + ctx->slot);
 #else
-	LOG_INF("NPU probe (slot %d): claiming SPI4", ctx->slot);
+	LOG_INF("NPU probe (slot %c): claiming SPI4", 'A' + ctx->slot);
 #endif
 	return 0;
 }
@@ -537,21 +635,38 @@ static int npu_start(struct hl_ctx *ctx)
 	hpi_npu_uart_kick();
 	return 0;
 #elif NPU_SPI_AVAILABLE
-	LOG_INF("NPU start (slot %d): scheduling the HLink v2 handshake off the "
-		"boot path (SPI4, CS=PE4)", ctx->slot);
+	/* The same CS in either slot -- it follows the module (see npu_cs_lines). */
+	npu_cur = &npu_cs_lines[0];
+	npu_powered_ms = k_uptime_get();
+	atomic_inc(&npu_gen);
+	LOG_INF("NPU start (slot %c): scheduling the HLink v2 handshake off the "
+		"boot path (SPI4, CS=%s, IRQ PI12, after %d ms boot)",
+		'A' + ctx->slot, npu_cur->name, CONFIG_HPI_NPU_BOOT_WAIT_MS);
 	npu_comms_kick();   /* runs on npu_comms wq; never blocks boot/watchdog */
 	return 0;
 #else
 	ARG_UNUSED(ctx);
-	LOG_INF("NPU start (slot %d): active; no comms transport enabled "
-		"(set CONFIG_HPI_NPU_COMMS_CHECK)", ctx->slot);
+	LOG_INF("NPU start (slot %c): active; no comms transport enabled "
+		"(set CONFIG_HPI_NPU_COMMS_CHECK)", 'A' + ctx->slot);
 	return 0;
 #endif
 }
 
 static int npu_stop(struct hl_ctx *ctx)
 {
-	LOG_INF("NPU stop (slot %d)", ctx->slot);
+	LOG_INF("NPU stop (slot %c)", 'A' + ctx->slot);
+#if NPU_SPI_AVAILABLE
+	/* Orphan any running handshake and clear the snapshot. */
+	atomic_inc(&npu_gen);
+	if (npu_wq_started) {
+		struct k_work_sync sync;
+
+		(void)k_work_cancel_sync(&npu_comms_work, &sync);
+	}
+	k_mutex_lock(&g_link_lock, K_FOREVER);
+	g_link = (struct hpi_npu_link_info){ .link_state = HPI_NPU_LINK_NOT_RUN };
+	k_mutex_unlock(&g_link_lock);
+#endif
 	return 0;
 }
 

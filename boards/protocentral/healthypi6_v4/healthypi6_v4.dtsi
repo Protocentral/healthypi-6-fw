@@ -300,6 +300,7 @@
 		power-gpios = <&gpioi 1 GPIO_ACTIVE_HIGH>;                  /* EN_MOD_A */
 		fault-gpios = <&gpioh 11 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; /* MOD_A_FLT */
 		eeprom = <&healthylink_eeprom>;
+		eeprom-switched-rail;   /* v4: the ID EEPROM is on EN_MOD_A's rail */
 	};
 
 	healthylink_slot_b: healthylink-slot-b {

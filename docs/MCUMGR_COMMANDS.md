@@ -389,11 +389,19 @@ Request `{}` → a map **keyed by slot**, not an array:
   "b": {"state": u, "id": u, "pwr": bool, "name": tstr} }
 ```
 
-`state` values in §7.5.
+`state` values in §7.5. `pwr` is the slot's load-switch enable as the
+firmware last drove it — the command, not a measurement of the rail. A slot is
+powered only while its module is running.
 
 #### `0x0052` module_power — write · 🔒 lock
 
-`slot` uint, `on` bool → `ok` bool.
+`slot` uint (`0` = A, `1` = B), `on` bool → `ok` bool.
+
+`on: true` re-detects the slot from its ID EEPROM and starts whatever it finds,
+so it is also how to retry a slot in state 3, 4 or 5, and how to rescan an empty
+one. `ok` is true only if the slot ends up active (state 2). `on: false` stops
+the module, releases its interfaces and cuts the rail. The slot then reads
+state 5, or 0 if it was empty; `ok` is true.
 
 ### 5.8. Diagnostics
 
@@ -569,7 +577,8 @@ filter the stream. Derived values arrive in vitals blocks either way.
 ### 7.5. Module slot state
 
 `0` empty · `1` module present but unsupported · `2` active · `3` error during
-probe or claim · `4` quarantined after a fault
+probe or claim · `4` quarantined after a fault · `5` module present, powered
+off on request
 
 ---
 

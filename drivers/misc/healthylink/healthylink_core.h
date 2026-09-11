@@ -62,21 +62,23 @@ struct healthylink_module_driver {
 };
 
 /**
- * @brief HealthyLink controller configuration (from devicetree)
+ * @brief HealthyLink slot configuration (from devicetree)
  */
 struct healthylink_config {
-	/** I2C device spec for the slot ID EEPROM.
-	 *  Detection is EEPROM-based only: an I2C ACK means a module is present,
-	 *  and the EEPROM contents identify the module type. No detect GPIO. */
+	/** This slot's ID EEPROM (the slot's `eeprom` phandle). */
 	struct i2c_dt_spec eeprom;
 
-	/** Slot load-switch enable (EN_MOD). Sourced from the slot node's
-	 *  power-gpios; module power is applied only after EEPROM identify. */
+	/** Slot load-switch enable (EN_MOD_x), from power-gpios. */
 	struct gpio_dt_spec power_gpio;
 
-	/** Slot load-switch fault (MOD_FLT). Sourced from the slot node's
-	 *  fault-gpios; checked after power-up. May be empty ({0}). */
+	/** Slot load-switch fault (MOD_x_FLT), from fault-gpios. May be empty. */
 	struct gpio_dt_spec fault_gpio;
+
+	/** `eeprom-switched-rail`: the EEPROM needs slot power to answer. */
+	bool eeprom_switched;
+
+	/** `slot-label`, e.g. "A". */
+	const char *label;
 };
 
 /**
@@ -94,6 +96,10 @@ struct healthylink_data {
 
 	/** Active module driver (NULL if none) */
 	const struct healthylink_module_driver *active_driver;
+
+	/** Last level written to power_gpio. Read without the lock, so a status
+	 *  read never waits behind a detect in progress. */
+	volatile bool powered;
 
 	/** Mutex for thread-safe access */
 	struct k_mutex lock;

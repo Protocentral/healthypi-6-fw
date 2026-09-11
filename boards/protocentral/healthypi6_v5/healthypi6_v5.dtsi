@@ -41,55 +41,45 @@
 };
 
 /*
- * HealthyLink expansion port, v5 (DF9 connectors). Current pin map only.
+ * HealthyLink expansion port (two DF9 slots).
  *
- * Buses:
- *   SPI4    PE2 SCK, PE5 MISO, PE6 MOSI, PE4 NSS   - primary, high speed
- *   SPI6    PG13 SCK, PG12 MISO, PG14 MOSI         - NO hardware NSS: a
- *                                                    consumer supplies its own
- *                                                    CS from a free pin
- *   USART2  PD5 TX, PD6 RX, PD4 RTS, PD3 CTS       - HW flow control
- *   UART4   PA0 TX, PI9 RX, PA15 RTS, PB0 CTS      - ESP32-C6 HealthyBridge
- *                                                    (C6 IO22/IO19/IO21/IO20)
+ *   SPI4    PE2 SCK, PE5 MISO, PE6 MOSI; CS_A PE4, CS_B PE3 (plain GPIO)
+ *   SPI6    PG13 SCK, PG12 MISO, PG14 MOSI; no CS assigned
+ *   USART2  PD5 TX, PD6 RX, PD4 RTS, PD3 CTS
+ *   UART4   PA0 TX, PI9 RX, PA15 RTS, PB0 CTS   - ESP32-C6 HealthyBridge
  *   FDCAN1  PH13 TX, PH14 RX
- *   I2C3    PH7 SCL, PH8 SDA                       - module ID EEPROM
- *   ADC     PA1-PA7, PC0, PC1, PC4, PC5            - 11 ch, in the M7 DTS
+ *   I2C3    PH7 SCL, PH8 SDA                    - slot ID EEPROMs
+ *   ADC     PA1, PA2, PA3, PC0, PC1, PC4        - in the M7 DTS
  *
- * GPIO:
- *   Module reset    PI2 MOD_RESET_A, PI5 MOD_RESET_B  - one per slot
- *   Module control  PI6 PWDN, PH6 DRDY             - shared by both slots
- *   Module power    PI1 EN_MOD_A, PH15 EN_MOD_B    - per-slot load switches
- *   Module fault    PH11 MOD_A_FLT, PI4 MOD_B_FLT  - active low
- *   Aux             PI12, PI13, PI14
- *   HealthyBridge   PA11 RESET (ESP32-C6)
- *   User button     PI3, active low, EXTERNAL pull-up (no internal pull)
+ *   Slot A  EN_MOD PI1,  FLT PH11, RESET PI2, EEPROM 0x50
+ *   Slot B  EN_MOD PH15, FLT PI4,  RESET PI5, EEPROM 0x51
+ *   Shared  PWDN PI6, DRDY PH6, aux PI12-PI14
+ *   Other   PA11 ESP32-C6 reset; PI3 user button (active low, external pull-up)
  *
- * There is no START GPIO. PI2 carried it on earlier boards and is MOD_RESET_A
- * here; the ADS1299 is started and stopped with the START/STOP SPI opcodes
- * instead, so ti,ads1299 start-gpios is optional and omitted below.
- *
- * No module-detect GPIO: presence and identity come from the slot ID EEPROM
- * answering on I2C3. StackLink is module-to-module and is not wired to the MCU.
- * usbotg_fs is disabled (USB runs on usbotg_hs, PB14/PB15), which is what frees
- * PA11.
+ * No START, detect or StackLink GPIO: the ADS1299 is started with SPI opcodes,
+ * modules are identified by their ID EEPROM, and StackLink is module-to-module.
  */
 
-/* I2C3 for module identification EEPROM */
 &i2c3 {
 	status = "okay";
 	pinctrl-0 = <&i2c3_scl_ph7 &i2c3_sda_ph8>;
 	pinctrl-names = "default";
 	clock-frequency = <I2C_BITRATE_FAST>;
 
-	/* Module ID EEPROM - Microchip AT24CS02-MAHM
-	 *
-	 * I2C address 0x51: the AT24CS02 base address is 0b1010_xxx with the low
-	 * 3 bits from the A0/A1/A2 straps; the slot connector ties A0 HIGH and
-	 * A1/A2 LOW (the chip's read-only factory-serial block then lives at
-	 * 0x59, unused here). The "atmel,at24" fallback compatible keeps it on
-	 * the generic Zephyr AT24 driver.
-	 */
-	healthylink_eeprom: eeprom@51 {
+	/* Slot ID EEPROMs (AT24CS02) on the always-on rail. A0 is strapped per
+	 * slot: GND on A (0x50), 3V3 on B (0x51). HealthyLink reads them over raw
+	 * I2C; CONFIG_EEPROM is off. */
+	healthylink_eeprom_a: eeprom@50 {
+		compatible = "atmel,at24cs02", "atmel,at24";
+		reg = <0x50>;
+		size = <256>;
+		pagesize = <16>;
+		address-width = <8>;
+		timeout = <5>;  /* tWR = 5 ms */
+		status = "okay";
+	};
+
+	healthylink_eeprom_b: eeprom@51 {
 		compatible = "atmel,at24cs02", "atmel,at24";
 		reg = <0x51>;
 		size = <256>;
@@ -100,13 +90,7 @@
 	};
 };
 
-/*
- * Default HealthyLink module type for auto-provisioning a blank EEPROM.
- * Without a 'chosen { healthylink-module = ...; }' entry the auto-provision
- * code in drivers/misc/healthylink/healthylink_core.c sees the blank EEPROM
- * and aborts with -ENOENT because it can't decide what to write. Default to
- * HealthyLink Compute; healthylink-compute.overlay can redefine the entry.
- */
+/* Module type written to a blank ID EEPROM by HealthyLink auto-provisioning. */
 / {
 	healthylink_default_compute: healthylink-compute-default {
 		compatible = "protocentral,healthylink-compute";
@@ -118,65 +102,52 @@
 	};
 };
 
-/*
- * SPI4 -- HealthyLink high-speed expansion bus (PE2 SCK / PE5 MISO / PE6 MOSI).
- * The ADS1299 child uses deferred-init and is only brought up if the slot
- * EEPROM identifies an EEG-8CH module.
- */
+/* SPI4 -- HealthyLink primary bus, shared by both slots. */
 &spi4 {
 	status = "okay";
-	/*
-	 * Kernel clock stays at the H7 reset default (PLL1_Q via the SPI45 mux).
-	 * An explicit PLL2_Q override here wedged spi_transceive at driver setup
-	 * time; add one back only if a module needs a specific kernel clock AND
-	 * the routing is verified on hardware.
-	 */
+	/* Kernel clock stays at the reset default (PLL1_Q): an explicit PLL2_Q
+	 * override wedged spi_transceive at driver setup. */
 	pinctrl-0 = <&spi4_sck_pe2 &spi4_miso_pe5 &spi4_mosi_pe6>;
 	pinctrl-names = "default";
-	/*
-	 * Soft NSS via st,soft-nss, NOT cs-gpios. Both select soft-NSS mode, but
-	 * cs-gpios also makes the SPI subsystem manage the CS pins, and that path
-	 * empirically wedges SPI4 on this board (the first spi_transceive hangs
-	 * at driver setup, before any user code runs). With st,soft-nss each
-	 * SPI4 user supplies its own CS through spi_config.cs.gpio (slot A CS1 =
-	 * PE4, CS2 = PE3).
-	 */
+	/* st,soft-nss, not cs-gpios: cs-gpios wedges the first transceive on this
+	 * board. SPI4 users drive CS_A (PE4) / CS_B (PE3) as plain GPIOs. */
 	st,soft-nss;
 
-	/*
-	 * ADS1299 8-channel EEG AFE (HealthyLink EEG-8CH module). Deferred-init:
-	 * hardware is only initialized once the slot EEPROM identifies an
-	 * EEG-8CH module (0x0001).
-	 *
-	 * Slot A by default: reset-gpios is MOD_RESET_A; an EEG module in slot B
-	 * needs it pointed at MOD_RESET_B (PI5). No start-gpios -- v5 does not
-	 * route START to the MCU; conversion is driven with the START/STOP SPI
-	 * opcodes.
-	 */
+	/* ADS1299 EEG front end, one node per slot (they differ only in reset),
+	 * brought up by mod_eeg.c when a slot EEPROM reports an EEG module. */
 	ads1299: ads1299@0 {
 		compatible = "ti,ads1299";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
-		drdy-gpios = <&gpioh 6 GPIO_ACTIVE_LOW>;    /* PH6 */
+		drdy-gpios = <&gpioh 6 GPIO_ACTIVE_LOW>;
 		reset-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>;  /* MOD_RESET_A */
 		pwdn-gpios = <&gpioi 6 GPIO_ACTIVE_HIGH>;
-		gain = <24>;      /* EEG standard gain */
+		gain = <24>;
 		sample-rate = <250>;
-		bias-enabled;     /* Enable BIAS/DRL for common-mode rejection */
-		srb1-enabled;     /* Enable SRB1: REF electrode connected to SRB1 pin */
+		bias-enabled;
+		srb1-enabled;
+		status = "okay";
+		zephyr,deferred-init;
+	};
+
+	ads1299_b: ads1299@1 {
+		compatible = "ti,ads1299";
+		reg = <1>;
+		spi-max-frequency = <4000000>;
+		drdy-gpios = <&gpioh 6 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpioi 5 GPIO_ACTIVE_HIGH>;  /* MOD_RESET_B */
+		pwdn-gpios = <&gpioi 6 GPIO_ACTIVE_HIGH>;
+		gain = <24>;
+		sample-rate = <250>;
+		bias-enabled;
+		srb1-enabled;
 		status = "okay";
 		zephyr,deferred-init;
 	};
 };
 
-/*
- * SPI6 -- secondary expansion bus.
- *
- * NO cs-gpios: PA15 was SPI6_NSS on v3/v4, but on v5 it is UART4_RTS to the
- * ESP32-C6, and a GPIO claim here would silently conflict with that pinctrl
- * AF claim. A SPI6 consumer must bring its own CS GPIO on a free pin (the NPU
- * module uses SPI4 only).
- */
+/* SPI6 -- HealthyLink secondary bus. No cs-gpios: PA15 (SPI6 NSS on v3/v4) is
+ * UART4 RTS on v5, so a SPI6 user brings its own CS. */
 &spi6 {
 	status = "okay";
 	pinctrl-0 = <&spi6_sck_pg13 &spi6_miso_pg12 &spi6_mosi_pg14>;
@@ -192,85 +163,37 @@
 	sample-point-data = <875>;
 };
 
-/*
- * USB OTG FS -- disabled: device USB runs on usbotg_hs (PB14/PB15), and PA11
- * is the ESP32-C6 reset line. A HealthyLink USB-host module overlay may enable
- * this, reclaiming PA11/PA12, and must provide 5 V VBUS with overcurrent
- * protection.
- */
+/* USB OTG FS -- disabled: PA11 is the ESP32-C6 reset line. A USB-host module
+ * overlay may enable it, and must supply 5 V VBUS with overcurrent protection. */
 &usbotg_fs {
 	status = "disabled";
 	pinctrl-0 = <&usb_otg_fs_dm_pa11 &usb_otg_fs_dp_pa12>;
 	pinctrl-names = "default";
 };
 
-/* HealthyLink controller node */
 / {
+	/* Port description only: no binding or driver uses this node. */
 	healthylink: healthylink {
 		compatible = "protocentral,healthylink";
 		status = "okay";
-		zephyr,deferred-init;
-		eeprom = <&healthylink_eeprom>;
-
-		/*
-		 * Module control GPIOs, wired straight to the module hardware
-		 * (the ADS1299 on an EEG module, the N657 on a Compute module).
-		 *
-		 * Reset is PER SLOT: MOD_RESET_A and MOD_RESET_B are separate nets,
-		 * so a module can be reset without disturbing the other slot. PWDN
-		 * and DRDY are still shared. There is no START line on v5 -- PI2
-		 * carries MOD_RESET_A now, and START is an SPI opcode.
-		 */
 		control-gpios = <&gpioi 2 GPIO_ACTIVE_HIGH>,   /* MOD_RESET_A */
 		                <&gpioi 5 GPIO_ACTIVE_HIGH>,   /* MOD_RESET_B */
-		                <&gpioi 6 GPIO_ACTIVE_HIGH>,   /* PWDN  (shared) */
-		                <&gpioh 6 GPIO_ACTIVE_LOW>;    /* DRDY  (shared, active low) */
-
-		/*
-		 * StackLink runs module-to-module only and is not wired to the MCU,
-		 * so no stacklink-gpios here. PI1/PI4 carry the per-slot module power
-		 * switch and fault input (see healthylink_slot_a / _slot_b below).
-		 */
-
-		/*
-		 * Module detection is EEPROM-based: presence and identity come from
-		 * probing the slot ID EEPROM over I2C (ACK = present, contents = type).
-		 * No detect GPIO.
-		 */
-
-		/*
-		 * Auxiliary GPIO for module-specific functions
-		 * General purpose I/O exposed on the DF9 module connectors
-		 */
+		                <&gpioi 6 GPIO_ACTIVE_HIGH>,   /* PWDN, shared */
+		                <&gpioh 6 GPIO_ACTIVE_LOW>;    /* DRDY, shared */
 		aux-gpios = <&gpioi 12 GPIO_ACTIVE_HIGH>,
 		            <&gpioi 13 GPIO_ACTIVE_HIGH>,
 		            <&gpioi 14 GPIO_ACTIVE_HIGH>;
-
 	};
 
-	/*
-	 * HealthyLink expansion slots - one node per physical module slot.
-	 *
-	 * Each slot owns only the static, connector-level resources: its load-
-	 * switch enable (power), the switch fault line, and a reference to its ID
-	 * EEPROM. Presence and module identity are detected via the EEPROM (I2C
-	 * ACK = module seated, contents = module type) - there is no detect GPIO.
-	 * The module's functional chip (e.g. ADS1299 EEG AFE on SPI4) is a
-	 * separate bus device with its own binding + zephyr,deferred-init, brought
-	 * up at runtime once the slot EEPROM identifies the module - so one
-	 * firmware image still auto-detects any module. Control GPIOs
-	 * (START/RESET/PWDN/DRDY) belong to the module chip node, not the slot.
-	 *
-	 *   Slot A: EN_MOD_A=PI1, MOD_A_FLT=PH11, EEPROM=healthylink_eeprom
-	 *   Slot B: EN_MOD_B=PH15, MOD_B_FLT=PI4
-	 */
+	/* Module slots: load switch, fault input and ID EEPROM. Driven by
+	 * drivers/misc/healthylink/healthylink_core.c, one device per slot. */
 	healthylink_slot_a: healthylink-slot-a {
 		compatible = "protocentral,healthylink-slot";
 		status = "okay";
 		slot-label = "A";
 		power-gpios = <&gpioi 1 GPIO_ACTIVE_HIGH>;                  /* EN_MOD_A */
 		fault-gpios = <&gpioh 11 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; /* MOD_A_FLT */
-		eeprom = <&healthylink_eeprom>;
+		eeprom = <&healthylink_eeprom_a>;
 	};
 
 	healthylink_slot_b: healthylink-slot-b {
@@ -279,15 +202,6 @@
 		slot-label = "B";
 		power-gpios = <&gpioh 15 GPIO_ACTIVE_HIGH>;                /* EN_MOD_B */
 		fault-gpios = <&gpioi 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; /* MOD_B_FLT */
-		/*
-		 * TODO(hw): slot B has only EN/FLT wired so far. Add its `eeprom`
-		 * phandle (a distinct I2C address or bus, so detection can tell
-		 * slot B apart from slot A) plus the slot-B module chip as a
-		 * deferred bus device, same pattern as the EEG ADS1299.
-		 */
-	};
-
-	chosen {
-		healthylink-eeprom = &healthylink_eeprom;
+		eeprom = <&healthylink_eeprom_b>;
 	};
 };

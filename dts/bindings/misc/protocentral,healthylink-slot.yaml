@@ -11,9 +11,12 @@ description: |
     - a reference to the slot's ID EEPROM.
 
   Module presence and identity are detected SOLELY via the slot's ID EEPROM -
-  there is no dedicated module-present/detect GPIO. Firmware powers the slot,
-  then probes the EEPROM: an I2C ACK means a module is seated, and the EEPROM
-  contents identify the module type.
+  there is no dedicated module-present/detect GPIO. An I2C ACK means a module
+  is seated, and the EEPROM contents identify the module type. Each slot's
+  EEPROM answers at its own address (A0 strapped per slot on the baseboard).
+  The EEPROM is normally on an always-on rail, so the module is identified
+  before its slot is powered. One driver instance is created per slot node
+  that has an `eeprom`.
 
   The module's *functional* device (e.g. the ADS1299 EEG AFE, an NPU, an
   FDCAN transceiver) is NOT described here. It is a normal bus child (SPI/I2C)
@@ -47,6 +50,13 @@ properties:
       Phandle to the I2C ID EEPROM for this slot. This is the slot's detection
       mechanism: an I2C ACK from the EEPROM means a module is present, and its
       contents identify the module type. No separate detect GPIO is used.
+
+  eeprom-switched-rail:
+    type: boolean
+    description: |
+      The ID EEPROM is powered from this slot's switched supply (v4 slot A),
+      so the slot is kept powered from init and probed with power applied.
+      Omit when the EEPROM is on an always-on rail.
 
   slot-label:
     type: string

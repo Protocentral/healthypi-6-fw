@@ -129,6 +129,17 @@ config HPI_NPU_IRQ_WAIT_MS
 	  non-agreeing answers across the host overlay, the DF9 connector table
 	  and the module schematic. 50 ms is what the v1 host slept unconditionally.
 
+config HPI_NPU_BOOT_WAIT_MS
+	int "How long the module gets to boot after slot power-up (ms)"
+	default 1500
+	depends on HPI_NPU_COMMS_CHECK
+	help
+	  The slot is powered only once its ID EEPROM has identified the module,
+	  so the module cold-boots after that; it first answers about 1.4 s after
+	  power-up. The handshake waits this long before its first frame (on the
+	  npu_comms work queue, never on the boot path), then looks for the alive
+	  signature up to three times, 250 ms apart.
+
 config HPI_SPI4_LOOPBACK_TEST
 	bool "Run a SPI4 loopback self-test at boot (bring-up diagnostic)"
 	default n

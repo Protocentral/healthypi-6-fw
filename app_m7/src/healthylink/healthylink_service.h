@@ -4,13 +4,14 @@
  *
  * HealthyLink framework service (L4) -- boot enumeration + lifecycle + fault
  * isolation for expansion modules. At boot it detects each slot's module (via
- * the out-of-tree HealthyLink driver's EEPROM read), matches a registered
- * provider (hl_provider.h, iterable section), claims resources (hl_arbiter),
- * powers the slot, and runs probe()/start() under a supervisor that quarantines
- * a faulting module without disturbing core acquisition.
+ * the out-of-tree HealthyLink driver's per-slot EEPROM read), matches a
+ * registered provider (hl_provider.h, iterable section), claims resources
+ * (hl_arbiter), powers the slot, and runs probe()/start() under a supervisor
+ * that quarantines a faulting module without disturbing core acquisition.
  *
- * The group-64 module commands (control/mcumgr_hpi/hpi_modules.c) read status
- * and toggle slot power through the accessors here.
+ * Any module may sit in any slot; providers are told which slot they are in.
+ * The group-64 module commands and the HealthyLink screen use the accessors
+ * here.
  */
 
 #ifndef HPI_HEALTHYLINK_SERVICE_H
@@ -24,26 +25,45 @@
 extern "C" {
 #endif
 
+/* The numeric values are on the wire (group-64 module_list `state`,
+ * docs/MCUMGR_COMMANDS.md §7.5): append only. */
 enum hl_slot_state {
     HL_SLOT_EMPTY = 0,      /* no module detected */
     HL_SLOT_UNSUPPORTED,    /* module present, no matching provider */
     HL_SLOT_ACTIVE,         /* provider started, producing */
     HL_SLOT_ERROR,          /* probe/claim/start failed */
     HL_SLOT_QUARANTINED,    /* faulted at runtime, powered down */
+    HL_SLOT_OFF,            /* module present, powered down on request */
 };
 
 struct hl_slot_status {
     uint8_t  state;         /* enum hl_slot_state */
     uint16_t module_id;
     uint32_t caps;
-    bool     powered;
+    bool     powered;       /* load switch driven on (the command, not the rail) */
+    bool     detectable;    /* false: no ID EEPROM path, state is a default */
+    bool     busy;          /* a power change is being applied right now */
     char     name[32];
 };
 
 #define HL_NUM_SLOTS 2
 
+/* A mutex and a struct copy, no I/O: safe from the LVGL thread. */
 int  hl_get_slot_status(hl_slot_t slot, struct hl_slot_status *out);
-int  hl_set_slot_power(hl_slot_t slot, bool on);   /* host-driven (group 64) */
+
+/*
+ * Switch a slot, synchronously. ON re-detects the slot and brings up what it
+ * finds (so it also retries a failed slot and rescans an empty one); OFF stops
+ * the provider, releases its interfaces and cuts the rail.
+ *
+ * Returns 0 if ON leaves the slot ACTIVE, or after OFF; -ENODEV if ON found no
+ * module; -EIO if ON found one but could not bring it up.
+ */
+int  hl_set_slot_power(hl_slot_t slot, bool on);
+
+/* The same, queued to the system work queue (for the LVGL thread). Status
+ * reports `busy` until it has been applied. */
+int  hl_request_slot_power(hl_slot_t slot, bool on);
 
 #ifdef __cplusplus
 }

@@ -194,13 +194,13 @@ enum healthylink_status {
 };
 
 /**
- * @brief Detect connected HealthyLink module
+ * @brief Detect the module in one slot
  *
- * Scans I2C3 for the module identification EEPROM and reads the
- * module header. If a valid module is found, attempts to load
- * the appropriate driver.
+ * Probes the slot's ID EEPROM and reads the module header with the slot
+ * unpowered, then powers the slot only for a valid header and no load-switch
+ * fault. Safe to re-run.
  *
- * @param dev HealthyLink controller device
+ * @param dev HealthyLink slot device
  * @return 0 on success (module found and initialized),
  *         -ENODEV if no module present,
  *         -EINVAL if EEPROM invalid,
@@ -208,6 +208,31 @@ enum healthylink_status {
  *         other negative errno on failure
  */
 int healthylink_detect(const struct device *dev);
+
+/**
+ * @brief Switch a slot's module power
+ *
+ * Drives the slot load switch (EN_MOD_x). Switching on checks the fault line
+ * and switches back off on a fault. The rail only: nothing is detected,
+ * started or stopped.
+ *
+ * @param dev HealthyLink slot device
+ * @param on  true to power the slot
+ * @return 0 on success, -EIO on a load-switch fault, -ENOTSUP if the slot has
+ *         no power control
+ */
+int healthylink_slot_power(const struct device *dev, bool on);
+
+/**
+ * @brief Whether the slot's load switch is driven on (the command, not a
+ *        measurement). Never blocks.
+ */
+bool healthylink_slot_is_powered(const struct device *dev);
+
+/**
+ * @brief The slot's devicetree `slot-label`, e.g. "A"
+ */
+const char *healthylink_slot_label(const struct device *dev);
 
 /**
  * @brief Get connected module information
