@@ -91,6 +91,58 @@ def test_cli_only_references_routed_commands():
     assert not unknown, f"CLI dispatches commands the device does not route: {unknown}"
 
 
+def test_there_is_exactly_one_console_script():
+    """`healthypi`, and nothing else.
+
+    The `hpi` alias was removed because the firmware's own Zephyr shell
+    registers a root command by that name (app_m7/src/control/shell_hpi). One
+    name for a host tool and an on-device shell made written instructions
+    ambiguous about which machine was supposed to run the command.
+    """
+    import re
+    from pathlib import Path
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    block = pyproject.split("[project.scripts]", 1)[1].split("[", 1)[0]
+    scripts = re.findall(r"^\s*([A-Za-z0-9_-]+)\s*=", block, re.M)
+    assert scripts == ["healthypi"], scripts
+
+
+def test_no_docs_or_source_invoke_the_removed_alias():
+    """Nothing in this package should tell anyone to run `hpi <verb>`.
+
+    The verbs come from the parser itself, so a new command group is covered
+    without anyone remembering to extend a list here.
+    """
+    import re
+    from pathlib import Path
+
+    from healthypi.cli.main import build_parser
+
+    ap = build_parser()
+    groups = sorted(
+        ap._subparsers._group_actions[0].choices  # type: ignore[union-attr]
+    )
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_.\-])hpi (?=(?:" + "|".join(map(re.escape, groups)) + r")\b)"
+    )
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix not in (".py", ".md", ".toml") or "__pycache__" in path.parts:
+            continue
+        if path.name == Path(__file__).name:
+            continue   # this file has to spell the thing it forbids
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.relative_to(root)}:{n}: {line.strip()}")
+    assert not offenders, (
+        "the CLI is invoked as `healthypi`; `hpi` is the device's own shell:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
 def test_bare_invocation_prints_help(capsys):
     assert main([]) == 1
     assert "HealthyPi 6 host tool" in capsys.readouterr().out
@@ -108,14 +160,14 @@ def test_catalog_text(capsys):
     assert main(["catalog"]) == 0
     out = capsys.readouterr().out
     assert "group 64 (hpi)" in out
-    assert "31 live, 1 stub, 11 reserved" in out
+    assert "34 live, 1 stub, 11 reserved" in out
 
 
 def test_catalog_json(capsys):
     assert main(["catalog", "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["group_id"] == 64
-    assert len(doc["commands"]) == 43
+    assert len(doc["commands"]) == 46
     assert {c["name"] for c in doc["commands"] if c["status"] == "stub"} == {"wifi_scan"}
     assert doc["errors"]["267"] == "NO_MEDIA"
 

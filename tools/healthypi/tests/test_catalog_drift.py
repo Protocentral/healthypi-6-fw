@@ -52,18 +52,18 @@ def test_catalog_matches_firmware(report):
 
 def test_firmware_actually_parsed(report):
     """Guard against a silent no-op if the C layout ever changes shape."""
-    assert len(report.declared) >= 43, report.declared
-    assert len(report.routed) == 32, sorted(report.routed)
+    assert len(report.declared) >= 46, report.declared
+    assert len(report.routed) == 35, sorted(report.routed)
     assert len(report.errors) == 16, report.errors
 
 
 def test_surface_counts():
     """The headline numbers in GROUP64_SSOT.md."""
     g = catalog.HPI_GROUP
-    assert len(g.routed()) == 32
-    assert len(g.live()) == 31  # wifi_scan is a stub
+    assert len(g.routed()) == 35
+    assert len(g.live()) == 34  # wifi_scan is a stub
     assert len(g.unreachable()) == 11
-    assert len(g.tagged("unlock")) == 9
+    assert len(g.tagged("unlock")) == 11
     assert len(g.tagged("signed_build")) == 5
 
 
@@ -74,9 +74,71 @@ def test_stub_is_marked_not_live():
     assert "MGMT_ERR_ENOTSUP" in handlers
 
 
+def _uncommented(text: str) -> str:
+    """C source with comments stripped -- a rule about code, not about prose."""
+    import re
+
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
 def test_unlock_gate_still_exists():
     handlers = "\n".join(p.read_text() for p in SOURCES.handlers)
     assert "hpi_security_require_unlocked" in handlers, "gate helper vanished"
+
+
+def _group_err_offenders(name: str, text: str) -> list[str]:
+    """Places in one handler file that return a group-64 code the wrong way."""
+    import re
+
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if re.search(r"return\s+HPI_MGMT_ERR_", line):
+            out.append(f"{name}:{n}: {line.strip()}")
+    # A file that names group codes but never encodes one is building them to
+    # return some other way -- through a variable, say, which the line check
+    # above cannot see.
+    names = re.findall(r"HPI_MGMT_ERR_[A-Z0-9_]+", _uncommented(text))
+    if names and "smp_add_cmd_err" not in text:
+        out.append(
+            f"{name}: uses {sorted(set(names))[0]} but never calls "
+            "smp_add_cmd_err()"
+        )
+    return out
+
+
+def test_group_error_guard_actually_catches_it():
+    """A guard that cannot fail proves nothing -- prove it fails."""
+    assert _group_err_offenders(
+        "bad.c", "int h(void)\n{\n\treturn HPI_MGMT_ERR_HW_FAULT;\n}\n"
+    )
+    assert _group_err_offenders(
+        "sneaky.c",
+        "uint16_t code = HPI_MGMT_ERR_NOT_READY;\nreturn code;\n",
+    )
+    assert not _group_err_offenders(
+        "good.c",
+        "bool ok = smp_add_cmd_err(zse, HPI_MGMT_GROUP_ID, "
+        "HPI_MGMT_ERR_NOT_READY);\nreturn ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;\n",
+    )
+
+
+def test_group_error_codes_are_never_returned_as_protocol_codes():
+    """A group-64 code (>= 256) has to go out as an err map, not as `rc`.
+
+    Returning one straight from a handler puts a number on the wire that means
+    nothing in the protocol-wide MGMT_ERR namespace, and the reply then matches
+    neither the success model nor either error model -- the client cannot even
+    name the failure. `smp_add_cmd_err(zse, HPI_MGMT_GROUP_ID, code)` is the
+    only correct way out.
+    """
+    offenders = []
+    for path in SOURCES.handlers:
+        offenders += _group_err_offenders(path.name, path.read_text())
+    assert not offenders, (
+        "group-64 error codes returned directly instead of via "
+        "smp_add_cmd_err():\n  " + "\n  ".join(offenders)
+    )
 
 
 def test_drift_is_detectable():

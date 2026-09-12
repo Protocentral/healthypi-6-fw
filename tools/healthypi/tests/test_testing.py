@@ -57,7 +57,7 @@ def test_every_case_declares_a_known_group():
 
 
 def test_destructive_cases_are_marked():
-    """Anything that changes device state must be opt-in. A default `hpi test
+    """Anything that changes device state must be opt-in. A default `healthypi test
     run` is expected to be safe against a unit that is mid-recording."""
     by_name = {c.name: c for c in testing.registry()}
     for name in ("stream start/stop", "record start/stop"):

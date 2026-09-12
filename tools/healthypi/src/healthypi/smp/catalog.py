@@ -229,6 +229,46 @@ COMMANDS: tuple[Command, ...] = (
         request=(Field("slot", T.UINT), Field("on", T.BOOL)),
         response=(Field("ok", T.BOOL),),
     ),
+    Command(
+        0x0053,
+        "module_eeprom_read",
+        (R,),
+        request=(
+            Field("slot", T.UINT, "0 = A, 1 = B"),
+            Field("off", T.UINT, "byte offset into the 256-byte image"),
+            Field("len", T.UINT, "1-64"),
+        ),
+        response=(Field("off", T.UINT), Field("data", T.BSTR)),
+        errors=(256, 257),
+        doc="raw bytes; the device does not parse the image",
+    ),
+    Command(
+        0x0054,
+        "module_eeprom_write",
+        (W,),
+        meta={"unlock": True},
+        request=(
+            Field("slot", T.UINT, "0 = A, 1 = B"),
+            Field("off", T.UINT),
+            Field("data", T.BSTR, "1-64 bytes"),
+        ),
+        response=(Field("off", T.UINT), Field("len", T.UINT)),
+        errors=(256, 257),
+        doc="identity takes effect at the next detect (module_power on)",
+    ),
+    Command(
+        0x0055,
+        "module_i2c_scan",
+        (R,),
+        meta={"unlock": True},
+        request=(
+            Field("slot", T.UINT, "0 = A, 1 = B"),
+            Field("pwr", T.BOOL, "scan with the slot rail on", optional=True),
+        ),
+        response=(Field("addrs", T.BSTR, "responding 7-bit addresses"),),
+        errors=(256, 257),
+        doc="bring-up: both slots share one bus, so this says whether it works",
+    ),
     # -- recording ---------------------------------------------------------
     Command(
         0x0060,

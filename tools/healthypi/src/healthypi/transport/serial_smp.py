@@ -44,6 +44,35 @@ class NoDeviceError(RuntimeError):
     """No port answered SMP."""
 
 
+class UnparseableReplyError(RuntimeError):
+    """The device answered something that fits none of the command's schemas.
+
+    Always a firmware bug, and one with a specific usual cause: a handler that
+    returned a group-64 error code (>= 256) as its return value instead of
+    encoding it with ``smp_add_cmd_err()``. That puts the number in the
+    protocol-wide ``rc`` field, where it does not exist, so the reply matches
+    neither the success model nor either error model.
+
+    It exists because the failure is otherwise close to undiagnosable: smpclient
+    raises ``pydantic.ValidationError`` incorrectly while handling it and the
+    user sees ``TypeError: ValidationError.__new__() missing 1 required
+    positional argument`` -- which names neither the device, nor the command,
+    nor the reply.
+    """
+
+
+def _reply_error(req, exc: Exception) -> "UnparseableReplyError":
+    cmd = getattr(type(req), "_COMMAND_ID", "?")
+    grp = getattr(type(req), "_GROUP_ID", "?")
+    return UnparseableReplyError(
+        f"the device replied to group {grp} command {cmd} with something this "
+        f"client cannot parse ({type(exc).__name__}). That is a firmware bug, "
+        "not a wiring problem: most likely a handler returned a group error "
+        "code directly instead of via smp_add_cmd_err(), so it arrived as a "
+        "protocol-level `rc` that means nothing there."
+    )
+
+
 @dataclass(slots=True)
 class Connection:
     """A live CDC 1 session."""
@@ -56,9 +85,19 @@ class Connection:
     transport: SMPSerialTransport | None = None
 
     async def request(self, req, timeout_s: float | None = None):
-        if timeout_s is None:
-            return await self.client.request(req)
-        return await asyncio.wait_for(self.client.request(req), timeout=timeout_s)
+        try:
+            if timeout_s is None:
+                return await self.client.request(req)
+            return await asyncio.wait_for(
+                self.client.request(req), timeout=timeout_s
+            )
+        except (TypeError, ValueError) as exc:
+            # smpclient raises these out of its own error handling when a reply
+            # matches none of a request's models. Re-raise as something that
+            # says which device, which command, and where to look.
+            if isinstance(exc, TypeError) and "ValidationError" not in str(exc):
+                raise
+            raise _reply_error(req, exc) from exc
 
 
 def candidates() -> list[str]:

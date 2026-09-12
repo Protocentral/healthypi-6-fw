@@ -31,12 +31,16 @@ module -- anyone can mint an image the arbiter accepts. That is a deliberate
 consequence of an open-hardware expansion bus, not an oversight, but do not
 build a trust decision on the contents of this EEPROM.
 
-Writing an image to real hardware is out of scope for this module: it needs an
-FT232H, a Raspberry Pi's I2C bus, a CH341A or a Bus Pirate, and the vendor tool
-that comes with whichever you have. ``hpi hl eeprom generate`` produces the
-256-byte file; program it with e.g. ``ch341eeprom -w eeprom.bin`` or
-``i2ctransfer`` on a Pi. (The predecessor script documented a ``program``
-subcommand with five wiring diagrams; it was never implemented.)
+This module builds and parses images; it never touches hardware. Writing one to
+a module is :mod:`healthypi.hw.program`, which goes through the HealthyPi
+itself over group-64 0x0053/0x0054 -- the device is already wired to both slot
+EEPROMs, so no external programmer is involved::
+
+    healthypi hl eeprom program --slot a --module-id GPIO --name "GPIO breakout"
+
+An external programmer (FT232H, Raspberry Pi I2C, CH341A, Bus Pirate) remains
+an option for a module that is not in a slot: ``healthypi hl eeprom generate`` writes
+the 256-byte file, and e.g. ``ch341eeprom -w eeprom.bin`` puts it on the chip.
 """
 
 from __future__ import annotations
@@ -66,6 +70,10 @@ MODULE_IDS: dict[str, int] = {
     "STIM-OUTPUT": 0x0007,
     "SYNC-MASTER": 0x0008,
     "GSR-RESPIRATION": 0x0009,
+    # Passive breakout: headers for every interface the connector carries,
+    # the slot regulators and this EEPROM. Claims no interface -- see the
+    # capability note below.
+    "GPIO": 0x000A,
 }
 
 CAPABILITIES: dict[str, int] = {
@@ -102,6 +110,12 @@ DEFAULT_CAPABILITIES: dict[int, int] = {
     | CAPABILITIES["REQUIRES_GPIO"]
     | CAPABILITIES["DMA_CAPABLE"]
     | CAPABILITIES["POWER_HIGH"],
+    # GPIO breakout: POWER_LOW and nothing else, on purpose. The interface
+    # bits (0-7) are exclusive across the two slots in the firmware's arbiter,
+    # so a board that exposes everything passively and drives none of it must
+    # claim none of them -- otherwise it locks a real module out of the other
+    # slot for no reason.
+    0x000A: CAPABILITIES["POWER_LOW"],
 }
 
 

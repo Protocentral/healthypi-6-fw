@@ -3,8 +3,11 @@
 One package instead of nineteen scripts, on the same rule the firmware uses:
 a capability is implemented once, and the CLI is a thin adapter over it.
 
-Distribution name **`protocentral-healthypi`**; the import package and both
-console scripts stay `healthypi` (and the short alias `hpi`).
+Distribution name **`protocentral-healthypi`**; the import package and the
+console script are both `healthypi`. There is no `hpi` alias: the firmware's
+own shell registers a root command by that name, which runs on the device and
+has different verbs, so `hpi ...` in any instruction means the device shell and
+`healthypi ...` means this tool.
 
 ```bash
 pip install protocentral-healthypi            # library only, stdlib deps
@@ -23,7 +26,7 @@ pip install -e "tools/healthypi[device]"
 | `healthypi.smp.group64` | ✅ wire classes, **generated** from the catalog |
 | `healthypi.transport` | ✅ CDC 1 connect + autodetect |
 | `healthypi.openview` | ✅ Wi-Fi (OpenView v2) decode + monitor |
-| `healthypi.cli` | ✅ the `healthypi` / `hpi` command |
+| `healthypi.cli` | ✅ the `healthypi` command |
 | `healthypi.fw` | ✅ `.hpifw` bundles, M7+M4 update, MCUboot serial recovery |
 | `healthypi.hw` | ✅ HealthyLink module EEPROM images |
 | `healthypi.testing` | ✅ the group-64 acceptance suite, importable |
@@ -102,33 +105,33 @@ validated on v5 hardware.
 ## CLI
 
 ```bash
-hpi catalog                     # every group-64 command, and its real status
-hpi hp6 verify REC0001.HP6      # CRCs, gaps, counters
-hpi hp6 to-csv REC0001.HP6 out/
-hpi device info                 # port autodetected
-hpi telemetry --json
-hpi stream start --ch 0x03      # ECG + PPG
-hpi record start --name walk
-hpi transfer arm                # SD card as a USB disk (drops the connection)
-hpi wifi-stream monitor --udp   # Wi-Fi packet rate and loss
+healthypi catalog                     # every group-64 command, and its real status
+healthypi hp6 verify REC0001.HP6      # CRCs, gaps, counters
+healthypi hp6 to-csv REC0001.HP6 out/
+healthypi device info                 # port autodetected
+healthypi telemetry --json
+healthypi stream start --ch 0x03      # ECG + PPG
+healthypi record start --name walk
+healthypi transfer arm                # SD card as a USB disk (drops the connection)
+healthypi wifi-stream monitor --udp   # Wi-Fi packet rate and loss
 
 # firmware
-hpi fw info --bundle hpi6-1.0.0.hpifw --pubkey release.pem   # offline
-hpi fw update --bundle hpi6-1.0.0.hpifw                      # all processors
-hpi fw update --bundle hpi6-1.0.0.hpifw --only m4 --force
-hpi fw enter-recovery                                        # into MCUboot
-hpi fw recover --port <recovery-port> --bundle hpi6-1.0.0.hpifw
+healthypi fw info --bundle hpi6-1.0.0.hpifw --pubkey release.pem   # offline
+healthypi fw update --bundle hpi6-1.0.0.hpifw                      # all processors
+healthypi fw update --bundle hpi6-1.0.0.hpifw --only m4 --force
+healthypi fw enter-recovery                                        # into MCUboot
+healthypi fw recover --port <recovery-port> --bundle hpi6-1.0.0.hpifw
 
 # acceptance suite (the bench gate)
-hpi test list                        # the cases and what each needs
-hpi test run                         # read-only by default
-hpi test run --destructive --group fw
-hpi test soak --iterations 60000     # 0 errors, p99 < 50 ms
+healthypi test list                        # the cases and what each needs
+healthypi test run                         # read-only by default
+healthypi test run --destructive --group fw
+healthypi test soak --iterations 60000     # 0 errors, p99 < 50 ms
 
 # HealthyLink module EEPROMs
-hpi hl eeprom generate -m EEG-8CH -n "EEG-8CH" -s 10001 -o eeprom.bin
-hpi hl eeprom read eeprom.bin        # non-zero exit on a bad CRC
-hpi hl eeprom stack --modules EEG-8CH TRIGGER-IO AI-ACCELERATOR
+healthypi hl eeprom generate -m EEG-8CH -n "EEG-8CH" -s 10001 -o eeprom.bin
+healthypi hl eeprom read eeprom.bin        # non-zero exit on a bad CRC
+healthypi hl eeprom stack --modules EEG-8CH TRIGGER-IO AI-ACCELERATOR
 ```
 
 Update order is `esp32c6 → m4 → m7`; the M7 goes last because it is what applies

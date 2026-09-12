@@ -3,8 +3,10 @@
 
 """Hardware-adjacent host tooling: things that make artifacts for a board.
 
-Stdlib-only. Nothing here talks to a HealthyPi over USB -- that is
-:mod:`healthypi.smp` and :mod:`healthypi.transport`.
+:mod:`~healthypi.hw.eeprom` builds and parses HealthyLink ID EEPROM images and
+is stdlib-only. :mod:`~healthypi.hw.program` writes one to a module *through a
+connected HealthyPi* (group-64 0x0053/0x0054) and is imported on demand,
+because that half needs the SMP stack.
 """
 
 from __future__ import annotations

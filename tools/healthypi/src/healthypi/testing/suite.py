@@ -164,7 +164,7 @@ class Capabilities:
 
     def unmet(self, requires: tuple[str, ...]) -> str | None:
         if REQ_UNLOCK in requires and not self.unlocked:
-            return "device is locked (hpi lock unlock)"
+            return "device is locked (healthypi lock unlock)"
         if REQ_SIGNED in requires and not self.signed_build:
             return "not a signed build (no M4-update/recovery support)"
         if REQ_SD in requires and not self.sd_present:

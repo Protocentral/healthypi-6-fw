@@ -994,7 +994,7 @@ User disconnects            → close CDC 1
 
 ## 12. A worked example
 
-The repo ships [`tools/healthypi/`](../tools/healthypi/) — a pip-installable library plus the `healthypi` / `hpi` CLI that talks to a device over CDC 1. Use it as:
+The repo ships [`tools/healthypi/`](../tools/healthypi/) — a pip-installable library plus the `healthypi` CLI that talks to a device over CDC 1. Use it as:
 
 - A worked example of how to connect and issue commands from Python
   (`healthypi.transport.serial_smp` for the connection, `healthypi.smp.group64` for the commands)
