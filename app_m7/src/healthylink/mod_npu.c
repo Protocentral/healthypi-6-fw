@@ -166,6 +166,9 @@ static const struct spi_config npu_cfg = {
 };
 static bool npu_cs_ready;
 static bool npu_irq_ready;
+/* Latched once the IRQ line is seen resting asserted, so the warning that says
+ * so does not repeat on every command. */
+static bool npu_irq_stuck;
 
 /*
  * FIXED-LENGTH FRAMING (must match the module's CONFIG_HLC_SPI_FRAME_SIZE).
@@ -231,7 +234,20 @@ static void npu_frame_nop(void)
 /* Wait for the module to signal that a reply is staged. Returns 0 on assert,
  * -ETIMEDOUT otherwise -- and the caller proceeds either way (see npu_irq).
  * Without a usable IRQ the whole timeout is slept: that is the turnaround the
- * module needs, and reading sooner returns an all-zero frame. */
+ * module needs, and reading sooner returns an all-zero frame.
+ *
+ * What is trusted is the ASSERT EDGE, never the level. The module releases PI12
+ * whenever it has nothing staged, so a line already active on entry --
+ * microseconds after the command frame finished clocking, before the module
+ * could possibly have staged a reply to it -- is not this reply's assert. It is
+ * a stale assert, or (far likelier, given the four-way pin disagreement above)
+ * some other signal that simply rests low. Believing that level returns
+ * immediately and collapses the turnaround to 0 ms, so all three read attempts
+ * land ~10 ms after the command and every exchange reports NO_REPLY. An
+ * already-active line therefore counts as no signal at all: sleep the full
+ * timeout, exactly as when the pin cannot be configured. Costing latency and
+ * nothing else is the whole contract of this line.
+ */
 static int npu_wait_reply_ready(int timeout_ms)
 {
 	if (!npu_irq_ready) {
@@ -242,11 +258,24 @@ static int npu_wait_reply_ready(int timeout_ms)
 		}
 		npu_irq_ready = true;
 	}
-	for (int waited = 0; waited <= timeout_ms; waited += 2) {
-		if (gpio_pin_get_dt(&npu_irq) == 1) {   /* logical active */
+
+	if (gpio_pin_get_dt(&npu_irq) == 1) {   /* already active: not an edge */
+		if (!npu_irq_stuck) {
+			npu_irq_stuck = true;
+			LOG_WRN("NPU: IRQ asserted before a reply could be staged "
+				"-- ignoring the line, waiting the full %d ms "
+				"turnaround instead", timeout_ms);
+		}
+		k_msleep(timeout_ms);
+		return -ETIMEDOUT;
+	}
+	npu_irq_stuck = false;
+
+	for (int waited = 0; waited < timeout_ms; waited += 2) {
+		k_msleep(2);
+		if (gpio_pin_get_dt(&npu_irq) == 1) {   /* the assert edge */
 			return 0;
 		}
-		k_msleep(2);
 	}
 	return -ETIMEDOUT;
 }
