@@ -132,6 +132,8 @@ const char *healthylink_module_name(uint16_t module_id)
 		return "SYNC-MASTER";
 	case HEALTHYLINK_MODULE_ID_GSR_RESP:
 		return "GSR-RESPIRATION";
+	case HEALTHYLINK_MODULE_ID_GPIO:
+		return "GPIO";
 	default:
 		return "Unknown";
 	}
@@ -292,6 +294,12 @@ static uint32_t healthylink_default_capabilities(uint16_t module_id)
 		return HEALTHYLINK_CAP_REQUIRES_FDCAN | HEALTHYLINK_CAP_POWER_MED;
 	case HEALTHYLINK_MODULE_ID_TRIGGER:
 		return HEALTHYLINK_CAP_REQUIRES_GPIO | HEALTHYLINK_CAP_POWER_LOW;
+	case HEALTHYLINK_MODULE_ID_GPIO:
+		/* Deliberately claims no interface bit: the breakout exposes
+		 * every interface passively, and bits 0-7 are exclusive across
+		 * slots -- claiming one would lock a real module out of the
+		 * other slot for nothing. */
+		return HEALTHYLINK_CAP_POWER_LOW;
 	case HEALTHYLINK_MODULE_ID_COMPUTE:
 		return HEALTHYLINK_CAP_REQUIRES_SPI6 | HEALTHYLINK_CAP_REQUIRES_GPIO |
 		       HEALTHYLINK_CAP_DMA_CAPABLE | HEALTHYLINK_CAP_POWER_HIGH;
@@ -434,6 +442,45 @@ int healthylink_eeprom_write(const struct device *dev,
 	return 0;
 }
 
+/* Probe every address on the bus this slot's ID EEPROM lives on.
+ *
+ * A bring-up instrument, not part of detection: on v5 the slot EEPROMs are the
+ * only devices on I2C3, so a slot that answers nothing gives no way to tell a
+ * module that is not responding from a bus that is not working. This says
+ * which it is.
+ *
+ * Zero-length write, the same probe Zephyr's `i2c scan` shell command uses:
+ * it ACKs or it does not, and nothing is read or written either way.
+ */
+int healthylink_bus_scan(const struct device *dev, uint8_t *addrs, size_t max)
+{
+	const struct healthylink_config *cfg = healthylink_get_config(dev);
+	size_t n = 0;
+
+	if (addrs == NULL || max == 0) {
+		return -EINVAL;
+	}
+	if (!device_is_ready(cfg->eeprom.bus)) {
+		return -ENODEV;
+	}
+
+	for (uint16_t a = 0x08; a <= 0x77 && n < max; a++) {
+		struct i2c_msg msg = {
+			.buf = NULL,
+			.len = 0U,
+			.flags = I2C_MSG_WRITE | I2C_MSG_STOP,
+		};
+
+		if (i2c_transfer(cfg->eeprom.bus, &msg, 1, (uint16_t)a) == 0) {
+			addrs[n++] = (uint8_t)a;
+		}
+	}
+
+	LOG_INF("slot %s: bus scan found %u device(s)", cfg->label,
+		(unsigned int)n);
+	return (int)n;
+}
+
 /* Check if a module is present.
  *
  * Detection is EEPROM-based only (no detect GPIO): probe the slot's ID EEPROM
@@ -462,10 +509,24 @@ static int healthylink_read_header(const struct device *dev,
 		return ret;
 	}
 
-	/* Verify magic */
+	/* Verify magic. Worth a warning rather than a debug line: with
+	 * auto-provisioning off (the default), an unprogrammed module is the
+	 * ordinary reason a slot comes up ERROR, and "-22" on its own sends
+	 * people looking for a hardware fault that is not there. */
 	if (memcmp(raw.magic, HEALTHYLINK_EEPROM_MAGIC, 4) != 0) {
-		LOG_DBG("Invalid EEPROM magic: %02X %02X %02X %02X",
-			raw.magic[0], raw.magic[1], raw.magic[2], raw.magic[3]);
+		const uint8_t m0 = raw.magic[0];
+		bool unwritten = (m0 == 0xFF || m0 == 0x00) &&
+				 raw.magic[1] == m0 && raw.magic[2] == m0 &&
+				 raw.magic[3] == m0;
+
+		LOG_WRN("slot %s: no HLNK magic (%02X %02X %02X %02X) -- %s",
+			healthylink_get_config(dev)->label,
+			raw.magic[0], raw.magic[1], raw.magic[2], raw.magic[3],
+			unwritten ? "the ID EEPROM has never been programmed. "
+				    "Run: healthypi hl eeprom program --slot <a|b> "
+				    "--module-id <id> --name <name>"
+				  : "the ID EEPROM holds something else (a partial "
+				    "write, or not a HealthyLink module)");
 		return -EINVAL;
 	}
 
@@ -628,6 +689,9 @@ int healthylink_slot_power(const struct device *dev, bool on)
 		ret = slot_power_on_checked(dev);
 	} else {
 		slot_power_set(dev, false);
+		/* An unpowered module is not driving the shared pins, so stop
+		 * holding them on its behalf. */
+		healthylink_pinmux_release(dev);
 	}
 	k_mutex_unlock(&data->lock);
 
@@ -659,6 +723,9 @@ int healthylink_detect(const struct device *dev)
 	if (data->active_driver != NULL && data->active_driver->remove != NULL) {
 		data->active_driver->remove(dev);
 	}
+	/* Whatever this slot held is no longer in use; give it back so the other
+	 * slot can take it. A no-op if this slot never claimed anything. */
+	healthylink_pinmux_release(dev);
 	data->active_driver = NULL;
 	data->module_id = 0;
 	memset(&data->module_header, 0, sizeof(data->module_header));
@@ -678,8 +745,10 @@ int healthylink_detect(const struct device *dev)
 	bool present = healthylink_module_present(dev);
 
 	if (!present) {
-		/* No pinmux reset here: those pins are shared by both slots, and
-		 * resetting them would clobber a module in the other one. */
+		/* Nothing to undo here: the release above already gave back
+		 * anything this slot held, and it is ownership -- not the
+		 * absence of this call -- that keeps us off pins the other slot
+		 * is using. */
 		LOG_INF("slot %s: empty (no ACK at 0x%02x)", cfg->label,
 			cfg->eeprom.addr);
 		slot_power_set(dev, false);
@@ -742,10 +811,14 @@ int healthylink_detect(const struct device *dev)
 		return ret;
 	}
 
-	/* Configure pins for this module type (runtime pinmux) */
-	ret = healthylink_pinmux_configure_for_module(data->module_id);
+	/* Configure pins for this module type (runtime pinmux). The slot device
+	 * is the owner token: the SPI6/FDCAN1 pins reach both slots, so this
+	 * refuses with -EBUSY rather than reprogramming pins the other slot's
+	 * module is using. */
+	ret = healthylink_pinmux_configure_for_module(dev, data->module_id);
 	if (ret < 0) {
-		LOG_ERR("Failed to configure pins for module: %d", ret);
+		LOG_ERR("slot %s: failed to configure pins for module: %d",
+			cfg->label, ret);
 		data->status = HEALTHYLINK_STATUS_ERROR;
 		k_mutex_unlock(&data->lock);
 		return ret;

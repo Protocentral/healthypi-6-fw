@@ -314,6 +314,151 @@ int hl_set_slot_power(hl_slot_t slot, bool on)
     return rc;
 }
 
+/* ---- ID EEPROM (see healthylink_service.h) ---- */
+
+#if defined(CONFIG_HEALTHYLINK)
+/* Shared checks: a usable slot device and a range inside the 256-byte image. */
+static int eeprom_check(hl_slot_t slot, uint8_t off, size_t len,
+                        const struct device **dev_out)
+{
+    if (slot >= HL_NUM_SLOTS || len == 0) {
+        return -EINVAL;
+    }
+    if ((size_t)off + len > HEALTHYLINK_EEPROM_SIZE) {
+        return -EINVAL;
+    }
+    const struct device *dev = g_slots[slot].dev;
+
+    if (dev == NULL || !device_is_ready(dev)) {
+        return -ENODEV;
+    }
+    *dev_out = dev;
+    return 0;
+}
+
+/* An I2C transfer that nobody answered, as opposed to one that went wrong. */
+static bool eeprom_no_ack(int rc)
+{
+    return rc == -EIO || rc == -ENXIO || rc == -ENODEV || rc == -ETIMEDOUT;
+}
+
+/*
+ * One EEPROM transfer, with a second attempt on the powered rail.
+ *
+ * Boot detection probes with the slot OFF on purpose -- identify before you
+ * power something unknown -- and that works because a module's ID EEPROM is
+ * meant to sit on the host's always-on 3V3. A module that feeds its EEPROM
+ * from its own regulator, behind the load switch, cannot answer that probe at
+ * all, and the symptom is indistinguishable from an empty slot.
+ *
+ * So when nothing acknowledges, try once more with the rail on. This is an
+ * explicit host-initiated operation on a module someone has just installed,
+ * not boot-time enumeration, and the rail is put back exactly as it was found
+ * -- so a module identified this way still goes through ordinary
+ * identify-then-power when the slot is next detected.
+ */
+static int eeprom_io(const struct device *dev, uint8_t off, uint8_t *buf,
+                     size_t len, bool write)
+{
+    int rc = write ? healthylink_eeprom_write(dev, off, buf, len)
+                   : healthylink_eeprom_read(dev, off, buf, len);
+
+    if (!eeprom_no_ack(rc) || healthylink_slot_is_powered(dev)) {
+        return rc;
+    }
+
+    LOG_INF("slot %s: ID EEPROM did not answer with the rail off -- retrying "
+            "powered (its EEPROM may be on the switched supply)",
+            healthylink_slot_label(dev));
+
+    if (healthylink_slot_power(dev, true) != 0) {
+        return rc;   /* load-switch fault: the original error is the honest one */
+    }
+    k_msleep(10);   /* rail settle + EEPROM power-on reset */
+
+    rc = write ? healthylink_eeprom_write(dev, off, buf, len)
+               : healthylink_eeprom_read(dev, off, buf, len);
+
+    (void)healthylink_slot_power(dev, false);
+    return rc;
+}
+#endif /* CONFIG_HEALTHYLINK */
+
+int hl_eeprom_read(hl_slot_t slot, uint8_t off, uint8_t *buf, size_t len)
+{
+#if defined(CONFIG_HEALTHYLINK)
+    const struct device *dev;
+    int rc = buf == NULL ? -EINVAL : eeprom_check(slot, off, len, &dev);
+
+    if (rc != 0) {
+        return rc;
+    }
+    /* Under the op lock: the I2C bus is shared with a detect in progress. */
+    k_mutex_lock(&g_op_lock, K_FOREVER);
+    rc = eeprom_io(dev, off, buf, len, false);
+    k_mutex_unlock(&g_op_lock);
+    return rc;
+#else
+    ARG_UNUSED(slot); ARG_UNUSED(off); ARG_UNUSED(buf); ARG_UNUSED(len);
+    return -ENOTSUP;
+#endif
+}
+
+int hl_eeprom_write(hl_slot_t slot, uint8_t off, const uint8_t *data, size_t len)
+{
+#if defined(CONFIG_HEALTHYLINK)
+    const struct device *dev;
+    int rc = data == NULL ? -EINVAL : eeprom_check(slot, off, len, &dev);
+
+    if (rc != 0) {
+        return rc;
+    }
+    k_mutex_lock(&g_op_lock, K_FOREVER);
+    rc = eeprom_io(dev, off, (uint8_t *)data, len, true);
+    k_mutex_unlock(&g_op_lock);
+
+    LOG_INF("slot %c: ID EEPROM write %u B @ 0x%02x -> %d", slot_char(slot),
+            (unsigned int)len, off, rc);
+    return rc;
+#else
+    ARG_UNUSED(slot); ARG_UNUSED(off); ARG_UNUSED(data); ARG_UNUSED(len);
+    return -ENOTSUP;
+#endif
+}
+
+int hl_bus_scan(hl_slot_t slot, bool powered, uint8_t *addrs, size_t max)
+{
+#if defined(CONFIG_HEALTHYLINK)
+    const struct device *dev;
+    int rc = addrs == NULL ? -EINVAL : eeprom_check(slot, 0, 1, &dev);
+
+    if (rc != 0) {
+        return rc;
+    }
+
+    k_mutex_lock(&g_op_lock, K_FOREVER);
+    bool was_on = healthylink_slot_is_powered(dev);
+
+    if (powered && !was_on) {
+        rc = healthylink_slot_power(dev, true);
+        if (rc == 0) {
+            k_msleep(10);   /* rail settle + device power-on reset */
+        }
+    }
+    if (rc == 0) {
+        rc = healthylink_bus_scan(dev, addrs, max);
+    }
+    if (powered && !was_on) {
+        (void)healthylink_slot_power(dev, false);
+    }
+    k_mutex_unlock(&g_op_lock);
+    return rc;
+#else
+    ARG_UNUSED(slot); ARG_UNUSED(powered); ARG_UNUSED(addrs); ARG_UNUSED(max);
+    return -ENOTSUP;
+#endif
+}
+
 int hl_request_slot_power(hl_slot_t slot, bool on)
 {
     if (slot >= HL_NUM_SLOTS) {

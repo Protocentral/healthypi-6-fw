@@ -54,6 +54,17 @@ enum hpi_mgmt_cmd_id {
 	HPI_MGMT_CMD_MODULE_LIST       = 0x0050,
 	HPI_MGMT_CMD_MODULE_INFO       = 0x0051,
 	HPI_MGMT_CMD_MODULE_POWER      = 0x0052,
+	/* A slot's ID EEPROM, in raw bytes. This is what lets a module be
+	 * identified over the same USB cable as everything else, instead of
+	 * needing an external I2C programmer and the module off the board. The
+	 * device does not interpret the image; `healthypi.hw.eeprom` builds and
+	 * checks it, and detect rejects a bad CRC. */
+	HPI_MGMT_CMD_MODULE_EEPROM_READ  = 0x0053,
+	HPI_MGMT_CMD_MODULE_EEPROM_WRITE = 0x0054,
+	/* Bring-up instrument: which addresses answer on the slot's I2C bus.
+	 * The slot EEPROMs are the only devices on it, so without this a slot
+	 * that answers nothing cannot be told from a bus that does not work. */
+	HPI_MGMT_CMD_MODULE_I2C_SCAN     = 0x0055,
 
 	/* 0x0060 – 0x006F  SD card / recordings */
 	HPI_MGMT_CMD_SD_STATUS         = 0x0060,
@@ -126,8 +137,24 @@ enum hpi_mgmt_cmd_id {
 	HPI_MGMT_EVT_SD_FORMAT_PROGRESS = 0x00FF,
 };
 
-/* Group-64 extension error codes start at MGMT_ERR_USER_START (256)
- * */
+/*
+ * Group-64 extension error codes, starting at MGMT_ERR_USER_START (256).
+ *
+ * HOW TO RETURN ONE -- the only correct way:
+ *
+ *     bool ok = smp_add_cmd_err(zse, HPI_MGMT_GROUP_ID, HPI_MGMT_ERR_x);
+ *     return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+ *
+ * NEVER `return HPI_MGMT_ERR_x;`. A handler's return value is the
+ * protocol-wide MGMT_ERR set (EINVAL, ENOTSUP, EACCES ...), which goes on the
+ * wire as a top-level {"rc": n}. Codes >= 256 do not exist in that namespace,
+ * so the reply matches neither the success schema nor either error schema:
+ * a conforming client cannot even name the failure, and smpclient in
+ * particular dies inside its own error handling. The err map carries the group
+ * id precisely because a code only means something inside its own group.
+ *
+ * Enforced by tools/healthypi/tests/test_catalog_drift.py.
+ */
 enum hpi_mgmt_err {
 	HPI_MGMT_ERR_NOT_READY             = 256,
 	HPI_MGMT_ERR_HW_FAULT              = 257,

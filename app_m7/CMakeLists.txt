@@ -146,6 +146,7 @@ target_sources(app PRIVATE
     src/healthylink/healthylink_service.c
     src/healthylink/hlink_proto.c
     src/healthylink/mod_eeg.c
+    src/healthylink/mod_gpio.c
     src/healthylink/mod_npu.c
     src/healthylink/npu_uart_host.c
     src/control/mcumgr_hpi/hpi_modules.c

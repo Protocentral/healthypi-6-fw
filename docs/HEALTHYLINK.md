@@ -296,6 +296,61 @@ module answers at the address of the slot it is in:
 
 The EEPROM must be an address-strappable part (A0 brought out), and it is
 powered from the host's always-on 3V3 rail, not the switched module supply.
+That is what lets the host identify a module *before* deciding whether to
+power it, and it is also what makes the EEPROM reachable from a running
+HealthyPi whatever state the slot is in.
+
+Registered module IDs:
+
+| ID | Module | Claims |
+|---|---|---|
+| `0x0001` | EEG-8CH (ADS1299) | SPI4 |
+| `0x0002` | EMG-4CH | SPI4 |
+| `0x0003` | TRIGGER-IO | GPIO |
+| `0x0004` | CAN-INTERFACE | FDCAN |
+| `0x0005` | HealthyLink Compute (STM32N657) | SPI4 |
+| `0x0006` | HIGH-RES-ADC | SPI6 |
+| `0x0007` | STIM-OUTPUT | — |
+| `0x0008` | SYNC-MASTER | GPIO |
+| `0x0009` | GSR-RESPIRATION | SPI6 |
+| `0x000A` | GPIO breakout | nothing |
+
+`0x000B`–`0x00FF` are reserved for ProtoCentral; `0x0100`–`0xFFFE` are free for
+community modules. The GPIO breakout claims nothing on purpose: it brings every
+interface out to headers and drives none of them, and the interface bits are
+exclusive across the two slots — claiming one would lock a real module out of
+the other slot for nothing.
+
+#### 4.3.1 Programming a module's EEPROM
+
+Through the HealthyPi itself, over the CDC 1 control port. The host is wired to
+both slot EEPROMs, so the module stays in its slot and no external programmer
+is involved:
+
+```bash
+healthypi hl eeprom dump --slot a                    # what is on it now
+healthypi hl eeprom program --slot a \
+    --module-id GPIO --name "GPIO breakout" --serial 1
+healthypi module list                                # slot A should be active
+```
+
+`program` builds the 256-byte image, writes it in chunks (group-64 `0x0054`),
+reads it back and compares, then re-detects the slot so the new identity takes
+effect. It refuses to overwrite an EEPROM that already holds a valid image
+unless you pass `--force`. `healthypi hl eeprom erase --slot a --yes` puts a
+mis-programmed module back to factory-blank `0xFF`.
+
+A module that is **not** in a slot still needs an external programmer (FT232H,
+Raspberry Pi I²C, CH341A, Bus Pirate): `healthypi hl eeprom generate` writes the
+same image to a file.
+
+**Auto-provisioning is off** (`CONFIG_HEALTHYLINK_AUTO_PROVISION=n`). The
+firmware can stamp a blank EEPROM by itself, but the identity comes from one
+board-wide devicetree node rather than from the module in front of it — so the
+first boot after plugging in an unprogrammed module would silently label it as
+whatever that node names, in either slot, and the result reads back as a
+perfectly valid something-else. Enable it only on a production line that
+programs one module type per station.
 
 ### 4.4 Example module block diagram
 

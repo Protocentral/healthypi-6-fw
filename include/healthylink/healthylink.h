@@ -64,7 +64,12 @@ extern "C" {
 #define HEALTHYLINK_MODULE_ID_STIM      0x0007
 #define HEALTHYLINK_MODULE_ID_SYNC      0x0008
 #define HEALTHYLINK_MODULE_ID_GSR_RESP  0x0009
-/* 0x000A - 0x00FF: Reserved for ProtoCentral */
+/* Passive breakout: headers for every HealthyLink interface, the slot
+ * regulators and the ID EEPROM. It claims no interface and drives nothing, so
+ * the host leaves the shared SPI6/FDCAN1 pins exactly as the devicetree left
+ * them -- which is what makes the board usable for bringing up a new module. */
+#define HEALTHYLINK_MODULE_ID_GPIO      0x000A
+/* 0x000B - 0x00FF: Reserved for ProtoCentral */
 /* 0x0100 - 0xFFFE: Community/third-party modules */
 #define HEALTHYLINK_MODULE_ID_RESERVED  0xFFFF
 
@@ -222,6 +227,20 @@ int healthylink_detect(const struct device *dev);
  *         no power control
  */
 int healthylink_slot_power(const struct device *dev, bool on);
+
+/**
+ * @brief Probe every 7-bit address on the bus carrying this slot's ID EEPROM
+ *
+ * A bring-up instrument: it says whether the bus works at all, and at which
+ * address a module is actually answering. Uses a zero-length write, so nothing
+ * is read from or written to whatever responds. Does not change slot power.
+ *
+ * @param dev   HealthyLink slot device
+ * @param addrs Buffer for the responding 7-bit addresses
+ * @param max   Capacity of @p addrs
+ * @return Number of devices found, or a negative errno
+ */
+int healthylink_bus_scan(const struct device *dev, uint8_t *addrs, size_t max);
 
 /**
  * @brief Whether the slot's load switch is driven on (the command, not a

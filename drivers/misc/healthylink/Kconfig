@@ -36,15 +36,28 @@ config HEALTHYLINK_AUTO_DETECT
 
 config HEALTHYLINK_AUTO_PROVISION
 	bool "Auto-provision blank EEPROMs"
-	default y
+	default n
 	help
-	  When a blank EEPROM is detected (all 0xFF or all 0x00 in magic),
-	  automatically write the module identity based on:
-	  1. Device tree overlay (if module-id is specified)
-	  2. Hardware probing (detect connected chip IDs)
+	  When a blank EEPROM is detected, automatically write a module
+	  identity taken from the `chosen { healthylink-module = ...; }` node,
+	  or from hardware probing.
 
-	  This eliminates the need for external EEPROM programmers during
-	  module manufacturing or development.
+	  DEFAULT n, DELIBERATELY. "Blank" here means anything that is not a
+	  valid HLNK header -- 0xFF, 0x00, or a partially written image -- and
+	  the identity comes from one board-wide devicetree node, not from the
+	  module in front of it. So the first boot after plugging an
+	  unprogrammed module into either slot silently stamps it as whatever
+	  that node names, and the mistake is invisible: the module then reads
+	  back as a perfectly valid something-else.
+
+	  Program modules deliberately instead, over the same USB cable as
+	  everything else:
+
+	      healthypi hl eeprom program --slot a --module-id GPIO
+
+	  (group-64 0x0053/0x0054 -> hl_eeprom_read/write). Enable this option
+	  only for a production line that programs one module type per station
+	  and sets the chosen node to match.
 
 config HEALTHYLINK_REPROVISION_NAME
 	bool "Rewrite an already-provisioned EEPROM's name field on boot"

@@ -90,7 +90,13 @@
 	};
 };
 
-/* Module type written to a blank ID EEPROM by HealthyLink auto-provisioning. */
+/* Module type written to a blank ID EEPROM by HealthyLink auto-provisioning,
+ * which is OFF (CONFIG_HEALTHYLINK_AUTO_PROVISION=n in app_m7/prj.conf): this
+ * node is inert, and is kept only for a production line that turns
+ * auto-provisioning on for one module type per station. Modules are otherwise
+ * programmed deliberately with `healthypi hl eeprom program`. Note it is
+ * board-wide, NOT per slot -- whatever it names is what a blank EEPROM becomes
+ * in either slot. */
 / {
 	healthylink_default_compute: healthylink-compute-default {
 		compatible = "protocentral,healthylink-compute";
