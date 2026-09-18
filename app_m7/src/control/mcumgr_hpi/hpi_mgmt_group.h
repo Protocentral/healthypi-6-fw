@@ -27,7 +27,7 @@ extern "C" {
 /* Group-64 schema version returned by hpi/device_info.gv.
  * (major << 8) | minor — bump minor for additive changes, major for
  * breaking ones. */
-#define HPI_MGMT_SCHEMA_VERSION 0x0001U
+#define HPI_MGMT_SCHEMA_VERSION 0x0002U
 
 /* Command IDs within group 64, allocated in subranges by
  * subsystem. */

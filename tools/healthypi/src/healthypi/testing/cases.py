@@ -301,7 +301,7 @@ async def module_list(conn, g, is_error, fmt_error):
     return ok("module_list", f"slot A={resp.a} slot B={resp.b}")
 
 
-@case("module_eeprom_read", group="system")
+@case("module_eeprom_read", group="system", requires=(REQ_UNLOCK,))
 async def module_eeprom_read(conn, g, is_error, fmt_error):
     """Read the head of slot A's ID EEPROM.
 

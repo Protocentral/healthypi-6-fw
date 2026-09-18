@@ -18,7 +18,7 @@ send a custom group ID — most can.
 - [8. Reserved command IDs](#8-reserved-command-ids)
 - [9. Compatibility](#9-compatibility)
 
-Firmware 1.0.0 · group schema version `0x0001`.
+Firmware 1.0.0 · group schema version `0x0002`.
 
 ---
 
@@ -403,7 +403,7 @@ one. `ok` is true only if the slot ends up active (state 2). `on: false` stops
 the module, releases its interfaces and cuts the rail. The slot then reads
 state 5, or 0 if it was empty; `ok` is true.
 
-#### `0x0053` module_eeprom_read — read
+#### `0x0053` module_eeprom_read — read · 🔒 lock
 
 `slot` uint (`0` = A, `1` = B), `off` uint (0–255), `len` uint (1–64) →
 `off` uint, `data` bstr.
@@ -413,6 +413,9 @@ in [HEALTHYLINK.md §4.3](HEALTHYLINK.md). The device does not parse what it
 returns; a request that runs past byte 255, or asks for more than 64 bytes,
 is `EINVAL`. A slot with no EEPROM answering (empty, or a module that will not
 ACK) is `256 NOT_READY`, and an I2C failure is `257 HW_FAULT`.
+
+Unlock-gated: a NAK on the unpowered probe retries with the slot rail on, which
+pulses `EN_MOD_x` — the same privilege as `module_i2c_scan`.
 
 #### `0x0054` module_eeprom_write — write · 🔒 lock
 
@@ -676,7 +679,7 @@ recordings off the device.**
 
 ## 9. Compatibility
 
-`device_info.gv` reports the group schema version, currently `0x0001`. Within a
+`device_info.gv` reports the group schema version, currently `0x0002`. Within a
 major schema version:
 
 - Command IDs and their meanings do not change.

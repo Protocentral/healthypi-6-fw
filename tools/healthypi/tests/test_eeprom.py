@@ -63,6 +63,22 @@ def test_default_capabilities_applied():
     assert "REALTIME_STREAM" in info.capability_names()
 
 
+def test_compute_default_capabilities_are_spi4():
+    """Compute identity images must claim SPI4, not SPI6.
+
+    SPI6 while SPI4 is in use wedges the next SPI4 transceive. The live
+    provider claims SPI4|DMA; POWER_HIGH is identity-image only."""
+    info = eeprom.parse_image(
+        eeprom.create_image(module_id=0x0005, name="AI-ACCELERATOR")
+    )
+    names = info.capability_names()
+    assert "REQUIRES_SPI4" in names
+    assert "DMA_CAPABLE" in names
+    assert "POWER_HIGH" in names
+    assert "REQUIRES_SPI6" not in names
+    assert "REQUIRES_GPIO" not in names
+
+
 def test_explicit_capabilities_win():
     img = eeprom.create_image(module_id=0x0001, name="EEG-8CH", capabilities=0x40)
     assert eeprom.parse_image(img).capabilities == 0x40

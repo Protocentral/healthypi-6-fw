@@ -108,6 +108,13 @@ int hpi_module_eeprom_read(struct smp_streamer *ctxt)
     zcbor_state_t *zsd = ctxt->reader->zs;
     zcbor_state_t *zse = ctxt->writer->zs;
 
+    /* hl_eeprom_read retries with the slot rail on if the unpowered probe
+     * NAKs -- that pulses EN_MOD_x, the same privilege as module_i2c_scan. */
+    int gate = hpi_security_require_unlocked();
+    if (gate != MGMT_ERR_EOK) {
+        return gate;
+    }
+
     uint32_t slot = 0, off = 0, len = 0;
     size_t decoded = 0;
     struct zcbor_map_decode_key_val decoders[] = {

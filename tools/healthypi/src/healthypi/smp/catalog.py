@@ -29,7 +29,7 @@ from smpgroup import Command, Field, Group, Op, Status, T
 GROUP_ID = 64
 
 #: HPI_MGMT_SCHEMA_VERSION reported by device_info's `gv` field.
-SCHEMA_VERSION = 0x0001
+SCHEMA_VERSION = 0x0002
 
 # --- group-64 extension error codes (MGMT_ERR_USER_START = 256) -------------
 
@@ -233,6 +233,7 @@ COMMANDS: tuple[Command, ...] = (
         0x0053,
         "module_eeprom_read",
         (R,),
+        meta={"unlock": True},
         request=(
             Field("slot", T.UINT, "0 = A, 1 = B"),
             Field("off", T.UINT, "byte offset into the 256-byte image"),

@@ -92,17 +92,11 @@ config HPI_NPU_COMMS_CHECK
 	  the result for hpi_npu_link_get(), the group-64 self-test and the
 	  HealthyLink screen.
 
-	  OFF by default: SPI4 transfers are not yet proven on this hardware and
-	  a faulting transceive resets the board (boot loop). The module is still
-	  detected, registered and marked active without this; enable only for
-	  focused SPI4 bring-up, ideally with a debugger/RTT attached to catch
-	  any fault. The handshake runs on a dedicated low-priority work queue so
-	  it cannot starve the watchdog, but a CPU exception in the SPI driver
-	  will still reset regardless of thread.
-
-	  NOTE: the module side has never been driven by any HLink v2 master --
-	  the PC harness exercises its USB CDC link, not SPI. Turning this on is
-	  joint bring-up of both halves, not a test against a proven peer.
+	  Handshake is proven on v5 in either slot (2026-09-11). Still default n
+	  because a faulting SPI4 transceive can reset the board; prj.dev.conf
+	  turns it on, prod keeps it off. The handshake runs on a dedicated
+	  low-priority work queue so it cannot starve the watchdog, but a CPU
+	  exception in the SPI driver will still reset regardless of thread.
 
 config HPI_NPU_SPI_FREQ_HZ
 	int "SPI4 clock for the HealthyLink Compute link (Hz)"

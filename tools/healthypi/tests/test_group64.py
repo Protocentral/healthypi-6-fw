@@ -71,7 +71,7 @@ def test_device_info_response():
         {
             "sn": "HP6-0001",
             "fw": "1.0.0",
-            "gv": 1,
+            "gv": catalog.SCHEMA_VERSION,
             "br": "v5",
             "hw": b"\xde\xad",
             "m4fw": "1.0.0",

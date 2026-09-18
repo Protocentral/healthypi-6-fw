@@ -332,16 +332,23 @@ static int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 			return rc;
 		}
 
-		int off = hlink_find_sof(npu_frame_rx, sizeof(npu_frame_rx));
+		size_t scan = 0;
 
-		if (off >= 0) {
+		while (scan + HLINK_HDR_LEN <= sizeof(npu_frame_rx)) {
+			int rel = hlink_find_sof(npu_frame_rx + scan,
+						 sizeof(npu_frame_rx) - scan);
+
+			if (rel < 0) {
+				break;
+			}
+
+			int off = (int)scan + rel;
 			int d = hlink_decode(&npu_frame_rx[off],
-					     sizeof(npu_frame_rx) - off, reply);
+					     sizeof(npu_frame_rx) - (size_t)off,
+					     reply);
 
 			if (d > 0 && reply->seq == seq &&
 			    (reply->flags & HLINK_FLAG_REPLY) && reply->cmd == cmd) {
-				/* How many underrun bytes really precede a reply
-				 * is one of the first things bring-up needs. */
 				LOG_DBG("NPU cmd 0x%02x: reply at +%d (%s, try %d)",
 					cmd, off, irq == 0 ? "irq" : "timeout-fallback",
 					attempt + 1);
@@ -356,6 +363,7 @@ static int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 			}
 			LOG_DBG("NPU cmd 0x%02x: frame at +%d not ours (rc=%d)",
 				cmd, off, d);
+			scan = (size_t)off + 1;
 		}
 		k_msleep(5);
 	}

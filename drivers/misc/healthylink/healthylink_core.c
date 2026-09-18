@@ -301,7 +301,9 @@ static uint32_t healthylink_default_capabilities(uint16_t module_id)
 		 * other slot for nothing. */
 		return HEALTHYLINK_CAP_POWER_LOW;
 	case HEALTHYLINK_MODULE_ID_COMPUTE:
-		return HEALTHYLINK_CAP_REQUIRES_SPI6 | HEALTHYLINK_CAP_REQUIRES_GPIO |
+		/* SPI4, not SPI6: the module selects on CS_A. POWER_HIGH is
+		 * identity-image only; the provider does not claim it. */
+		return HEALTHYLINK_CAP_REQUIRES_SPI4 |
 		       HEALTHYLINK_CAP_DMA_CAPABLE | HEALTHYLINK_CAP_POWER_HIGH;
 	default:
 		return 0;

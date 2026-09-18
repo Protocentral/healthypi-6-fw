@@ -63,7 +63,7 @@ def test_surface_counts():
     assert len(g.routed()) == 35
     assert len(g.live()) == 34  # wifi_scan is a stub
     assert len(g.unreachable()) == 11
-    assert len(g.tagged("unlock")) == 11
+    assert len(g.tagged("unlock")) == 12
     assert len(g.tagged("signed_build")) == 5
 
 
