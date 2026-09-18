@@ -27,6 +27,9 @@
 #include "m4_ipc_protocol.h"           /* envelope + msg ids + ept name */
 #include "ipc.h"
 #include "health.h"                    /* M4 link heartbeat */
+#if IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+#include "healthylink/npu_stream.h"
+#endif
 
 LOG_MODULE_REGISTER(hpi_ipc, CONFIG_HPI_APP_LOG_LEVEL);
 
@@ -224,6 +227,24 @@ const char *hpi_ipc_m4_version(void)
     return m4_version;
 }
 
+BUILD_ASSERT(sizeof(struct hpi_ipc_beat_notify) == 16,
+             "BEAT_NOTIFY payload is 16 B (IPC <= 512)");
+
+static void on_beat_notify(const struct hpi_ipc_beat_notify *b)
+{
+    /* STREAM_PUSH t_ms is M7 k_uptime. M4 timestamp_ms is M4 uptime
+     * (the remote boots ~7 s later) and must not be forwarded as the
+     * event time. Stamp the beat when it arrives. */
+    uint32_t t_ms = k_uptime_get_32();
+
+#if IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+    npu_stream_on_beat(t_ms);
+#endif
+    LOG_DBG("beat: m4_t=%u sample=%u rr=%u hr=%u -> t=%u",
+            b->timestamp_ms, b->sample_number, b->rr_interval_ms,
+            b->heart_rate_bpm, t_ms);
+}
+
 static void on_m4_version(const struct hpi_ipc_version *v)
 {
     /* Copy defensively: the payload is fixed-size but the sender's string may
@@ -257,6 +278,11 @@ static void ept_recv(const void *data, size_t len, void *priv)
     case HPI_IPC_MSG_TYPE_VERSION:
         if (m->length >= sizeof(struct hpi_ipc_version)) {
             on_m4_version((const struct hpi_ipc_version *)m->data);
+        }
+        break;
+    case HPI_IPC_MSG_TYPE_BEAT_NOTIFY:
+        if (m->length >= sizeof(struct hpi_ipc_beat_notify)) {
+            on_beat_notify((const struct hpi_ipc_beat_notify *)m->data);
         }
         break;
     default:

@@ -33,7 +33,7 @@ enum hpi_ipc_msg_type {
 	HPI_IPC_MSG_TYPE_ECG_RAW = 0x20,    // M7→M4: Raw ECG samples (3-lead)
 	HPI_IPC_MSG_TYPE_ECG_VITALS = 0x21, // M4→M7: Calculated HR+HRV+QRS
 	HPI_IPC_MSG_TYPE_ECG_CONFIG = 0x22, // M7→M4: Algorithm configuration
-	HPI_IPC_MSG_TYPE_BEAT_NOTIFY = 0x23, // M4→M7: Beat detected (sample index only; unused)
+	HPI_IPC_MSG_TYPE_BEAT_NOTIFY = 0x23, // M4→M7: one QRS (struct hpi_ipc_beat_notify, 16 B)
 
 	/* EEG/Mental State Algorithm Message Types */
 	HPI_IPC_MSG_TYPE_EEG_RAW = 0x30,    // M7→M4: Raw EEG samples (ADC channels)

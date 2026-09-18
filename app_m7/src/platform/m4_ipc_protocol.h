@@ -34,8 +34,9 @@ enum hpi_ipc_msg_type {
     HPI_IPC_MSG_TYPE_VERSION    = 0x05, /* M4->M7: firmware version */
     HPI_IPC_MSG_TYPE_PPG_RAW    = 0x10, /* M7->M4: raw PPG batch  */
     HPI_IPC_MSG_TYPE_PPG_VITALS = 0x11, /* M4->M7: SpO2 + HR       */
-    HPI_IPC_MSG_TYPE_ECG_RAW    = 0x20, /* M7->M4: raw ECG batch  */
-    HPI_IPC_MSG_TYPE_ECG_VITALS = 0x21, /* M4->M7: HR + HRV + QRS  */
+    HPI_IPC_MSG_TYPE_ECG_RAW     = 0x20, /* M7->M4: raw ECG batch  */
+    HPI_IPC_MSG_TYPE_ECG_VITALS  = 0x21, /* M4->M7: HR + HRV + QRS  */
+    HPI_IPC_MSG_TYPE_BEAT_NOTIFY = 0x23, /* M4->M7: one QRS, 16 B   */
 };
 
 #ifdef __cplusplus

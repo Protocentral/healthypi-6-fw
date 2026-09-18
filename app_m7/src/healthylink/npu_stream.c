@@ -15,10 +15,9 @@
  * board the IRQ line is already asserted, so NPU_WAIT_REPLY sleeps 50 ms
  * every poll and the ECG ring drops.
  *
- * beat_classifier on the fitted module is event-triggered. Sliding ingest
- * alone leaves runs=0. Until PR8 (M4 BEAT_NOTIFY -> STREAM_EVENT), a
- * synthetic STREAM_EVENT is sent on a 1.5 s period so the windower has a
- * centre. Sliding models ignore beat markers.
+ * beat_classifier on the fitted module is event-triggered. STREAM_EVENT
+ * comes from M4 BEAT_NOTIFY (QRS). A 1.5 s synthetic marker is only used
+ * until the first QRS so the windower is not silent during the M4 7 s bind.
  */
 
 #include "npu_stream.h"
@@ -67,7 +66,11 @@ static uint32_t npu_stream_results;
 static uint32_t npu_stream_stub;
 static uint32_t npu_stream_poll_err;
 static uint32_t npu_stream_events;
+static uint32_t npu_stream_qrs;
+static bool npu_stream_have_qrs;
 static int64_t npu_stream_stats_ms;
+
+K_MSGQ_DEFINE(npu_beat_q, sizeof(uint32_t), 8, 4);
 
 static void npu_stream_unsub_locked(void)
 {
@@ -271,8 +274,8 @@ static void npu_stream_log_model(void)
 	LOG_INF("NPU stream: model '%s' mode=%u (0=slide 1=beat) win=%u hop=%u ch='%s'",
 		p0.name, p0.window_mode, p0.window, p0.hop, p0.channel);
 	if (p0.window_mode != 0) {
-		LOG_WRN("NPU stream: model is beat-triggered; sending synthetic "
-			"STREAM_EVENT until PR8 (M4 BEAT_NOTIFY)");
+		LOG_WRN("NPU stream: model is beat-triggered; STREAM_EVENT "
+			"from M4 QRS (synthetic until the first beat)");
 	}
 }
 
@@ -308,20 +311,79 @@ static void npu_stream_maybe_stats(void)
 	}
 
 	LOG_INF("NPU stream 5s: push=%u acc=%u mod_drop=%u results=%u stub=%u "
-		"bus_drop=%u poll_err=%u ev=%u | mod runs=%u/%u crc=%u ovr=%u",
+		"bus_drop=%u poll_err=%u ev=%u qrs=%u | mod runs=%u/%u crc=%u ovr=%u",
 		npu_stream_pushes, npu_stream_accepted, npu_stream_mod_drop,
 		npu_stream_results, npu_stream_stub, st.frames_dropped,
-		npu_stream_poll_err, npu_stream_events, runs_ok, runs_fail,
-		err_crc, err_ovr);
+		npu_stream_poll_err, npu_stream_events, npu_stream_qrs,
+		runs_ok, runs_fail, err_crc, err_ovr);
 }
 
-/* Beat-triggered models ignore sliding samples until STREAM_EVENT. M4
- * BEAT_NOTIFY is PR8; until then stamp a beat 1.2 s in the past so the
- * 748-sample window is already in the module ring. Sliding models discard
- * the marker. */
+static int npu_stream_send_event(uint64_t t_ms, bool qrs)
+{
+	struct hlink_stream_event_req req = {
+		.kind = HLINK_STREAM_EVENT_BEAT,
+		.t_ms = t_ms,
+	};
+	struct hlink_frame reply;
+	int rc = npu_cmd(HLINK_CMD_STREAM_EVENT, &req, sizeof(req),
+			 &reply, NPU_WAIT_ACK);
+
+	if (rc == -ECANCELED) {
+		return rc;
+	}
+	if (rc != 0) {
+		LOG_WRN("NPU stream: STREAM_EVENT failed (%d)", rc);
+		return rc;
+	}
+
+	npu_stream_last_event_ms = k_uptime_get();
+	npu_stream_events++;
+	if (qrs) {
+		npu_stream_qrs++;
+	}
+	if (npu_stream_events <= 3 || (npu_stream_events % 10u) == 0u) {
+		LOG_INF("NPU stream: STREAM_EVENT beat t=%u (%s, #%u)",
+			(uint32_t)t_ms, qrs ? "qrs" : "synthetic",
+			npu_stream_events);
+	}
+	return 0;
+}
+
+void npu_stream_on_beat(uint32_t t_ms)
+{
+	if (k_msgq_put(&npu_beat_q, &t_ms, K_NO_WAIT) != 0) {
+		uint32_t dump;
+
+		(void)k_msgq_get(&npu_beat_q, &dump, K_NO_WAIT);
+		(void)k_msgq_put(&npu_beat_q, &t_ms, K_NO_WAIT);
+	}
+}
+
+/* Beat-triggered models ignore sliding samples until STREAM_EVENT.
+ * Prefer M4 QRS; keep the 1.5 s synthetic only until the first beat so
+ * the M4 7 s bind does not leave the windower idle. Sliding models
+ * discard the marker. */
 static int npu_stream_maybe_event(void)
 {
 	if (npu_stream_window_mode == 0) {
+		return 0;
+	}
+
+	for (int i = 0; i < 4; i++) {
+		uint32_t t_ms;
+
+		if (k_msgq_get(&npu_beat_q, &t_ms, K_NO_WAIT) != 0) {
+			break;
+		}
+		npu_stream_have_qrs = true;
+		int rc = npu_stream_send_event(t_ms, true);
+
+		if (rc != 0) {
+			return rc;
+		}
+	}
+
+	if (npu_stream_have_qrs) {
 		return 0;
 	}
 	if (npu_stream_accepted < NPU_STREAM_EVENT_MIN_ACC) {
@@ -340,30 +402,7 @@ static int npu_stream_maybe_event(void)
 	if (t_ms > NPU_STREAM_EVENT_DELAY_MS) {
 		t_ms -= NPU_STREAM_EVENT_DELAY_MS;
 	}
-
-	struct hlink_stream_event_req req = {
-		.kind = HLINK_STREAM_EVENT_BEAT,
-		.t_ms = t_ms,
-	};
-	struct hlink_frame reply;
-	int rc = npu_cmd(HLINK_CMD_STREAM_EVENT, &req, sizeof(req),
-			 &reply, NPU_WAIT_ACK);
-
-	if (rc == -ECANCELED) {
-		return rc;
-	}
-	if (rc != 0) {
-		LOG_WRN("NPU stream: STREAM_EVENT failed (%d)", rc);
-		return rc;
-	}
-
-	npu_stream_last_event_ms = now;
-	npu_stream_events++;
-	if (npu_stream_events <= 3 || (npu_stream_events % 10u) == 0u) {
-		LOG_INF("NPU stream: STREAM_EVENT beat t=%u (synthetic, #%u)",
-			(uint32_t)t_ms, npu_stream_events);
-	}
-	return 0;
+	return npu_stream_send_event(t_ms, false);
 }
 
 static void npu_stream_work_fn(struct k_work *w)
@@ -521,6 +560,8 @@ void npu_stream_on_link_up(void)
 	npu_stream_stub = 0;
 	npu_stream_poll_err = 0;
 	npu_stream_events = 0;
+	npu_stream_qrs = 0;
+	npu_stream_have_qrs = false;
 	npu_stream_window_mode = -1;
 	npu_stream_last_event_ms = 0;
 	npu_stream_last_poll_ms = k_uptime_get();
@@ -539,6 +580,7 @@ void npu_stream_cancel(void)
 		return;
 	}
 	npu_link_cancel(&npu_stream_work);
+	k_msgq_purge(&npu_beat_q);
 	/* Work fn unsubscribes on stale. If it is not in pull, take the sub
 	 * now so a leaked ring does not sit until the next start. Never wait
 	 * on SPI -- the lock is not held across npu_cmd. */

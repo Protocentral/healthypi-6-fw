@@ -344,7 +344,9 @@ struct hpi_ipc_ecg_config {
  * ============================================================================
  * Lightweight beat notification: the M4 sends only the sample index (16 bytes
  * per beat); the receiver extracts the beat window from its own ring buffer.
- * Currently unused: beat classification runs on the NPU module.
+ * M7 stamps STREAM_EVENT with its own uptime (same clock as STREAM_PUSH).
+ * M4 timestamp_ms is M4 uptime and is not that clock -- the cores boot
+ * several seconds apart.
  */
 
 /**
