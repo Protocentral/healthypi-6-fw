@@ -18,8 +18,7 @@
  * two files can be diffed.
  *
  * Data-plane payload layouts (MODEL, TENSOR, STREAM) are mirrored here so
- * a later producer can encode without inventing offsets. This host still does
- * not drive those commands -- npu_infer.c / npu_stream.c will. There is no
+ * npu_infer.c / npu_stream.c can encode without inventing offsets. There is no
  * FILE_* (0x40) block: the module kept SMP for management.
  *
  * v1 NOTE. The host spoke a different protocol until this file existed: a bare

@@ -32,6 +32,9 @@
 #include "mod_npu.h"
 #include "npu_link.h"
 #include "npu_uart_host.h"             /* parked transport; see its header */
+#if IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+#include "npu_stream.h"
+#endif
 #if IS_ENABLED(CONFIG_HPI_NPU_INFER)
 #include "npu_infer.h"
 #endif
@@ -411,6 +414,15 @@ int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 					if (st == HLINK_ERR_PENDING) {
 						return -EAGAIN;
 					}
+					/* Empty RESULT_POLL. The spec names this NO_RESULT;
+					 * the 2.0.1 module maps the queue's
+					 * -ENOENT to NO_MODEL. Neither is a
+					 * fault worth a warning every poll. */
+					if (st == HLINK_ERR_NO_RESULT ||
+					    (cmd == HLINK_CMD_RESULT_POLL &&
+					     st == HLINK_ERR_NO_MODEL)) {
+						return -ENOENT;
+					}
 					LOG_WRN("NPU cmd 0x%02x: module says %s",
 						cmd, hlink_status_str(st));
 					return -EPROTO;
@@ -699,7 +711,11 @@ static void npu_comms_work_fn(struct k_work *w)
 		k_msleep(50);
 	}
 	int rc = npu_comms_check();
-#if IS_ENABLED(CONFIG_HPI_NPU_INFER) && !IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+#if IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+	if (rc == 0 && !npu_stale()) {
+		npu_stream_on_link_up();
+	}
+#elif IS_ENABLED(CONFIG_HPI_NPU_INFER)
 	if (rc == 0 && !npu_stale()) {
 		npu_infer_on_link_up();
 	}
@@ -807,6 +823,9 @@ static int npu_stop(struct hl_ctx *ctx)
 		/* Do not wait: spi_transceive can hang, and this runs from the
 		 * system workqueue (UI) and from MCUmgr. The handler polls
 		 * npu_stale() before the next clock. */
+#if IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+		npu_stream_cancel();
+#endif
 #if IS_ENABLED(CONFIG_HPI_NPU_INFER)
 		npu_infer_cancel();
 #endif

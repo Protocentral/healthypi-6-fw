@@ -141,10 +141,10 @@ config HPI_NPU_INFER
 	default n
 	depends on HPI_NPU_COMMS_CHECK
 	help
-	  After the handshake is UP, run a canned TENSOR_LOAD/RUN/READ_RESULT
-	  (bring-up) or STREAM_PUSH (when HPI_NPU_STREAM is on) and publish
-	  HPI_CH_INFER. Off until the SPI inference pass; prj.dev.conf turns
-	  it on for the Compute bring-up image.
+	  After the handshake is UP, publish HPI_CH_INFER from a canned
+	  TENSOR_LOAD/RUN/READ_RESULT (bring-up image) or from STREAM_PUSH
+	  (when HPI_NPU_STREAM is on). Off until the SPI inference pass;
+	  prj.dev.conf turns it on for the Compute bring-up image.
 
 config HPI_NPU_INFER_SELFTEST
 	bool "Canned 187 B tensor as an explicit debug trigger (not boot)"
@@ -153,16 +153,21 @@ config HPI_NPU_INFER_SELFTEST
 	help
 	  After the stream producer is compiled, the canned beat is no longer
 	  submitted on link-up. This flag keeps that path as a one-shot
-	  trigger. A STUB-clear canned beat looks like a subject
-	  classification -- do not enable while recording.
+	  trigger (`hpi npu selftest` when the shell is on). A STUB-clear
+	  canned beat looks like a subject classification -- do not enable
+	  while recording.
 
 config HPI_NPU_STREAM
-	bool
+	bool "STREAM_PUSH live ECG to Compute (product path)"
 	default n
 	depends on HPI_NPU_INFER
 	help
-	  Set when npu_stream.c is compiled. Link-up then submits stream
-	  work, not the canned tensor.
+	  Subscribe to bus ECG and STREAM_PUSH lead II (int32 µV) after
+	  handshake UP. Link-up then submits stream work only -- not the
+	  canned tensor. prj.dev.conf turns it on once the canned SPI
+	  inference pass has landed. The ECG ring is 32 frames (~21 KB
+	  from the system heap); raise HEAP_MEM_POOL_SIZE if subscribe
+	  fails.
 
 config HPI_NPU_BOOT_WAIT_MS
 	int "How long the module gets to boot after slot power-up (ms)"

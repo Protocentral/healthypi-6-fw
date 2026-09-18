@@ -154,6 +154,9 @@ target_sources(app PRIVATE
 target_sources_ifdef(CONFIG_HPI_NPU_INFER app PRIVATE
     src/healthylink/npu_infer.c
 )
+target_sources_ifdef(CONFIG_HPI_NPU_STREAM app PRIVATE
+    src/healthylink/npu_stream.c
+)
 
 # SPI4 bring-up loopback diagnostic (gated; default off)
 if(CONFIG_HPI_SPI4_LOOPBACK_TEST)

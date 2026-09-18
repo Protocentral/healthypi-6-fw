@@ -237,3 +237,12 @@ void npu_infer_cancel(void)
 		npu_link_cancel(&npu_infer_work);
 	}
 }
+
+int npu_infer_selftest(void)
+{
+	if (!npu_infer_inited) {
+		k_work_init(&npu_infer_work, npu_infer_work_fn);
+		npu_infer_inited = true;
+	}
+	return npu_link_submit(&npu_infer_work);
+}
