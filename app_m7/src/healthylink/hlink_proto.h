@@ -17,11 +17,10 @@
  * later. Change both together, and keep the function names identical so the
  * two files can be diffed.
  *
- * WHAT THIS FILE DOES NOT COVER, deliberately: the data plane. MODEL_LIST/INFO/
- * ACTIVATE (0x10-0x13), TENSOR_LOAD/RUN/READ_RESULT (0x20-0x22) and
- * STREAM_PUSH/EVENT/RESULT_POLL (0x30-0x32) exist on the module and are not
- * mirrored here, because the host does not yet drive them. Their numbering is
- * reproduced in the command enum anyway, so nobody re-uses a value.
+ * Data-plane payload layouts (MODEL, TENSOR, STREAM) are mirrored here so
+ * a later producer can encode without inventing offsets. This host still does
+ * not drive those commands -- npu_infer.c / npu_stream.c will. There is no
+ * FILE_* (0x40) block: the module kept SMP for management.
  *
  * v1 NOTE. The host spoke a different protocol until this file existed: a bare
  * command byte at offset 0, no SOF, no CRC, no sequence number, and a numbering
@@ -86,8 +85,7 @@ enum hlink_cmd {
 	HLINK_CMD_STATUS   = 0x03, /**< engine state + error counters */
 	HLINK_CMD_RESET    = 0x04, /**< reset the link state machine */
 
-	/* Data plane -- served by the module, not driven by this host yet.
-	 * Listed so the numbering cannot be accidentally reused. */
+	/* Data plane. Layouts below; this host does not send them yet. */
 	HLINK_CMD_MODEL_LIST       = 0x10,
 	HLINK_CMD_MODEL_INFO       = 0x11,
 	HLINK_CMD_MODEL_ACTIVATE   = 0x12,
@@ -175,6 +173,11 @@ enum hlink_caps {
  * ------------------------------------------------------------------------- */
 #define HLINK_STATUS_LEN            66u
 #define HLINK_NAME_LEN              32u
+#define HLINK_VER_LEN               16u
+#define HLINK_LABEL_LEN             8u
+#define HLINK_MAX_DIMS              6u
+#define HLINK_MAX_LABELS            16u
+#define HLINK_CHANNEL_LEN           16u
 #define HLINK_ST_OFF_ENGINE_STATE   0u
 #define HLINK_ST_OFF_N_MODELS       1u
 #define HLINK_ST_OFF_ACTIVE_IDX     2u   /**< 0xFF when none */
@@ -217,6 +220,218 @@ enum hlink_status_flag {
 	HLINK_ST_TENSOR_PART  = 0x04u,
 	HLINK_ST_MODEL_ACTIVE = 0x08u,
 };
+
+#define HLINK_MODEL_IDX_ACTIVE  0xFFu  /**< TENSOR_LOAD / RUN: the active model */
+#define HLINK_RUN_ID_LATEST     0xFFFFu
+
+/* ---------------------------------------------------------------------------
+ * MODEL_LIST -- paged (HLINK_PROTOCOL.md §4.3)
+ *
+ * Request: start index, 1 byte. Reply header 4 B + count * 56 B entries.
+ * MORE when start + count < total.
+ * ------------------------------------------------------------------------- */
+#define HLINK_MODEL_LIST_HDR_LEN    4u
+#define HLINK_MODEL_LIST_ENTRY_LEN  56u
+
+struct hlink_model_list_hdr {
+	uint8_t total;
+	uint8_t start;
+	uint8_t count;
+	uint8_t rsvd;
+} __attribute__((packed));
+
+struct hlink_model_list_entry {
+	char     name[HLINK_NAME_LEN];
+	char     version[HLINK_VER_LEN];
+	uint32_t size;
+	uint8_t  ok;     /**< 0 = installable; else hlm_validate errno magnitude */
+	uint8_t  active;
+	uint8_t  rsvd[2];
+} __attribute__((packed));
+
+/* ---------------------------------------------------------------------------
+ * MODEL_INFO -- two parts (HLINK_PROTOCOL.md §4.4)
+ *
+ * Request: name[32] + part (0 descriptor, 1 labels).
+ * ------------------------------------------------------------------------- */
+#define HLINK_MODEL_INFO_REQ_LEN     33u
+#define HLINK_TENSOR_DESC_LEN        36u
+#define HLINK_MODEL_INFO_PART0_LEN   161u
+
+struct hlink_model_info_req {
+	char    name[HLINK_NAME_LEN];
+	uint8_t part;
+} __attribute__((packed));
+
+struct hlink_tensor_desc {
+	uint8_t  dtype;      /**< 1 s8, 2 u8, 3 s16, 4 f32 */
+	uint8_t  n_dims;
+	uint8_t  rsvd[2];
+	uint32_t dims[HLINK_MAX_DIMS];
+	float    scale;
+	int32_t  zero_point;
+} __attribute__((packed));
+
+struct hlink_model_info_part0 {
+	char     name[HLINK_NAME_LEN];
+	char     version[HLINK_VER_LEN];
+	uint8_t  active;
+	uint8_t  n_inputs;
+	uint8_t  n_outputs;
+	uint8_t  post_kind;  /**< 0 none, 1 argmax, 2 softmax */
+	struct hlink_tensor_desc in;
+	struct hlink_tensor_desc out;
+	uint32_t rate_hz;
+	uint32_t window;
+	uint32_t hop;
+	uint8_t  window_mode;  /**< 0 sliding, 1 event-triggered */
+	uint8_t  trigger_kind; /**< 1 = beat / R-peak */
+	uint16_t pre_trigger;
+	char     channel[HLINK_CHANNEL_LEN];
+	float    threshold;
+	uint8_t  n_labels;
+} __attribute__((packed));
+
+/* ---------------------------------------------------------------------------
+ * TENSOR_LOAD -- chunked (HLINK_PROTOCOL.md §4.6)
+ *
+ * Request: 4-byte header then the chunk. Reply 8 B.
+ * ------------------------------------------------------------------------- */
+#define HLINK_TENSOR_LOAD_REQ_HDR_LEN 4u
+#define HLINK_TENSOR_LOAD_RSP_LEN     8u
+
+struct hlink_tensor_load_req {
+	uint8_t  model_idx;
+	uint8_t  input_idx;
+	uint16_t offset;
+	/* followed by chunk bytes */
+} __attribute__((packed));
+
+struct hlink_tensor_load_rsp {
+	uint8_t  status;
+	uint8_t  model_idx;
+	uint16_t offset;
+	uint16_t written;
+	uint16_t total;
+} __attribute__((packed));
+
+/* ---------------------------------------------------------------------------
+ * RUN (HLINK_PROTOCOL.md §4.7) -- reply means queued, not finished
+ * ------------------------------------------------------------------------- */
+#define HLINK_RUN_REQ_LEN 1u
+#define HLINK_RUN_RSP_LEN 4u
+
+struct hlink_run_req {
+	uint8_t model_idx;
+} __attribute__((packed));
+
+struct hlink_run_rsp {
+	uint8_t  status;
+	uint8_t  model_idx;
+	uint16_t run_id;
+} __attribute__((packed));
+
+/* ---------------------------------------------------------------------------
+ * READ_RESULT / RESULT_POLL (HLINK_PROTOCOL.md §4.8)
+ *
+ * One layout for both. PENDING vs NO_RESULT are different ERROR codes.
+ * ------------------------------------------------------------------------- */
+#define HLINK_READ_RESULT_REQ_LEN 4u
+#define HLINK_RESULT_HDR_LEN      36u
+
+struct hlink_read_result_req {
+	uint16_t run_id;     /**< 0xFFFF = most recent */
+	uint16_t out_offset;
+} __attribute__((packed));
+
+struct hlink_result_poll_req {
+	uint16_t out_offset;
+} __attribute__((packed));
+
+enum hlink_result_flag {
+	HLINK_RES_LOW_CONF = 0x01u,
+	HLINK_RES_STREAM   = 0x02u,
+};
+
+struct hlink_result_hdr {
+	uint16_t run_id;
+	uint8_t  model_idx;
+	uint8_t  run_status;  /**< 0 ran; else errno magnitude */
+	uint8_t  argmax;
+	uint8_t  confidence;
+	uint8_t  flags;       /**< HLINK_RES_* */
+	uint8_t  n_out;
+	char     label[HLINK_LABEL_LEN];
+	uint32_t cycles;
+	uint32_t us;
+	uint64_t t_ms;
+	uint16_t out_total;
+	uint16_t out_offset;
+	/* followed by n_out raw output bytes */
+} __attribute__((packed));
+
+/* ---------------------------------------------------------------------------
+ * STREAM_PUSH (HLINK_PROTOCOL.md §4.9)
+ *
+ * channel is the module's number, not an HP6 bus id:
+ *   0 resp, 1 lead I, 2 lead II, 3 V1, 4 PPG red, 5 PPG IR, 8-15 EEG.
+ * A manifest "channel: ecg" is lead II (2), never respiration (0).
+ *
+ * Payload after the 12-byte header is n samples of that channel only --
+ * int32 µV LE at 500 Hz for ECG -- NOT the 20-byte hp6_ecg_sample struct.
+ * ------------------------------------------------------------------------- */
+#define HLINK_STREAM_PUSH_REQ_HDR_LEN 12u
+#define HLINK_STREAM_PUSH_RSP_LEN     8u
+
+enum hlink_stream_ch {
+	HLINK_STREAM_CH_ECG_RESP = 0,
+	HLINK_STREAM_CH_ECG_I    = 1,
+	HLINK_STREAM_CH_ECG_II   = 2, /**< beat classifier input */
+	HLINK_STREAM_CH_ECG_V1   = 3,
+	HLINK_STREAM_CH_PPG_RED  = 4,
+	HLINK_STREAM_CH_PPG_IR   = 5,
+};
+
+enum hlink_stream_fmt {
+	HLINK_STREAM_FMT_I32 = 0, /**< int32 LE, ECG µV */
+	HLINK_STREAM_FMT_I16 = 1,
+	HLINK_STREAM_FMT_I8  = 2,
+};
+
+struct hlink_stream_push_req {
+	uint8_t  channel;
+	uint8_t  format;
+	uint16_t n;
+	uint64_t t_ms; /**< timestamp of the FIRST sample */
+	/* followed by n samples */
+} __attribute__((packed));
+
+struct hlink_stream_push_rsp {
+	uint8_t  status;
+	uint8_t  channel;
+	uint16_t accepted;
+	uint32_t dropped;
+} __attribute__((packed));
+
+/* ---------------------------------------------------------------------------
+ * STREAM_EVENT (HLINK_PROTOCOL.md §4.10)
+ * ------------------------------------------------------------------------- */
+#define HLINK_STREAM_EVENT_REQ_LEN 12u
+#define HLINK_STREAM_EVENT_RSP_LEN 4u
+#define HLINK_STREAM_EVENT_BEAT    1u
+
+struct hlink_stream_event_req {
+	uint8_t  kind;
+	uint8_t  rsvd0;
+	uint16_t rsvd1;
+	uint64_t t_ms;
+} __attribute__((packed));
+
+struct hlink_stream_event_rsp {
+	uint8_t  status;
+	uint8_t  kind;
+	uint16_t windows_queued;
+} __attribute__((packed));
 
 /* ---------------------------------------------------------------------------
  * Codec

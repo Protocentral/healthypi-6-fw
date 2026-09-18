@@ -123,6 +123,19 @@ config HPI_NPU_IRQ_WAIT_MS
 	  non-agreeing answers across the host overlay, the DF9 connector table
 	  and the module schematic. 50 ms is what the v1 host slept unconditionally.
 
+config HPI_NPU_ACK_WAIT_MS
+	int "NPU_WAIT_ACK delay before clocking the NOP (ms)"
+	default 2
+	range 0 2
+	depends on HPI_NPU_COMMS_CHECK
+	help
+	  Used for STREAM_PUSH / TENSOR_LOAD ACKs, not for GET_INFO / RUN.
+	  2 ms is one 256 B frame at 1 MHz. The slave stages the reply after
+	  the command frame's EOT, so 0 ms (immediate NOP) can race that
+	  staging. Ratchet down only after measuring the ACK is already in
+	  the TX buffer. Do not reuse HPI_NPU_IRQ_WAIT_MS here -- 50 ms per
+	  STREAM_PUSH would starve the 8 Hz ingest path.
+
 config HPI_NPU_BOOT_WAIT_MS
 	int "How long the module gets to boot after slot power-up (ms)"
 	default 1500

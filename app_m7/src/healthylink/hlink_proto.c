@@ -34,6 +34,34 @@ BUILD_ASSERT(HLINK_STATUS_LEN == 66, "STATUS reply is 66 B (HLINK_PROTOCOL.md 4.
 BUILD_ASSERT(HLINK_ST_OFF_UPTIME_MS + 4 == HLINK_STATUS_LEN, "STATUS ends at uptime_ms");
 BUILD_ASSERT(HLINK_GI_OFF_CAPS + 4 == HLINK_GET_INFO_LEN, "GET_INFO ends at caps");
 BUILD_ASSERT(HLINK_OVERHEAD == 10, "8-byte header + 2-byte CRC");
+BUILD_ASSERT(sizeof(struct hlink_model_list_hdr) == HLINK_MODEL_LIST_HDR_LEN,
+	     "MODEL_LIST header is 4 B");
+BUILD_ASSERT(sizeof(struct hlink_model_list_entry) == HLINK_MODEL_LIST_ENTRY_LEN,
+	     "MODEL_LIST entry is 56 B");
+BUILD_ASSERT(sizeof(struct hlink_tensor_desc) == HLINK_TENSOR_DESC_LEN,
+	     "tensor descriptor is 36 B");
+BUILD_ASSERT(sizeof(struct hlink_model_info_req) == HLINK_MODEL_INFO_REQ_LEN,
+	     "MODEL_INFO request is 33 B");
+BUILD_ASSERT(sizeof(struct hlink_model_info_part0) == HLINK_MODEL_INFO_PART0_LEN,
+	     "MODEL_INFO part 0 is 161 B");
+BUILD_ASSERT(sizeof(struct hlink_tensor_load_req) == HLINK_TENSOR_LOAD_REQ_HDR_LEN,
+	     "TENSOR_LOAD request header is 4 B");
+BUILD_ASSERT(sizeof(struct hlink_tensor_load_rsp) == HLINK_TENSOR_LOAD_RSP_LEN,
+	     "TENSOR_LOAD reply is 8 B");
+BUILD_ASSERT(sizeof(struct hlink_run_req) == HLINK_RUN_REQ_LEN, "RUN request is 1 B");
+BUILD_ASSERT(sizeof(struct hlink_run_rsp) == HLINK_RUN_RSP_LEN, "RUN reply is 4 B");
+BUILD_ASSERT(sizeof(struct hlink_read_result_req) == HLINK_READ_RESULT_REQ_LEN,
+	     "READ_RESULT request is 4 B");
+BUILD_ASSERT(sizeof(struct hlink_result_hdr) == HLINK_RESULT_HDR_LEN,
+	     "result header is 36 B");
+BUILD_ASSERT(sizeof(struct hlink_stream_push_req) == HLINK_STREAM_PUSH_REQ_HDR_LEN,
+	     "STREAM_PUSH request header is 12 B");
+BUILD_ASSERT(sizeof(struct hlink_stream_push_rsp) == HLINK_STREAM_PUSH_RSP_LEN,
+	     "STREAM_PUSH reply is 8 B");
+BUILD_ASSERT(sizeof(struct hlink_stream_event_req) == HLINK_STREAM_EVENT_REQ_LEN,
+	     "STREAM_EVENT request is 12 B");
+BUILD_ASSERT(sizeof(struct hlink_stream_event_rsp) == HLINK_STREAM_EVENT_RSP_LEN,
+	     "STREAM_EVENT reply is 4 B");
 
 uint16_t hlink_crc16(uint16_t crc, const uint8_t *data, size_t len)
 {

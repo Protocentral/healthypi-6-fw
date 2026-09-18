@@ -13,8 +13,9 @@
  *
  * PROTOCOL: HLink v2 (hlink_proto.h). start() runs a handshake off the boot
  * path -- alive signature, GET_INFO, STATUS -- and caches the result for
- * hpi_npu_link_get(). The data plane (models, tensors, streaming) is served by
- * the module and NOT driven from here yet; see hlink_proto.h.
+ * hpi_npu_link_get(). npu_cmd() is the shared SPI helper (npu_link.h):
+ * NPU_WAIT_REPLY for handshake / RUN, NPU_WAIT_ACK (2 ms) for STREAM_PUSH.
+ * The data plane is not driven from this file.
  *
  * The host spoke v1 until 2026-09: a bare command byte at offset 0, no CRC, no
  * sequence number, a fixed 50 ms turnaround and an exact 8-byte match on the
@@ -29,6 +30,7 @@
 #include "hl_provider.h"
 #include "hlink_proto.h"
 #include "mod_npu.h"
+#include "npu_link.h"
 #include "npu_uart_host.h"             /* parked transport; see its header */
 
 #include <healthylink/healthylink.h>   /* module IDs + capability bits */
@@ -316,8 +318,8 @@ static int npu_wait_reply_ready(int timeout_ms)
  * On success `reply->payload` points into npu_frame_rx and is valid until the
  * next call.
  */
-static int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
-		   struct hlink_frame *reply)
+int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
+	    struct hlink_frame *reply, enum npu_wait wait)
 {
 	uint8_t seq = ++npu_seq;
 
@@ -340,10 +342,25 @@ static int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 		return rc;
 	}
 
-	int irq = npu_wait_reply_ready(CONFIG_HPI_NPU_IRQ_WAIT_MS);
+	int irq = -ETIMEDOUT;
 
-	if (irq == -ECANCELED || npu_stale()) {
-		return -ECANCELED;
+	if (wait == NPU_WAIT_REPLY) {
+		irq = npu_wait_reply_ready(CONFIG_HPI_NPU_IRQ_WAIT_MS);
+		if (irq == -ECANCELED || npu_stale()) {
+			return -ECANCELED;
+		}
+	} else {
+		/* ACK: 2 ms default. Do not take the 50 ms IRQ path -- an
+		 * already-active line there sleeps the full timeout. */
+		if (npu_stale()) {
+			return -ECANCELED;
+		}
+		if (CONFIG_HPI_NPU_ACK_WAIT_MS > 0) {
+			k_msleep(CONFIG_HPI_NPU_ACK_WAIT_MS);
+			if (npu_stale()) {
+				return -ECANCELED;
+			}
+		}
 	}
 
 	/*
@@ -610,7 +627,7 @@ static int npu_comms_check(void)
 			snap.proto_major, HLINK_PROTO_MAJOR, HLINK_PROTO_MAJOR);
 	}
 
-	rc = npu_cmd(HLINK_CMD_GET_INFO, NULL, 0, &reply);
+	rc = npu_cmd(HLINK_CMD_GET_INFO, NULL, 0, &reply, NPU_WAIT_REPLY);
 	if (rc != 0 || reply.len < HLINK_GET_INFO_LEN) {
 		if (rc != -ECANCELED && !npu_stale()) {
 			LOG_WRN("NPU comms: GET_INFO failed (rc=%d, len=%u)", rc,
@@ -623,7 +640,7 @@ static int npu_comms_check(void)
 	}
 	npu_decode_info(&snap, reply.payload);
 
-	rc = npu_cmd(HLINK_CMD_STATUS, NULL, 0, &reply);
+	rc = npu_cmd(HLINK_CMD_STATUS, NULL, 0, &reply, NPU_WAIT_REPLY);
 	if (rc == 0 && reply.len >= HLINK_STATUS_LEN) {
 		npu_decode_status(&snap, reply.payload);
 	} else if (rc != -ECANCELED && !npu_stale()) {
