@@ -190,6 +190,10 @@ BUILD_ASSERT(NPU_SPI_FRAME_SIZE >= HLINK_OVERHEAD + HLINK_STATUS_LEN,
 /* Clock one whole frame both ways. npu_frame_tx must already be built. */
 static int npu_xfer_frame(void)
 {
+	if (npu_stale()) {
+		return -ECANCELED;
+	}
+
 	if (!npu_cs_ready) {
 		/* Drive BOTH CS lines inactive, not just ours: SPI4 is shared,
 		 * and a floating CS could let another module answer over ours on
@@ -250,10 +254,19 @@ static void npu_frame_nop(void)
  */
 static int npu_wait_reply_ready(int timeout_ms)
 {
+	if (npu_stale()) {
+		return -ECANCELED;
+	}
+
 	if (!npu_irq_ready) {
 		if (!device_is_ready(npu_irq.port) ||
 		    gpio_pin_configure_dt(&npu_irq, GPIO_INPUT) != 0) {
-			k_msleep(timeout_ms);
+			for (int waited = 0; waited < timeout_ms; waited += 2) {
+				if (npu_stale()) {
+					return -ECANCELED;
+				}
+				k_msleep(2);
+			}
 			return -ETIMEDOUT;
 		}
 		npu_irq_ready = true;
@@ -266,12 +279,20 @@ static int npu_wait_reply_ready(int timeout_ms)
 				"-- ignoring the line, waiting the full %d ms "
 				"turnaround instead", timeout_ms);
 		}
-		k_msleep(timeout_ms);
+		for (int waited = 0; waited < timeout_ms; waited += 2) {
+			if (npu_stale()) {
+				return -ECANCELED;
+			}
+			k_msleep(2);
+		}
 		return -ETIMEDOUT;
 	}
 	npu_irq_stuck = false;
 
 	for (int waited = 0; waited < timeout_ms; waited += 2) {
+		if (npu_stale()) {
+			return -ECANCELED;
+		}
 		k_msleep(2);
 		if (gpio_pin_get_dt(&npu_irq) == 1) {   /* the assert edge */
 			return 0;
@@ -313,11 +334,17 @@ static int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 
 	int rc = npu_xfer_frame();   /* delivers the command; rx is stale, ignore */
 	if (rc != 0) {
-		LOG_ERR("NPU cmd 0x%02x: transceive failed (%d)", cmd, rc);
+		if (rc != -ECANCELED) {
+			LOG_ERR("NPU cmd 0x%02x: transceive failed (%d)", cmd, rc);
+		}
 		return rc;
 	}
 
 	int irq = npu_wait_reply_ready(CONFIG_HPI_NPU_IRQ_WAIT_MS);
+
+	if (irq == -ECANCELED || npu_stale()) {
+		return -ECANCELED;
+	}
 
 	/*
 	 * Up to three read attempts, because "staged late" and "never staged"
@@ -325,10 +352,16 @@ static int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 	 * module would dispatch it twice.
 	 */
 	for (int attempt = 0; attempt < 3; attempt++) {
+		if (npu_stale()) {
+			return -ECANCELED;
+		}
 		npu_frame_nop();
 		rc = npu_xfer_frame();
 		if (rc != 0) {
-			LOG_ERR("NPU cmd 0x%02x: reply transceive failed (%d)", cmd, rc);
+			if (rc != -ECANCELED) {
+				LOG_ERR("NPU cmd 0x%02x: reply transceive failed (%d)",
+					cmd, rc);
+			}
 			return rc;
 		}
 
@@ -364,6 +397,9 @@ static int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 			LOG_DBG("NPU cmd 0x%02x: frame at +%d not ours (rc=%d)",
 				cmd, off, d);
 			scan = (size_t)off + 1;
+		}
+		if (npu_stale()) {
+			return -ECANCELED;
 		}
 		k_msleep(5);
 	}
@@ -576,25 +612,33 @@ static int npu_comms_check(void)
 
 	rc = npu_cmd(HLINK_CMD_GET_INFO, NULL, 0, &reply);
 	if (rc != 0 || reply.len < HLINK_GET_INFO_LEN) {
-		LOG_WRN("NPU comms: GET_INFO failed (rc=%d, len=%u)", rc,
-			rc == 0 ? reply.len : 0);
-		snap.link_state = HPI_NPU_LINK_NO_REPLY;
-		snap.last_rc = rc ? rc : -EBADMSG;
-		npu_link_publish(&snap);
-		return snap.last_rc;
+		if (rc != -ECANCELED && !npu_stale()) {
+			LOG_WRN("NPU comms: GET_INFO failed (rc=%d, len=%u)", rc,
+				rc == 0 ? reply.len : 0);
+			snap.link_state = HPI_NPU_LINK_NO_REPLY;
+			snap.last_rc = rc ? rc : -EBADMSG;
+			npu_link_publish(&snap);
+		}
+		return rc ? rc : -EBADMSG;
 	}
 	npu_decode_info(&snap, reply.payload);
 
 	rc = npu_cmd(HLINK_CMD_STATUS, NULL, 0, &reply);
 	if (rc == 0 && reply.len >= HLINK_STATUS_LEN) {
 		npu_decode_status(&snap, reply.payload);
-	} else {
+	} else if (rc != -ECANCELED && !npu_stale()) {
 		/* GET_INFO answered, so the link is up; STATUS is the richer
 		 * reply and its absence is worth logging, not worth demoting
 		 * the link for. status_valid stays false and every field it
 		 * would have filled goes unshown. */
 		LOG_WRN("NPU comms: STATUS failed (rc=%d) -- link is up, "
 			"engine detail unavailable", rc);
+	} else {
+		return rc ? rc : -EBADMSG;
+	}
+
+	if (npu_stale()) {
+		return -ECANCELED;
 	}
 
 	snap.link_state = HPI_NPU_LINK_UP;
@@ -696,9 +740,10 @@ static int npu_stop(struct hl_ctx *ctx)
 	/* Orphan any running handshake and clear the snapshot. */
 	atomic_inc(&npu_gen);
 	if (npu_wq_started) {
-		struct k_work_sync sync;
-
-		(void)k_work_cancel_sync(&npu_comms_work, &sync);
+		/* Do not wait: spi_transceive can hang, and this runs from the
+		 * system workqueue (UI) and from MCUmgr. The handler polls
+		 * npu_stale() before the next clock. */
+		(void)k_work_cancel(&npu_comms_work);
 	}
 	k_mutex_lock(&g_link_lock, K_FOREVER);
 	g_link = (struct hpi_npu_link_info){ .link_state = HPI_NPU_LINK_NOT_RUN };
