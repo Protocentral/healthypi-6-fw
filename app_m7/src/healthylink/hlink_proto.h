@@ -84,7 +84,8 @@ enum hlink_cmd {
 	HLINK_CMD_STATUS   = 0x03, /**< engine state + error counters */
 	HLINK_CMD_RESET    = 0x04, /**< reset the link state machine */
 
-	/* Data plane. Layouts below; this host does not send them yet. */
+	/* Data plane. npu_models.c sends MODEL_LIST / MODEL_ACTIVATE;
+	 * npu_infer.c / npu_stream.c send TENSOR / STREAM. */
 	HLINK_CMD_MODEL_LIST       = 0x10,
 	HLINK_CMD_MODEL_INFO       = 0x11,
 	HLINK_CMD_MODEL_ACTIVATE   = 0x12,

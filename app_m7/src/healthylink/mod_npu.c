@@ -38,6 +38,9 @@
 #if IS_ENABLED(CONFIG_HPI_NPU_INFER)
 #include "npu_infer.h"
 #endif
+#if IS_ENABLED(CONFIG_HPI_NPU_COMMS_CHECK)
+#include "npu_models.h"
+#endif
 
 #include <healthylink/healthylink.h>   /* module IDs + capability bits */
 #include <zephyr/kernel.h>
@@ -676,6 +679,19 @@ static int npu_comms_check(void)
 		return -ECANCELED;
 	}
 
+	rc = npu_models_sync(snap.active_name, sizeof(snap.active_name));
+	if (rc == -ECANCELED || npu_stale()) {
+		return -ECANCELED;
+	}
+	if (rc != 0) {
+		LOG_WRN("NPU comms: MODEL_LIST/ACTIVATE failed (%d) -- link is up",
+			rc);
+	}
+
+	if (npu_stale()) {
+		return -ECANCELED;
+	}
+
 	snap.link_state = HPI_NPU_LINK_UP;
 	snap.last_rc = 0;
 	npu_link_publish(&snap);
@@ -771,6 +787,17 @@ int npu_link_submit(struct k_work *work)
 void npu_link_cancel(struct k_work *work)
 {
 	ARG_UNUSED(work);
+}
+
+int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
+	    struct hlink_frame *reply, enum npu_wait wait)
+{
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(payload);
+	ARG_UNUSED(len);
+	ARG_UNUSED(reply);
+	ARG_UNUSED(wait);
+	return -ENODEV;
 }
 #endif /* NPU_SPI_AVAILABLE */
 
