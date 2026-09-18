@@ -15,6 +15,9 @@
 
 #include "hlink_proto.h"
 
+#include <zephyr/kernel.h>
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +37,10 @@ enum npu_wait {
  */
 int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 	    struct hlink_frame *reply, enum npu_wait wait);
+
+bool npu_link_stale(void);
+int npu_link_submit(struct k_work *work);
+void npu_link_cancel(struct k_work *work);
 
 #ifdef __cplusplus
 }

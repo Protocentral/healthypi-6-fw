@@ -32,6 +32,9 @@
 #include "mod_npu.h"
 #include "npu_link.h"
 #include "npu_uart_host.h"             /* parked transport; see its header */
+#if IS_ENABLED(CONFIG_HPI_NPU_INFER)
+#include "npu_infer.h"
+#endif
 
 #include <healthylink/healthylink.h>   /* module IDs + capability bits */
 #include <zephyr/kernel.h>
@@ -405,6 +408,9 @@ int npu_cmd(uint8_t cmd, const void *payload, uint16_t len,
 				if (reply->flags & HLINK_FLAG_ERROR) {
 					uint8_t st = reply->len ? reply->payload[0]
 								: HLINK_ERR_INTERNAL;
+					if (st == HLINK_ERR_PENDING) {
+						return -EAGAIN;
+					}
 					LOG_WRN("NPU cmd 0x%02x: module says %s",
 						cmd, hlink_status_str(st));
 					return -EPROTO;
@@ -692,7 +698,14 @@ static void npu_comms_work_fn(struct k_work *w)
 		}
 		k_msleep(50);
 	}
-	(void)npu_comms_check();
+	int rc = npu_comms_check();
+#if IS_ENABLED(CONFIG_HPI_NPU_INFER) && !IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+	if (rc == 0 && !npu_stale()) {
+		npu_infer_on_link_up();
+	}
+#else
+	ARG_UNUSED(rc);
+#endif
 }
 
 static void npu_comms_kick(void)
@@ -708,6 +721,40 @@ static void npu_comms_kick(void)
 	}
 	npu_link_set_state(HPI_NPU_LINK_IN_FLIGHT);
 	k_work_submit_to_queue(&npu_wq, &npu_comms_work);
+}
+
+bool npu_link_stale(void)
+{
+	return npu_stale();
+}
+
+int npu_link_submit(struct k_work *work)
+{
+	if (!npu_wq_started) {
+		return -ENODEV;
+	}
+	return k_work_submit_to_queue(&npu_wq, work);
+}
+
+void npu_link_cancel(struct k_work *work)
+{
+	(void)k_work_cancel(work);
+}
+#else
+bool npu_link_stale(void)
+{
+	return true;
+}
+
+int npu_link_submit(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	return -ENODEV;
+}
+
+void npu_link_cancel(struct k_work *work)
+{
+	ARG_UNUSED(work);
 }
 #endif /* NPU_SPI_AVAILABLE */
 
@@ -760,6 +807,9 @@ static int npu_stop(struct hl_ctx *ctx)
 		/* Do not wait: spi_transceive can hang, and this runs from the
 		 * system workqueue (UI) and from MCUmgr. The handler polls
 		 * npu_stale() before the next clock. */
+#if IS_ENABLED(CONFIG_HPI_NPU_INFER)
+		npu_infer_cancel();
+#endif
 		(void)k_work_cancel(&npu_comms_work);
 	}
 	k_mutex_lock(&g_link_lock, K_FOREVER);

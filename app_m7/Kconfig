@@ -42,7 +42,7 @@ config HPI_HEARTBEAT_LOG
 
 config HPI_BUS_MAX_SUBS
 	int "Max sample-bus subscribers"
-	default 8
+	default 10
 	help
 	  Upper bound on concurrent sample-bus consumers (UI preview,
 	  recording, stream, M4 feed, diagnostics, ...). Each occupies a fixed
@@ -135,6 +135,34 @@ config HPI_NPU_ACK_WAIT_MS
 	  staging. Ratchet down only after measuring the ACK is already in
 	  the TX buffer. Do not reuse HPI_NPU_IRQ_WAIT_MS here -- 50 ms per
 	  STREAM_PUSH would starve the 8 Hz ingest path.
+
+config HPI_NPU_INFER
+	bool "Drive HLink v2 inference (tensor / stream) on HealthyLink Compute"
+	default n
+	depends on HPI_NPU_COMMS_CHECK
+	help
+	  After the handshake is UP, run a canned TENSOR_LOAD/RUN/READ_RESULT
+	  (bring-up) or STREAM_PUSH (when HPI_NPU_STREAM is on) and publish
+	  HPI_CH_INFER. Off until the SPI inference pass; prj.dev.conf turns
+	  it on for the Compute bring-up image.
+
+config HPI_NPU_INFER_SELFTEST
+	bool "Canned 187 B tensor as an explicit debug trigger (not boot)"
+	default n
+	depends on HPI_NPU_INFER
+	help
+	  After the stream producer is compiled, the canned beat is no longer
+	  submitted on link-up. This flag keeps that path as a one-shot
+	  trigger. A STUB-clear canned beat looks like a subject
+	  classification -- do not enable while recording.
+
+config HPI_NPU_STREAM
+	bool
+	default n
+	depends on HPI_NPU_INFER
+	help
+	  Set when npu_stream.c is compiled. Link-up then submits stream
+	  work, not the canned tensor.
 
 config HPI_NPU_BOOT_WAIT_MS
 	int "How long the module gets to boot after slot power-up (ms)"
