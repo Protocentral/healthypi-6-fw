@@ -792,16 +792,25 @@ that cannot be redistributed in an MIT repository. This section covers the
 |---|---|
 | Detection, power and ACTIVE, in either slot | ✅ validated on v5 |
 | HLink v2 handshake (alive signature, GET_INFO, STATUS), in either slot | ✅ validated on v5 |
-| Data plane (model, tensor and stream commands) | not driven by the host yet |
+| `MODEL_LIST` / `MODEL_ACTIVATE` over SPI | ✅ validated on v5 (`beat_classifier` listed and round-tripped) |
+| Canned `TENSOR_LOAD` / `RUN` / `READ_RESULT` → `HPI_CH_INFER` | ✅ validated on v5 (STUB clear; scores not all zero) |
+| Live `STREAM_PUSH` lead II + `RESULT_POLL` → `HPI_CH_INFER` | ✅ validated on v5 (synthetic `STREAM_EVENT` until M4 QRS is gated) |
+| UI shows class from the bus (`STUB` = —) | ✅ implemented (visual on v5 with the stream path) |
 
-Nothing in this repository classifies a beat today.
+The host publishes `hp6_infer_sample` with `HP6_INF_STUB` **clear** when the module returns a well-formed result whose five scores are not all zero. Five zero bytes stay stubbed — they are not class N. The data plane is compiled in behind `CONFIG_HPI_NPU_INFER` (on in the dev flavor, **off in prod** until a release decision). `.hlm` packages are loaded over the module's own USB CDC, not over SPI and not through group 64.
+
+M4 `BEAT_NOTIFY` (`0x23`) is the product trigger for `STREAM_EVENT`. Until that path is gated on live QRS, a 1.5 s synthetic marker keeps a beat-triggered model fed.
 
 ### 12.2 Host-side files
 
 | File | Role |
 |---|---|
-| `app_m7/src/healthylink/mod_npu.c` | The provider: runs the HLink v2 handshake off the boot path and caches the result |
-| `app_m7/src/healthylink/hlink_proto.{c,h}` | HLink v2 framing, CRC and command codes (host half) |
+| `app_m7/src/healthylink/mod_npu.c` | The provider: handshake off the boot path, then `npu_cmd()` for every HLink exchange |
+| `app_m7/src/healthylink/hlink_proto.{c,h}` | HLink v2 framing, CRC, command codes and data-plane payload layouts (host half) |
+| `app_m7/src/healthylink/npu_link.h` | `npu_cmd()`, `NPU_WAIT_ACK` (2 ms) vs `NPU_WAIT_REPLY` (IRQ / 50 ms) |
+| `app_m7/src/healthylink/npu_models.c` | `MODEL_LIST` / `MODEL_ACTIVATE` after STATUS, before the stream producer |
+| `app_m7/src/healthylink/npu_infer.c` | Canned 187 B tensor (debug / self-test; not submitted on link-up once stream is compiled) |
+| `app_m7/src/healthylink/npu_stream.c` | Bus ECG → `STREAM_PUSH` lead II (int32 µV) → `RESULT_POLL` → `HPI_CH_INFER` |
 | `app_m7/src/healthylink/mod_npu.h` | `hpi_npu_link_get()`, the handshake snapshot read by the UI and the group-64 self-test |
 | `boards/protocentral/healthypi6_v5/healthylink-compute.overlay` | The module's SPI4 node (added to the default build by `scripts/build.sh m7`) |
 
@@ -849,9 +858,13 @@ not at build time.**
 - **Alive signature:** an idle module clocks out `'H' 'L' 'N' 'K'`, protocol
   major, minor, and the module ID (big-endian). The host matches the magic and
   ID and reads the version; a v1 module is reported, never driven.
-- **Commands the host sends:** `0x00` NOP, `0x02` GET_INFO, `0x03` STATUS.
-  PING (`0x01`), RESET (`0x04`) and the data plane (`0x10`–`0x13` models,
-  `0x20`–`0x22` tensors, `0x30`–`0x32` streaming) are defined but not yet used.
+- **Commands the host sends:** handshake `0x00` NOP, `0x02` GET_INFO, `0x03`
+  STATUS; models `0x10` LIST, `0x11` INFO, `0x12` ACTIVATE; tensors `0x20`
+  LOAD, `0x21` RUN, `0x22` READ_RESULT; streaming `0x30` PUSH, `0x31` EVENT,
+  `0x32` RESULT_POLL. `STREAM_PUSH` uses a 2 ms ACK wait, not the handshake's
+  50 ms IRQ wait. PING (`0x01`) and RESET (`0x04`) are defined and unused.
+  There is no `FILE_*` block on this host — `.hlm` load is the module's USB
+  CDC. Group 64 has no model-upload commands.
 
 ### 12.5 UART
 

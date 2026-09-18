@@ -245,11 +245,12 @@ exactly: `score = confidence - 128`. The unmodified per-class scores are in
 | 1 | `LOW_CONF` | below the model's usable confidence |
 | 2 | `ECG_SUSPECT` | the input beat came from a poor-quality trace |
 
-> **Always check `STUB` before using a result.** The compute module's inference
-> path is not finished: `RUN_INFERENCE` currently returns five zero bytes. A
-> producer that cannot prove it ran a network must set this bit, so that a
-> recording made during bring-up can be told apart from a clinical one after the
-> fact. **Treat a set `STUB` bit as "no classification", not as class N.**
+> **Always check `STUB` before using a result.** The host sets this bit unless
+> the module returned a well-formed reply whose five scores are not all zero.
+> Five zero bytes are not class N, even if the module's `runs_ok` counter
+> incremented. A set `STUB` bit means "no classification" — render it as an
+> em dash, never as N. A clear `STUB` bit means the network ran; it is **not**
+> a clinical claim (AAMI class of a window, not a diagnosis).
 
 ### EVENT — 8 bytes
 
