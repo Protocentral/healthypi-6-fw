@@ -344,6 +344,15 @@ static void ui_drain_bus(void)
 			hpi_scr_ambient_set_hr(v->hr_bpm, v->flags);
 			break;
 		}
+		case HPI_CH_INFER: {
+			const struct hp6_infer_sample *s = f.payload;
+
+			if (f.len >= sizeof(*s) && s != NULL) {
+				hpi_scr_live_set_infer(s);
+				hpi_scr_healthylink_set_infer(s);
+			}
+			break;
+		}
 		default:
 			break;
 		}
@@ -392,7 +401,7 @@ static void ui_thread(void *a, void *b, void *c)
 	struct hpi_bus_sub_cfg cfg = {
 		.name = "ui",
 		.channel_mask = HPI_CH_BIT(HPI_CH_ECG) | HPI_CH_BIT(HPI_CH_PPG) |
-				HPI_CH_BIT(HPI_CH_VITALS),
+				HPI_CH_BIT(HPI_CH_VITALS) | HPI_CH_BIT(HPI_CH_INFER),
 		.ring_frames = UI_RING_FRAMES,
 	};
 	s_sub = hpi_bus_subscribe(&cfg);

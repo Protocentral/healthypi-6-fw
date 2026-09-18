@@ -35,6 +35,7 @@
 #include "healthylink/hlink_proto.h"
 #include "healthylink/mod_npu.h"
 #include <healthylink/healthylink.h>   /* HEALTHYLINK_MODULE_ID_COMPUTE */
+#include "core/sample_formats.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -56,6 +57,7 @@ static struct {
 	lv_obj_t *hl_detail;
 	lv_obj_t *hl_engine;
 	lv_obj_t *hl_counters;
+	lv_obj_t *hl_beat;
 	bool built;
 } s_hl;
 
@@ -297,6 +299,8 @@ lv_obj_t *hpi_scr_healthylink_create(lv_obj_t *parent)
 					 HPI_M3_ON_SURFACE_MUTED);
 	s_hl.hl_engine = hl_detail_label(hc, "", HPI_M3_ON_SURFACE_MUTED);
 	s_hl.hl_counters = hl_detail_label(hc, "", HPI_M3_ON_SURFACE_MUTED);
+	s_hl.hl_beat = hl_detail_label(hc, "Last beat: \xE2\x80\x94",
+				       HPI_M3_ON_SURFACE_MUTED);
 
 	/* ---- Footer ---- */
 	hl_caption(body, "Modules are detected at boot, and again when a slot is "
@@ -525,4 +529,33 @@ void hpi_scr_healthylink_refresh(void)
 		lv_label_set_text(s_hl.hl_engine, "");
 		lv_label_set_text(s_hl.hl_counters, "");
 	}
+
+	if (compute_slot < 0 && s_hl.hl_beat != NULL) {
+		lv_label_set_text(s_hl.hl_beat, "Last beat: \xE2\x80\x94");
+		lv_obj_set_style_text_color(s_hl.hl_beat, HPI_M3_ON_SURFACE_MUTED, 0);
+	}
+}
+
+void hpi_scr_healthylink_set_infer(const struct hp6_infer_sample *s)
+{
+	static const char letters[] = "NSVFQ";
+
+	if (s_hl.hl_beat == NULL || s == NULL) {
+		return;
+	}
+	if (s->flags & HP6_INF_STUB) {
+		lv_label_set_text(s_hl.hl_beat, "Last beat: \xE2\x80\x94");
+		lv_obj_set_style_text_color(s_hl.hl_beat, HPI_M3_ON_SURFACE_MUTED, 0);
+		return;
+	}
+
+	char buf[24];
+	char letter = (s->class_id < 5) ? letters[s->class_id] : '?';
+
+	snprintf(buf, sizeof(buf), "Last beat: %c", letter);
+	lv_label_set_text(s_hl.hl_beat, buf);
+	lv_obj_set_style_text_color(s_hl.hl_beat,
+				    (s->flags & HP6_INF_LOW_CONF) ? HPI_M3_WARNING
+								 : HPI_M3_ON_SURFACE,
+				    0);
 }
