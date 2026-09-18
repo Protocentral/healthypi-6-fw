@@ -93,7 +93,7 @@ struct hp6_vitals {
     uint16_t hr_bpm;
     uint16_t spo2_x10;      /* SpO2 % x10                                     */
     uint16_t rr_bpm;        /* respiration rate (0 until wired)               */
-    int16_t  temp_c_x100;   /* 0 until temp sensor wired                      */
+    int16_t  temp_c_x100;   /* °C × 100; 0 = AS6221 unplugged / not ready     */
     uint16_t hrv_sdnn_ms;   /* SDNN, ms                                       */
     uint16_t hrv_rmssd_ms;  /* RMSSD, ms                                      */
     uint16_t hrv_lf_hf_x10; /* LF/HF ratio x10; 0 = not computed              */

@@ -75,7 +75,7 @@ void hpi_scr_trends_push_vitals(const struct hp6_vitals *v)
 		(int16_t)v->hr_bpm,
 		(int16_t)((v->spo2_x10 + 5) / 10),
 		(int16_t)v->rr_bpm,
-		v->temp_c_x100,
+		(int16_t)(v->temp_c_x100 / 10), /* chart stores °C × 10 */
 	};
 	for (int i = 0; i < V_N; i++) {
 		s_hist.buf[i][s_hist.head] = vals[i];

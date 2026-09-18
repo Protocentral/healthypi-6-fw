@@ -45,6 +45,7 @@ endif()
 # --- onboard acquisition producers (ECG/PPG -> bus) ---
 target_sources(app PRIVATE
     src/core/acquisition.c
+    src/core/temp_sensor.c
 )
 
 # --- M4 IPC vitals feed -> bus ---

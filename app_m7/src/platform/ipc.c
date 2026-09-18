@@ -22,6 +22,7 @@
 
 #include "hpi_common_types.h"          /* raw batch + vitals payload structs */
 #include "core/acquisition.h"          /* debounced ECG lead-off state */
+#include "core/temp_sensor.h"          /* external AS6221, 0 if unplugged */
 #include "core/sample_bus.h"
 #include "core/sample_formats.h"
 #include "m4_ipc_protocol.h"           /* envelope + msg ids + ept name */
@@ -126,6 +127,8 @@ static void publish_vitals(void)
     if (hr_src.ppg_weak) {
         g_vitals.flags |= HP6_VIT_PPG_WEAK;
     }
+
+    g_vitals.temp_c_x100 = hpi_temp_c_x100();
 
     /* HRV comes from the ECG beat series, so it dies with the ECG HR. */
     if (!ecg_ok) {

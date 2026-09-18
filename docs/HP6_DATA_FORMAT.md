@@ -153,7 +153,7 @@ struct vitals_sample {
     uint16_t hr_bpm;         /* heart rate, bpm */
     uint16_t spo2_x10;       /* SpO2 percent × 10  (975 = 97.5 %) */
     uint16_t rr_bpm;         /* respiration rate — always 0 in 1.0.0 */
-    int16_t  temp_c_x100;    /* °C × 100 — always 0 in 1.0.0 */
+    int16_t  temp_c_x100;    /* °C × 100; 0 = AS6221 unplugged / not ready */
     uint16_t hrv_sdnn_ms;    /* SDNN, milliseconds */
     uint16_t hrv_rmssd_ms;   /* RMSSD, milliseconds */
     uint16_t hrv_lf_hf_x10;  /* LF/HF ratio × 10; 0 = not computed */
@@ -171,9 +171,9 @@ Python: `struct.unpack("<HHHhHHHBx", buf)` → `(hr_bpm, spo2_x10, rr_bpm, temp_
 > clamped 255 could not be distinguished from a measured one. The payload grew
 > 12 B → 16 B.
 
-**Zero means "not available", not "measured zero."** In 1.0.0, `rr_bpm` and
-`temp_c_x100` always read 0 (no producer / no sensor). Render unavailable values
-as blank — never as a measurement.
+**Zero means "not available", not "measured zero."** `rr_bpm` still reads 0
+(no producer). `temp_c_x100` is 0 when the external AS6221 is unplugged.
+Render unavailable values as blank — never as a measurement.
 
 #### `flags` — where `hr_bpm` came from
 
