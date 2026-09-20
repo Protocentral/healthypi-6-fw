@@ -121,9 +121,13 @@ static void npu_stream_publish(const int8_t scores[5], uint8_t class_id,
 		npu_stream_stub++;
 	}
 
-	LOG_INF("NPU stream: class=%u conf=%u stub=%d scores=%d %d %d %d %d",
-		s.class_id, s.confidence, stub ? 1 : 0,
-		scores[0], scores[1], scores[2], scores[3], scores[4]);
+	/* LOG_MODE_IMMEDIATE: one UART line per class starved STREAM_PUSH
+	 * (bus_drop climbed while results arrived at 10 Hz). */
+	if (npu_stream_results <= 3 || (npu_stream_results % 10u) == 0u) {
+		LOG_INF("NPU stream: class=%u conf=%u stub=%d scores=%d %d %d %d %d",
+			s.class_id, s.confidence, stub ? 1 : 0,
+			scores[0], scores[1], scores[2], scores[3], scores[4]);
+	}
 }
 
 static int npu_stream_push(uint16_t n, uint64_t t_ms)
@@ -369,18 +373,13 @@ static int npu_stream_maybe_event(void)
 		return 0;
 	}
 
-	for (int i = 0; i < 4; i++) {
-		uint32_t t_ms;
+	/* One event per work item so STREAM_PUSH is not starved. Extra
+	 * QRS stay in npu_beat_q. */
+	uint32_t t_ms;
 
-		if (k_msgq_get(&npu_beat_q, &t_ms, K_NO_WAIT) != 0) {
-			break;
-		}
+	if (k_msgq_get(&npu_beat_q, &t_ms, K_NO_WAIT) == 0) {
 		npu_stream_have_qrs = true;
-		int rc = npu_stream_send_event(t_ms, true);
-
-		if (rc != 0) {
-			return rc;
-		}
+		return npu_stream_send_event(t_ms, true);
 	}
 
 	if (npu_stream_have_qrs) {
@@ -397,12 +396,12 @@ static int npu_stream_maybe_event(void)
 		return 0;
 	}
 
-	uint64_t t_ms = (uint64_t)now;
+	uint64_t syn_ms = (uint64_t)now;
 
-	if (t_ms > NPU_STREAM_EVENT_DELAY_MS) {
-		t_ms -= NPU_STREAM_EVENT_DELAY_MS;
+	if (syn_ms > NPU_STREAM_EVENT_DELAY_MS) {
+		syn_ms -= NPU_STREAM_EVENT_DELAY_MS;
 	}
-	return npu_stream_send_event(t_ms, false);
+	return npu_stream_send_event(syn_ms, false);
 }
 
 static void npu_stream_work_fn(struct k_work *w)
@@ -484,7 +483,7 @@ static void npu_stream_work_fn(struct k_work *w)
 
 	if ((now - npu_stream_last_poll_ms) >= NPU_STREAM_POLL_MS) {
 		npu_stream_last_poll_ms = now;
-		for (int i = 0; i < 4; i++) {
+		for (int i = 0; i < 2; i++) {
 			if (npu_stream_abort()) {
 				return;
 			}
