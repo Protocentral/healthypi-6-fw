@@ -202,15 +202,15 @@ VIT_MOTION = 0x08  # BMI323 accel; qualifies the sample, does not hide rates
 
 @dataclass(slots=True)
 class VitalsSample(Sample):
-    """12 B, ~1 Hz, computed on the M4.
+    """16 B, ~1 Hz. HR/SpO2/HRV from the M4; ``rr_bpm`` and ``temp_c_x100``
+    from the M7 (thoracic Z and the external AS6221).
 
-    ``rr_bpm`` and ``temp_c_x100`` are structurally present but always 0 in
-    firmware 1.0.0 -- respiration rate is not derived and no temperature sensor
-    is wired. The ``*_or_none`` accessors exist so a caller renders them as
-    absent rather than as a measured zero.
+    Zero means unavailable, not a measured zero -- the ``*_or_none`` accessors
+    render those as absent. ``rr_bpm`` is 0 until the detector locks (and
+    while RA/LA/LL are off). ``temp_c_x100`` is 0 when the probe is unplugged.
 
-    ``flags`` (``VIT_*``) says which sensor produced ``hr_bpm`` and whether the
-    PPG signal was good enough to trust.
+    ``flags`` (``VIT_*``) says which sensor produced ``hr_bpm``, PPG quality,
+    and whether the BMI323 saw motion.
 
     Widened in format ``0x0300``: the HRV fields were ``uint8`` milliseconds
     clamped at 255, which clipped silently and clipped where it matters (SDNN

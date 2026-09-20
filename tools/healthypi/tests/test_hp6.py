@@ -115,8 +115,8 @@ def test_vitals_unset_fields_read_as_absent():
     v = hp6.VitalsSample(72, 0, 0, 0, 0, 0)
     assert v.hr_or_none == 72
     assert v.spo2_or_none is None  # not 0.0 %
-    assert v.rr_or_none is None  # not derived in 1.0.0
-    assert v.temp_c_or_none is None  # no sensor wired
+    assert v.rr_or_none is None  # 0 = not locked / leads off
+    assert v.temp_c_or_none is None  # 0 = AS6221 unplugged
 
 
 def test_vitals_flags_carry_hr_provenance():

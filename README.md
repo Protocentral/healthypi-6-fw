@@ -268,9 +268,11 @@ As of firmware 1.0.0:
   a known RR series.
 - **Lead-off** detects the RA, LA and LL electrodes. **V1 is not detected**, so
   absence of a V1 lead-off warning does not mean the V1 electrode is attached.
-- **Temperature and respiration rate are never produced.** Both fields exist in
-  the data format and both always read 0. Zero means "not available" throughout,
-  never "measured zero".
+- **Temperature** is the external AS6221 skin probe (`temp_c_x100`). Unplugged
+  reads 0. **Respiration rate** is thoracic impedance (`rr_bpm`); 0 until the
+  detector locks, and while RA/LA/LL are off. Zero means "not available"
+  throughout, never "measured zero". Neither has been validated as a clinical
+  number.
 
 Heart rate from the ECG is the one derived value that has been exercised
 end to end.

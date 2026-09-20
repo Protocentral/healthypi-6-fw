@@ -479,8 +479,9 @@ the `healthypi` Python package, which does.
   `ibat_ma` telemetry field. Reading them as unsigned produces
   plausible-looking garbage on negative excursions — for ECG, half the
   waveform.
-- **`board_variant` is unreliable in firmware 1.0.0** — it reports `v4`
-  regardless of the board. Don't branch on it; fixed in a later release.
+- **`board_variant`** is `v5` / `v4` / `v3` / `v2` from the board Kconfig
+  (`recording_service.c`). Older 1.0.0 images before that change always wrote
+  `v4`.
 - **Don't trust the `.IDX` for an interrupted file.** See §6.
 - **Nothing enforces block ordering between channels.** Blocks interleave in
   production order; sort by `t_ms` per channel, don't assume a pattern.
