@@ -183,6 +183,7 @@ Render unavailable values as blank — never as a measurement.
 | 0 | `HR_FROM_PPG` | `hr_bpm` is a **PPG pulse rate**, not an ECG heart rate |
 | 1 | `ECG_LEAD_OFF` | at least one ECG electrode was off; ECG-derived rates are suppressed while set |
 | 2 | `PPG_WEAK` | PPG perfusion was low — **`spo2_x10` and any PPG-sourced `hr_bpm` are provisional**. Set whenever the PPG signal was poor, whichever sensor supplied `hr_bpm` |
+| 3 | `MOTION` | BMI323 accel saw motion. **Qualifies** the sample (artifact hint); rates are still filled |
 
 The device prefers the ECG rate and falls back to the PPG pulse rate when the
 ECG one is unavailable (leads off, or no beats for 5 s). **A rate with

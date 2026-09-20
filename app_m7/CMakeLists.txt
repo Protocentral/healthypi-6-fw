@@ -47,6 +47,7 @@ target_sources(app PRIVATE
     src/core/acquisition.c
     src/core/temp_sensor.c
     src/core/resp_rate.c
+    src/core/imu.c
 )
 
 # --- M4 IPC vitals feed -> bus ---

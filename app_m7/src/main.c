@@ -25,6 +25,7 @@
 #include "core/acquisition.h"
 #include "core/temp_sensor.h"
 #include "core/resp_rate.h"
+#include "core/imu.h"
 #include "platform/ipc.h"
 #include "bus/hpi_events.h"
 #include "transport/usb_composite/usbd.h"
@@ -228,6 +229,7 @@ int main(void)
     (void)hpi_acquisition_init();
     (void)hpi_temp_sensor_init();
     (void)hpi_resp_rate_init();
+    (void)hpi_imu_init();
 
     /* start the M4 IPC feed (HR/SpO2/HRV -> bus). Non-blocking;
      * binds on its own thread (M4 delays ~7 s before it appears). */

@@ -197,6 +197,7 @@ class PpgSample(Sample):
 VIT_HR_FROM_PPG = 0x01
 VIT_ECG_LEAD_OFF = 0x02
 VIT_PPG_WEAK = 0x04
+VIT_MOTION = 0x08  # BMI323 accel; qualifies the sample, does not hide rates
 
 
 @dataclass(slots=True)
@@ -239,6 +240,7 @@ class VitalsSample(Sample):
         "hrv_rmssd_ms",
         "hrv_lf_hf",
         "ecg_lead_off",
+        "motion",
     )
 
     @classmethod
@@ -284,6 +286,11 @@ class VitalsSample(Sample):
         return bool(self.flags & VIT_PPG_WEAK)
 
     @property
+    def motion(self) -> bool:
+        """BMI323 saw motion. Artifact hint only — rates are still filled."""
+        return bool(self.flags & VIT_MOTION)
+
+    @property
     def hr_or_none(self) -> int | None:
         return self.hr_bpm or None
 
@@ -315,6 +322,7 @@ class VitalsSample(Sample):
             self.hrv_rmssd or "",
             self.hrv_lf_hf if self.hrv_lf_hf is not None else "",
             int(self.ecg_lead_off),
+            int(self.motion),
         ]
 
 

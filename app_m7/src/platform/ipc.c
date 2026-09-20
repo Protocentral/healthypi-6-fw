@@ -24,6 +24,7 @@
 #include "core/acquisition.h"          /* debounced ECG lead-off state */
 #include "core/temp_sensor.h"          /* external AS6221, 0 if unplugged */
 #include "core/resp_rate.h"            /* thoracic Z, 0 if leads off / unlocked */
+#include "core/imu.h"                  /* BMI323, HP6_VIT_MOTION flag only */
 #include "core/sample_bus.h"
 #include "core/sample_formats.h"
 #include "m4_ipc_protocol.h"           /* envelope + msg ids + ept name */
@@ -127,6 +128,10 @@ static void publish_vitals(void)
      * signal, not the arbitration outcome. */
     if (hr_src.ppg_weak) {
         g_vitals.flags |= HP6_VIT_PPG_WEAK;
+    }
+    /* Artifact hint only — do not suppress HR/SpO2 while this is set. */
+    if (hpi_imu_motion()) {
+        g_vitals.flags |= HP6_VIT_MOTION;
     }
 
     g_vitals.temp_c_x100 = hpi_temp_c_x100();

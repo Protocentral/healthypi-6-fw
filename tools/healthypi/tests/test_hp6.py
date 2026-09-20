@@ -125,14 +125,15 @@ def test_vitals_flags_carry_hr_provenance():
     produces confident nonsense. The flags byte is what lets a reader tell."""
     ecg = hp6.VitalsSample(72, 0, 0, 0, 0, 0)  # lf_hf and flags default 0
     assert ecg.hr_source == "ecg"
-    assert not ecg.ecg_lead_off and not ecg.ppg_weak
+    assert not ecg.ecg_lead_off and not ecg.ppg_weak and not ecg.motion
 
     ppg = hp6.VitalsSample(
         68, 970, 0, 0, 0, 0, 0,
-        flags=hp6.VIT_HR_FROM_PPG | hp6.VIT_ECG_LEAD_OFF | hp6.VIT_PPG_WEAK,
+        flags=(hp6.VIT_HR_FROM_PPG | hp6.VIT_ECG_LEAD_OFF | hp6.VIT_PPG_WEAK
+               | hp6.VIT_MOTION),
     )
     assert ppg.hr_source == "ppg"
-    assert ppg.ecg_lead_off and ppg.ppg_weak
+    assert ppg.ecg_lead_off and ppg.ppg_weak and ppg.motion
     assert hp6.VitalsSample.unpack_from(ppg.pack()) == ppg
     assert len(ppg.pack()) == hp6.VitalsSample.SIZE == 16  # 12 B before 0x0300
 
@@ -338,7 +339,7 @@ def test_export_csv(tmp_path):
     vit = (tmp_path / "csv" / "REC_vitals.csv").read_text().splitlines()
     assert vit[0] == (
         "t_ms,hr_bpm,hr_source,spo2_pct,rr_bpm,temp_c,"
-        "hrv_sdnn_ms,hrv_rmssd_ms,hrv_lf_hf,ecg_lead_off"
+        "hrv_sdnn_ms,hrv_rmssd_ms,hrv_lf_hf,ecg_lead_off,motion"
     )
     # unset rr/temp are empty, not zero -- looked up by name so an added column
     # cannot silently shift what is being asserted
@@ -348,6 +349,7 @@ def test_export_csv(tmp_path):
     # provenance travels with the rate: 1.0.0-era flags=0 reads as an ECG rate
     assert row[cols.index("hr_source")] == "ecg"
     assert row[cols.index("ecg_lead_off")] == "0"
+    assert row[cols.index("motion")] == "0"
 
 
 def _sync(seq, wall_ms, counts=(0, 0, 0, 0)):
