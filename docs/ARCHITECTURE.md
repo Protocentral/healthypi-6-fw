@@ -76,9 +76,8 @@ a recording and a live capture are the same bytes. They are defined in
 | `hp6_vitals` | `hr_bpm`, `spo2_x10`, `rr_bpm`, `temp_c_x100`, `hrv_sdnn_ms`, `hrv_rmssd_ms`, `hrv_lf_hf_x10` |
 | `hp6_eeg_sample` | `ch[8]` (µV, int32), `lead_off` |
 
-`rr_bpm` and `temp_c_x100` are present in the struct but read 0 — the
-respiration-rate and temperature paths are not wired yet. The fields exist so the
-format does not change when they are.
+`rr_bpm` is thoracic impedance on the M7 (0 while RA/LA/LL are off or the
+detector has not locked). `temp_c_x100` is the external AS6221 (0 if unplugged).
 
 The `.HP6` container itself (magic `HPI6`, version `0x0300`) is described in
 [`HOST_INTERFACE.md`](HOST_INTERFACE.md).

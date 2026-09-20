@@ -92,7 +92,7 @@ struct hp6_ppg_sample {
 struct hp6_vitals {
     uint16_t hr_bpm;
     uint16_t spo2_x10;      /* SpO2 % x10                                     */
-    uint16_t rr_bpm;        /* respiration rate (0 until wired)               */
+    uint16_t rr_bpm;        /* breaths/min; 0 = leads off / not locked        */
     int16_t  temp_c_x100;   /* °C × 100; 0 = AS6221 unplugged / not ready     */
     uint16_t hrv_sdnn_ms;   /* SDNN, ms                                       */
     uint16_t hrv_rmssd_ms;  /* RMSSD, ms                                      */

@@ -23,6 +23,7 @@
 #include "hpi_common_types.h"          /* raw batch + vitals payload structs */
 #include "core/acquisition.h"          /* debounced ECG lead-off state */
 #include "core/temp_sensor.h"          /* external AS6221, 0 if unplugged */
+#include "core/resp_rate.h"            /* thoracic Z, 0 if leads off / unlocked */
 #include "core/sample_bus.h"
 #include "core/sample_formats.h"
 #include "m4_ipc_protocol.h"           /* envelope + msg ids + ept name */
@@ -129,6 +130,7 @@ static void publish_vitals(void)
     }
 
     g_vitals.temp_c_x100 = hpi_temp_c_x100();
+    g_vitals.rr_bpm = hpi_resp_rate_bpm();
 
     /* HRV comes from the ECG beat series, so it dies with the ECG HR. */
     if (!ecg_ok) {
@@ -170,8 +172,9 @@ static void on_ecg_vitals(const struct hpi_ipc_ecg_vitals *v)
     int64_t now = k_uptime_get();
     if (now - last_log >= HPI_VITALS_LOG_PERIOD_MS) {
         last_log = now;
-        LOG_INF("vitals(ecg): HR=%u SDNN=%u RMSSD=%u q=%u",
-                v->heart_rate, v->hrv_sdnn, v->hrv_rmssd, v->signal_quality);
+        LOG_INF("vitals(ecg): HR=%u RR=%u SDNN=%u RMSSD=%u q=%u",
+                v->heart_rate, g_vitals.rr_bpm, v->hrv_sdnn, v->hrv_rmssd,
+                v->signal_quality);
     }
 #endif
 }

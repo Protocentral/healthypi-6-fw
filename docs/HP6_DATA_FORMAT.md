@@ -152,7 +152,7 @@ int32. Do not scale them; compute ratios.
 struct vitals_sample {
     uint16_t hr_bpm;         /* heart rate, bpm */
     uint16_t spo2_x10;       /* SpO2 percent × 10  (975 = 97.5 %) */
-    uint16_t rr_bpm;         /* respiration rate — always 0 in 1.0.0 */
+    uint16_t rr_bpm;         /* breaths/min; 0 = not locked / RA,LA,LL off */
     int16_t  temp_c_x100;    /* °C × 100; 0 = AS6221 unplugged / not ready */
     uint16_t hrv_sdnn_ms;    /* SDNN, milliseconds */
     uint16_t hrv_rmssd_ms;   /* RMSSD, milliseconds */
@@ -171,8 +171,9 @@ Python: `struct.unpack("<HHHhHHHBx", buf)` → `(hr_bpm, spo2_x10, rr_bpm, temp_
 > clamped 255 could not be distinguished from a measured one. The payload grew
 > 12 B → 16 B.
 
-**Zero means "not available", not "measured zero."** `rr_bpm` still reads 0
-(no producer). `temp_c_x100` is 0 when the external AS6221 is unplugged.
+**Zero means "not available", not "measured zero."** `rr_bpm` is 0 until the
+thoracic-Z detector has a 6–40 bpm estimate, and while RA/LA/LL are off.
+`temp_c_x100` is 0 when the external AS6221 is unplugged.
 Render unavailable values as blank — never as a measurement.
 
 #### `flags` — where `hr_bpm` came from
@@ -469,7 +470,8 @@ the `healthypi` Python package, which does.
 - **`t_ms` is uptime, not wall time.** Anchor with `timestamp_start` and the
   sync markers.
 - **Zero is not a measurement.** `rr_bpm`, `temp_c_x100`, and the HRV fields
-  read 0 when unavailable — in 1.0.0, always for the first two.
+  read 0 when unavailable (`rr_bpm` until the thoracic-Z detector locks;
+  `temp_c_x100` when the AS6221 is unplugged).
 - **PPG values are raw counts.** Not a physical unit; not comparable across
   devices.
 - **Signed fields are signed.** ECG/EEG/PPG values, `temp_c_x100`, and the
