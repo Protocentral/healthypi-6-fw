@@ -61,7 +61,7 @@ static struct {
 
 /* HRV screen numerics. */
 static struct {
-	lv_obj_t *sdnn, *rmssd;
+	lv_obj_t *sdnn, *rmssd, *lf_hf;
 } s_hrv;
 
 static int32_t s_render[TREND_N];
@@ -99,6 +99,16 @@ void hpi_scr_trends_push_vitals(const struct hp6_vitals *v)
 			lv_label_set_text(s_hrv.rmssd, b);
 		} else {
 			lv_label_set_text(s_hrv.rmssd, NA_STR);
+		}
+		if (s_hrv.lf_hf) {
+			if (v->hrv_lf_hf_x10) {
+				snprintf(b, sizeof(b), "%u.%u",
+					 v->hrv_lf_hf_x10 / 10u,
+					 v->hrv_lf_hf_x10 % 10u);
+				lv_label_set_text(s_hrv.lf_hf, b);
+			} else {
+				lv_label_set_text(s_hrv.lf_hf, NA_STR);
+			}
 		}
 	}
 }
@@ -349,10 +359,12 @@ static void hrv_metric(lv_obj_t *parent, const char *name, const char *unit,
 	lv_obj_set_flex_grow(*val, 1);
 	lv_obj_set_style_text_align(*val, LV_TEXT_ALIGN_RIGHT, 0);
 
-	lv_obj_t *un = lv_label_create(c);
-	lv_label_set_text(un, unit);
-	lv_obj_set_style_text_font(un, HPI_M3_FONT_CAPS_SM, 0);
-	lv_obj_set_style_text_color(un, HPI_M3_ON_SURFACE_MUTED, 0);
+	if (unit != NULL && unit[0] != '\0') {
+		lv_obj_t *un = lv_label_create(c);
+		lv_label_set_text(un, unit);
+		lv_obj_set_style_text_font(un, HPI_M3_FONT_CAPS_SM, 0);
+		lv_obj_set_style_text_color(un, HPI_M3_ON_SURFACE_MUTED, 0);
+	}
 }
 
 lv_obj_t *hpi_scr_hrv_create(lv_obj_t *parent)
@@ -376,11 +388,12 @@ lv_obj_t *hpi_scr_hrv_create(lv_obj_t *parent)
 	lv_obj_set_style_border_width(body, 0, 0);
 	lv_obj_set_style_pad_all(body, HPI_M3_SPACE_4, 0);
 	lv_obj_set_style_pad_row(body, HPI_M3_SPACE_3, 0);
-	lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+	hpi_m3_apply_scroll_v(body);
 
 	hrv_metric(body, "SDNN",  "MS", &s_hrv.sdnn);
 	hrv_metric(body, "RMSSD", "MS", &s_hrv.rmssd);
+	hrv_metric(body, "LF/HF", "",   &s_hrv.lf_hf);
 
 	lv_obj_t *note = lv_label_create(body);
 	lv_label_set_text(note, "Poincare plot needs beat-to-beat RR intervals "
