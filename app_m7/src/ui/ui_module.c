@@ -35,6 +35,7 @@
 #include "services/recording_service.h"
 #include "services/config_service.h"
 #include "services/button_service.h"
+#include "screens/scr_recording.h"
 
 LOG_MODULE_REGISTER(hpi_ui, CONFIG_HPI_APP_LOG_LEVEL);
 
@@ -262,6 +263,8 @@ static void ui_build_screens(void)
 	ui_trace("alert");
 	s_screen[HPI_UI_SCREEN_OTA]      = hpi_scr_ota_create(s_content);
 	ui_trace("ota");
+    s_screen[HPI_UI_SCREEN_RECORDINGS] = hpi_scr_recording_create(s_content);
+	ui_trace("recordings");
 
 	s_navbar = hpi_ui_navbar_create(scr, HPI_UI_SCREEN_HOME);
 	ui_trace("navbar");
@@ -527,8 +530,8 @@ static void ui_thread(void *a, void *b, void *c)
 
 			/* Hide nav + block swipe while actively recording on the
 			 * Record screen; restored on stop / leaving. */
-			bool lock = (s_active == HPI_UI_SCREEN_REC) &&
-				    hpi_recording_active();
+						bool lock = ((s_active == HPI_UI_SCREEN_REC) && hpi_recording_active()) ||
+				    s_active == HPI_UI_SCREEN_RECORDINGS;
 			if (lock != s_nav_locked) {
 				s_nav_locked = lock;
 				if (s_navbar) {
@@ -567,6 +570,8 @@ static void ui_thread(void *a, void *b, void *c)
 				hpi_scr_record_refresh();
 			} else if (s_active == HPI_UI_SCREEN_LINK) {
 				hpi_scr_link_refresh();   /* Wi-Fi status */
+			} else if (s_active == HPI_UI_SCREEN_RECORDINGS) {
+				hpi_scr_recording_refresh();
 			}
 		}
 
