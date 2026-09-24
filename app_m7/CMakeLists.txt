@@ -78,6 +78,7 @@ target_sources_ifdef(CONFIG_HPI_DISPLAY_ENABLED app PRIVATE
     src/ui/screens/scr_live.c
     src/ui/screens/scr_secondary.c
     src/ui/screens/scr_more.c
+    src/ui/screens/scr_recording.c
     src/ui/screens/scr_boot.c
     src/ui/screens/scr_trends.c
     src/ui/screens/scr_link.c
