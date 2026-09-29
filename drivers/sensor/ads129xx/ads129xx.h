@@ -182,14 +182,15 @@ enum LOFF_bits
 enum CONFIG3_bits
 {
     PD_REFBUF = 0x80,
-    VREF_4V = 0x20,
+    VREF_4V = 0x20,  /* 4 V reference: 5 V analog supply ONLY (AVDD >= 4.4 V) */
     RLD_MEAS = 0x10,
     RLDREF_INT = 0x08,
     PD_RLD = 0x04,
     RLD_LOFF_SENS = 0x02,
     RLD_STAT = 0x01,
 
-    CONFIG3_const = 0x60
+    CONFIG3_const = 0x40  /* bit 6 reserved, always 1. Was 0x60, which also
+                           * set VREF_4V. */
 };
 
 enum CONFIG1_bits
@@ -233,10 +234,16 @@ enum RESP_bits
     RESP_PH_180   = 0x1C
 };
 
-/* CONFIG4 register bits (0x17) */
+/* CONFIG4 register bits (0x17)
+ *
+ * RESP_FREQ is a 3-bit field in bits 7:5 (SBAS459K Table 33), not bit 0.
+ * Bit 0 is reserved (write 0). Only 000/001 are valid for internal
+ * respiration; the other codes drive square waves on GPIO3/GPIO4. */
 enum CONFIG4_bits
 {
-    RESP_FREQ        = 0x01,  /* 0 = 32kHz, 1 = 64kHz modulation clock */
+    RESP_FREQ_64K    = 0x00,  /* RESP_FREQ[2:0] = 000: 64 kHz modulation */
+    RESP_FREQ_32K    = 0x20,  /* RESP_FREQ[2:0] = 001: 32 kHz modulation */
+    RESP_FREQ_MASK   = 0xE0,
     SINGLE_SHOT      = 0x08,  /* Single-shot conversion */
     WCT_TO_RLD       = 0x04,  /* Connect WCT to RLD */
     PD_LOFF_COMP     = 0x02,  /* Lead-off comparator power-down */

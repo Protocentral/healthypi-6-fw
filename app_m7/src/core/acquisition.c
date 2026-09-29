@@ -53,7 +53,7 @@ static __aligned(4) uint8_t ppg_buf[512];
 /* ---- conversions ---- */
 #define ADC_FULL_SCALE     8388607LL   /* 2^23 - 1 */
 #define ECG_UV_MULTIPLIER  400000LL    /* VREF(2.4V) / PGA 6 */
-#define RESP_UV_MULTIPLIER 600000LL    /* VREF(2.4V) / PGA 4 */
+#define RESP_UV_MULTIPLIER (2400000LL / CONFIG_SENSOR_ADS129XX_RESP_GAIN) /* VREF(2.4V) / CH1 PGA */
 
 static inline int32_t adc_to_uv_ecg(int32_t c)
 {
@@ -155,8 +155,43 @@ static struct hp6_ecg_sample ecg_batch[ECG_BATCH];
 static uint8_t  ecg_n;
 static uint64_t ecg_t0_us;
 
+#if defined(CONFIG_HPI_RESP_DEBUG)
+/* Raw CH1 statistics over a 5 s window, to tell carrier clipping (codes near
+ * full scale) from a missing modulation or phase null (mean ~0, noise only). */
+#define RESP_DBG_WINDOW   (ECG_RATE_HZ * 5)
+#define RESP_DBG_CLIP     ((int32_t)(ADC_FULL_SCALE * 95 / 100))
+
+static void resp_debug(int32_t raw)
+{
+    static int32_t  mn = INT32_MAX, mx = INT32_MIN;
+    static int64_t  sum;
+    static uint32_t n, clip;
+
+    mn = MIN(mn, raw);
+    mx = MAX(mx, raw);
+    sum += raw;
+    if (raw >= RESP_DBG_CLIP || raw <= -RESP_DBG_CLIP) {
+        clip++;
+    }
+    if (++n < RESP_DBG_WINDOW) {
+        return;
+    }
+    LOG_INF("resp raw: mean=%d min=%d max=%d p-p=%d (%d uV) clip=%u/%u",
+            (int32_t)(sum / n), mn, mx, mx - mn, adc_to_uv_resp(mx - mn),
+            clip, n);
+    mn = INT32_MAX;
+    mx = INT32_MIN;
+    sum = 0;
+    n = 0;
+    clip = 0;
+}
+#endif
+
 static void ecg_publish(const struct ads129xx_encoded_data *d)
 {
+#if defined(CONFIG_HPI_RESP_DEBUG)
+    resp_debug(d->data_ch0);
+#endif
     if (ecg_n == 0) {
         ecg_t0_us = (uint64_t)k_uptime_get() * 1000ULL;  /* time of first sample */
     }
