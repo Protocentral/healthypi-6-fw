@@ -401,7 +401,7 @@ so a hanging image never reaches a bundle.
 - The recovery port is **one** CDC ACM, not the two-port composite the
   application enumerates. A host tool must re-scan; the app's CDC1 port name
   does not come back.
-- **Same USB VID/PID as the application** (`0x1209:0xFF90`). pid.codes allocates
+- **Same USB VID/PID as the application** (`0x1209:0xFF91`). pid.codes allocates
   one PID per entry, and nothing needs them to differ: a human reads the product
   string, and a tool that must be certain asks the protocol — the application
   answers group 64, the bootloader does not. `healthypi fw recover` probes

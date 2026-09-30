@@ -172,7 +172,9 @@ if [ "$REQUIRE_RELEASE" = 1 ] || [ -n "$BOOT_CFG" ]; then
   # Visible on every release build until the allocation is confirmed. Not a
   # failure: adopting the applied-for PID was a deliberate call.
   if [ "$app_pid" = "0xff90" ]; then
-    note "usb: PID 0xFF90 is PROVISIONAL — pid.codes allocation unconfirmed as of 2026-07-27"
+    fail "usb: PID 0xFF90 belongs to HealthyPi 5 — HealthyPi 6 uses 0xFF91"
+  elif [ "$app_pid" = "0xff91" ]; then
+    note "usb: PID 0xFF91 is PROVISIONAL — pid.codes allocation unconfirmed as of 2026-09-30"
   fi
 fi
 
