@@ -53,7 +53,7 @@
 		zephyr,shell-uart = &usart1;
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
-		zephyr,flash-controller = &w25q01jv;
+		zephyr,flash-controller = &qspi_nor;
 		/* CDC 0 (cdc_acm_uart0) carries the one-way .HP6 sample stream;
 		 * CDC 1 (cdc_acm_uart1) carries MCUmgr SMP request/response. */
 		zephyr,uart-mcumgr = &cdc_acm_uart1;
@@ -498,11 +498,22 @@ zephyr_udc0: &usbotg_hs {
 };
 
 /*
- * QUADSPI -- W25Q01JV in full quad (4-bit) mode; IO2/IO3 are on PF7/PF6, so
- * there is no PE2 conflict with SPI4. Quad reads are ~4x dual.
+ * QUADSPI -- 512 Mbit (64 MiB) Winbond QSPI NOR in full quad (4-bit) mode;
+ * IO2/IO3 are on PF7/PF6, so there is no PE2 conflict with SPI4. Quad reads are
+ * ~4x dual.
  *
- * writeoc MUST stay PP_1_1_4: the W25Q01JV does not implement the default
- * PP_1_4_4 (0x38) opcode, and writes through it are corrupted.
+ * 64 MiB is the part on every v5 and later board. The DTS used to declare the
+ * 1 Gbit W25Q01JV (128 MiB) and put LittleFS at 0x4000000; the fitted part's
+ * own SFDP reports 512 Mbit (the driver logged "Unexpected flash size:
+ * 67108864" on every boot and carried on with the DTS size). A 64 MiB part
+ * ignores address bit 26, so everything at or above 0x4000000 wrapped onto the
+ * start of the chip -- LittleFS aliased the M7 update slot. Keep `size` equal
+ * to what the part reports; tools/ci/check_prod_surface.sh asserts it, and that
+ * every QSPI partition ends inside it.
+ *
+ * writeoc MUST stay PP_1_1_4: the Winbond W25Q parts used here do not
+ * implement the default PP_1_4_4 (0x38) opcode, and writes through it are
+ * corrupted.
  */
 &quadspi {
 	pinctrl-0 = <&quadspi_clk_pf10 &quadspi_bk1_ncs_pg6
@@ -511,10 +522,10 @@ zephyr_udc0: &usbotg_hs {
 	pinctrl-names = "default";
 	status = "okay";
 
-	w25q01jv: qspi-nor-flash-1@90000000 {
+	qspi_nor: qspi-nor-flash-1@90000000 {
 		compatible = "st,stm32-qspi-nor";
 		reg = <0x90000000>;
-		size = <1073741824>; /* 128 MBytes */
+		size = <536870912>; /* in BITS: 512 Mbit = 64 MiB */
 		qspi-max-frequency = <48000000>;
 		spi-bus-width = <4>;
 		quad-enable-requirements = "S2B1v1";
@@ -526,22 +537,26 @@ zephyr_udc0: &usbotg_hs {
 			#address-cells = <1>;
 			#size-cells = <1>;
 
-			/* XIP (Execute In Place) partition - 56MB for code/assets */
+			/* 64 MiB total. Every partition must end at or below
+			 * 0x4000000; see the QUADSPI comment above. */
+
+			/* XIP (Execute In Place) partition - 48 MB for code/assets */
 			xip_partition: partition@0 {
 				label = "xip";
-				reg = <0x0 DT_SIZE_M(56)>;
+				reg = <0x0 DT_SIZE_M(48)>;
 			};
 
 			/* Model storage - 8 MB, XIP-addressable */
-			model_partition: partition@3800000 {
+			model_partition: partition@3000000 {
 				label = "tflite_model";
-				reg = <0x3800000 DT_SIZE_M(8)>;
+				reg = <0x3000000 DT_SIZE_M(8)>;
 			};
 
-			/* LittleFS storage - 64 MB */
-			lfs_partition: partition@4000000 {
+			/* LittleFS storage - 8 MB (settings; recordings go to SD).
+			 * Moved from 0x4000000, which is past the end of the part. */
+			lfs_partition: partition@3800000 {
 				label = "lfs_storage";
-				reg = <0x4000000 DT_SIZE_M(64)>;
+				reg = <0x3800000 DT_SIZE_M(8)>;
 			};
 		};
 	};
