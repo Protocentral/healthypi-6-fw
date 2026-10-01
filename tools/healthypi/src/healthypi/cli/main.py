@@ -1166,30 +1166,96 @@ def cmd_test_soak(args) -> int:
         return 130
 
 
+def _field_json(f) -> dict[str, Any]:
+    out: dict[str, Any] = {"name": f.name, "type": f.type.value}
+    if f.optional:
+        out["optional"] = True
+    if f.doc:
+        out["doc"] = f.doc
+    if f.nested:
+        out["nested"] = [_field_json(n) for n in f.nested]
+    return out
+
+
+def _command_json(c, full: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": f"0x{c.cmd_id:04X}",
+        "name": c.name,
+        "ops": [o.value for o in c.ops],
+        "status": c.status.value,
+        "unlock": bool(c.meta.get("unlock")),
+        "signed_build": bool(c.meta.get("signed_build")),
+    }
+    if full:
+        for key in ("request", "response", "write_request", "write_response"):
+            fields = getattr(c, key)
+            if fields:
+                out[key] = [_field_json(f) for f in fields]
+        if c.errors:
+            out["errors"] = list(c.errors)
+        if c.doc:
+            out["doc"] = c.doc
+    return out
+
+
+def _formats_json() -> dict[str, Any]:
+    """The .HP6 DBLK layout this build decodes: the host-side mirror of
+    app_m7/src/core/sample_formats.h, for consumers that generate code from it."""
+    from ..hp6 import format as f
+
+    def flags(prefix: str) -> dict[str, int]:
+        return {
+            k[len(prefix):]: v
+            for k, v in vars(f).items()
+            if k.startswith(prefix) and isinstance(v, int) and not isinstance(v, bool)
+        }
+
+    return {
+        "file_version": f"0x{f.FILE_VERSION:04X}",
+        "dblk_header_len": f.DBLK_HDR_LEN,
+        "dblk_crc_len": f.DBLK_CRC_LEN,
+        "channels": {ch.name: int(ch) for ch in f.Channel},
+        "payloads": {
+            f.Channel(ch).name: {
+                "channel": int(ch),
+                "size": cls.SIZE,
+                "struct": cls._STRUCT.format,
+            }
+            for ch, cls in sorted(f.PAYLOADS.items())
+        },
+        "flags": {
+            "lead_off": flags("LEAD_OFF_"),
+            "vitals": flags("VIT_"),
+            "infer": flags("INF_"),
+        },
+    }
+
+
 def cmd_catalog(args) -> int:
     """Print the group-64 surface this build knows about."""
+    from .. import __version__
     from ..smp import catalog
 
+    if getattr(args, "formats", False):
+        args.json = True
+        _emit(args, {"tool_version": __version__, **_formats_json()})
+        return 0
     if getattr(args, "json", False):
-        _emit(
-            args,
-            {
-                "group_id": catalog.GROUP_ID,
-                "schema_version": catalog.SCHEMA_VERSION,
-                "commands": [
-                    {
-                        "id": f"0x{c.cmd_id:04X}",
-                        "name": c.name,
-                        "ops": [o.value for o in c.ops],
-                        "status": c.status.value,
-                        "unlock": bool(c.meta.get("unlock")),
-                        "signed_build": bool(c.meta.get("signed_build")),
-                    }
-                    for c in catalog.COMMANDS
-                ],
-                "errors": {k: v[0] for k, v in catalog.ERRORS.items()},
-            },
-        )
+        full = bool(getattr(args, "full", False))
+        doc: dict[str, Any] = {
+            "group_id": catalog.GROUP_ID,
+            "schema_version": catalog.SCHEMA_VERSION,
+            "commands": [_command_json(c, full) for c in catalog.COMMANDS],
+            "errors": {k: v[0] for k, v in catalog.ERRORS.items()},
+        }
+        if full:
+            doc = {"tool_version": __version__, **doc}
+            doc["error_hints"] = {k: v[1] for k, v in catalog.ERRORS.items()}
+            doc["stock_errors"] = {
+                g: {k: v[0] for k, v in codes.items()}
+                for g, codes in catalog.STOCK_ERRORS.items()
+            }
+        _emit(args, doc)
         return 0
     print(catalog.HPI_GROUP.describe())
     print(
@@ -1609,6 +1675,16 @@ def build_parser() -> argparse.ArgumentParser:
     # -- catalog ------------------------------------------------------------
     p = sub.add_parser("catalog", help="the group-64 command surface")
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="with --json: include request/reply field schemas and error hints",
+    )
+    p.add_argument(
+        "--formats",
+        action="store_true",
+        help="print the .HP6 DBLK payload layouts as JSON instead",
+    )
     p.set_defaults(func=cmd_catalog)
 
     return ap

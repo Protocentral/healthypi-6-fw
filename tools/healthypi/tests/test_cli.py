@@ -170,6 +170,27 @@ def test_catalog_json(capsys):
     assert len(doc["commands"]) == 46
     assert {c["name"] for c in doc["commands"] if c["status"] == "stub"} == {"wifi_scan"}
     assert doc["errors"]["267"] == "NO_MEDIA"
+    assert "request" not in doc["commands"][0]  # schemas only with --full
+
+
+def test_catalog_json_full(capsys):
+    assert main(["catalog", "--json", "--full"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    by_name = {c["name"]: c for c in doc["commands"]}
+    begin = by_name["m4fw_begin"]
+    assert {f["name"] for f in begin["request"]} >= {"len", "sha"}
+    assert doc["error_hints"]["270"]
+    assert doc["stock_errors"]["0"]["4"] == "RTC_NOT_SET"
+
+
+def test_catalog_formats(capsys):
+    assert main(["catalog", "--formats"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["file_version"] == "0x0300"
+    assert doc["payloads"]["VITALS"] == {"channel": 4, "size": 16, "struct": "<HHHhHHHBx"}
+    assert doc["payloads"]["INFER"]["size"] == 16
+    assert doc["flags"]["vitals"]["HR_FROM_PPG"] == 1
+    assert doc["flags"]["infer"]["STUB"] == 1
 
 
 # --- hp6 verbs -------------------------------------------------------------

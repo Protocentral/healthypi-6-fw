@@ -105,6 +105,8 @@ validated on v5 hardware, so a catalog edit cannot silently change an encoding.
 
 ```bash
 healthypi catalog                     # every group-64 command, and its real status
+healthypi catalog --json --full       # ...with request/reply schemas (for code generators)
+healthypi catalog --formats           # the .HP6 DBLK payload layouts, as JSON
 healthypi hp6 verify REC0001.HP6      # CRCs, gaps, counters
 healthypi hp6 to-csv REC0001.HP6 out/
 healthypi device info                 # port autodetected

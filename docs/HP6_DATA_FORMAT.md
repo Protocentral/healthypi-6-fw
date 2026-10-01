@@ -146,7 +146,7 @@ Python: `struct.unpack("<2iB3x", buf)`
 **Raw counts, not a physical unit** — 22-bit signed values sign-extended into
 int32. Do not scale them; compute ratios.
 
-### VITALS — 12 bytes
+### VITALS — 16 bytes
 
 ```c
 struct vitals_sample {
