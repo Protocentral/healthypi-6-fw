@@ -65,6 +65,17 @@ config HPI_ACQ_DEBUG
 	  channel (expect ~500/s ECG, ~125/s PPG), proving onboard acquisition
 	  reaches the bus. Off for production.
 
+config HPI_RESP_DEBUG
+	bool "Log raw respiration (CH1) statistics every 5 s"
+	default n
+	help
+	  Dev aid for respiration bring-up: logs min/max/mean/peak-to-peak of
+	  the RAW CH1 ADC code (before the moving average) every 5 s and flags
+	  samples near full scale. Near full scale means the carrier is
+	  clipping (lower CONFIG_SENSOR_ADS129XX_RESP_GAIN). A mean near zero
+	  with only noise means no modulation or a demodulation phase null
+	  (sweep CONFIG_SENSOR_ADS129XX_RESP_PHASE). Off for production.
+
 config HPI_NPU_UART
 	bool "NPU transport over USART2 (1 Mbaud) -- primary HealthyLink Compute link"
 	default n
