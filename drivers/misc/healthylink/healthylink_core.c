@@ -8,9 +8,12 @@
  * - Header parsing and validation
  * - EEPROM auto-provisioning for blank modules
  * - Driver dispatch based on module ID
+ * - Slot power (load switch + fault line)
+ *
+ * One device per "protocentral,healthylink-slot" node that has an `eeprom`.
  */
 
-#define DT_DRV_COMPAT protocentral_healthylink
+#define DT_DRV_COMPAT protocentral_healthylink_slot
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -129,6 +132,8 @@ const char *healthylink_module_name(uint16_t module_id)
 		return "SYNC-MASTER";
 	case HEALTHYLINK_MODULE_ID_GSR_RESP:
 		return "GSR-RESPIRATION";
+	case HEALTHYLINK_MODULE_ID_GPIO:
+		return "GPIO";
 	default:
 		return "Unknown";
 	}
@@ -199,8 +204,8 @@ static bool healthylink_eeprom_is_blank(const struct device *dev)
 
 	ret = healthylink_eeprom_read(dev, HEALTHYLINK_ADDR_MAGIC, magic, 4);
 	if (ret < 0) {
-		LOG_ERR("EEPROM I2C read failed (chip not responding @ 0x51?): %d",
-			ret);
+		LOG_ERR("EEPROM I2C read failed (chip not responding @ 0x%02x?): %d",
+			healthylink_get_config(dev)->eeprom.addr, ret);
 		return false;
 	}
 
@@ -289,8 +294,16 @@ static uint32_t healthylink_default_capabilities(uint16_t module_id)
 		return HEALTHYLINK_CAP_REQUIRES_FDCAN | HEALTHYLINK_CAP_POWER_MED;
 	case HEALTHYLINK_MODULE_ID_TRIGGER:
 		return HEALTHYLINK_CAP_REQUIRES_GPIO | HEALTHYLINK_CAP_POWER_LOW;
+	case HEALTHYLINK_MODULE_ID_GPIO:
+		/* Deliberately claims no interface bit: the breakout exposes
+		 * every interface passively, and bits 0-7 are exclusive across
+		 * slots -- claiming one would lock a real module out of the
+		 * other slot for nothing. */
+		return HEALTHYLINK_CAP_POWER_LOW;
 	case HEALTHYLINK_MODULE_ID_COMPUTE:
-		return HEALTHYLINK_CAP_REQUIRES_SPI6 | HEALTHYLINK_CAP_REQUIRES_GPIO |
+		/* SPI4, not SPI6: the module selects on CS_A. POWER_HIGH is
+		 * identity-image only; the provider does not claim it. */
+		return HEALTHYLINK_CAP_REQUIRES_SPI4 |
 		       HEALTHYLINK_CAP_DMA_CAPABLE | HEALTHYLINK_CAP_POWER_HIGH;
 	default:
 		return 0;
@@ -431,6 +444,45 @@ int healthylink_eeprom_write(const struct device *dev,
 	return 0;
 }
 
+/* Probe every address on the bus this slot's ID EEPROM lives on.
+ *
+ * A bring-up instrument, not part of detection: on v5 the slot EEPROMs are the
+ * only devices on I2C3, so a slot that answers nothing gives no way to tell a
+ * module that is not responding from a bus that is not working. This says
+ * which it is.
+ *
+ * Zero-length write, the same probe Zephyr's `i2c scan` shell command uses:
+ * it ACKs or it does not, and nothing is read or written either way.
+ */
+int healthylink_bus_scan(const struct device *dev, uint8_t *addrs, size_t max)
+{
+	const struct healthylink_config *cfg = healthylink_get_config(dev);
+	size_t n = 0;
+
+	if (addrs == NULL || max == 0) {
+		return -EINVAL;
+	}
+	if (!device_is_ready(cfg->eeprom.bus)) {
+		return -ENODEV;
+	}
+
+	for (uint16_t a = 0x08; a <= 0x77 && n < max; a++) {
+		struct i2c_msg msg = {
+			.buf = NULL,
+			.len = 0U,
+			.flags = I2C_MSG_WRITE | I2C_MSG_STOP,
+		};
+
+		if (i2c_transfer(cfg->eeprom.bus, &msg, 1, (uint16_t)a) == 0) {
+			addrs[n++] = (uint8_t)a;
+		}
+	}
+
+	LOG_INF("slot %s: bus scan found %u device(s)", cfg->label,
+		(unsigned int)n);
+	return (int)n;
+}
+
 /* Check if a module is present.
  *
  * Detection is EEPROM-based only (no detect GPIO): probe the slot's ID EEPROM
@@ -459,10 +511,24 @@ static int healthylink_read_header(const struct device *dev,
 		return ret;
 	}
 
-	/* Verify magic */
+	/* Verify magic. Worth a warning rather than a debug line: with
+	 * auto-provisioning off (the default), an unprogrammed module is the
+	 * ordinary reason a slot comes up ERROR, and "-22" on its own sends
+	 * people looking for a hardware fault that is not there. */
 	if (memcmp(raw.magic, HEALTHYLINK_EEPROM_MAGIC, 4) != 0) {
-		LOG_DBG("Invalid EEPROM magic: %02X %02X %02X %02X",
-			raw.magic[0], raw.magic[1], raw.magic[2], raw.magic[3]);
+		const uint8_t m0 = raw.magic[0];
+		bool unwritten = (m0 == 0xFF || m0 == 0x00) &&
+				 raw.magic[1] == m0 && raw.magic[2] == m0 &&
+				 raw.magic[3] == m0;
+
+		LOG_WRN("slot %s: no HLNK magic (%02X %02X %02X %02X) -- %s",
+			healthylink_get_config(dev)->label,
+			raw.magic[0], raw.magic[1], raw.magic[2], raw.magic[3],
+			unwritten ? "the ID EEPROM has never been programmed. "
+				    "Run: healthypi hl eeprom program --slot <a|b> "
+				    "--module-id <id> --name <name>"
+				  : "the ID EEPROM holds something else (a partial "
+				    "write, or not a HealthyLink module)");
 		return -EINVAL;
 	}
 
@@ -578,6 +644,74 @@ static int healthylink_reprovision_name(const struct device *dev)
 }
 #endif /* CONFIG_HEALTHYLINK_REPROVISION_NAME */
 
+/* Drive the load switch and record the level. Caller holds the lock. */
+static void slot_power_set(const struct device *dev, bool on)
+{
+	const struct healthylink_config *cfg = healthylink_get_config(dev);
+	struct healthylink_data *data = healthylink_get_data(dev);
+
+	if (cfg->power_gpio.port == NULL) {
+		return;
+	}
+	gpio_pin_set_dt(&cfg->power_gpio, on ? 1 : 0);
+	data->powered = on;
+}
+
+/* Power the slot and switch it back off on a load-switch fault. Caller holds
+ * the lock. */
+static int slot_power_on_checked(const struct device *dev)
+{
+	const struct healthylink_config *cfg = healthylink_get_config(dev);
+
+	if (cfg->power_gpio.port != NULL) {
+		slot_power_set(dev, true);
+		k_msleep(10);  /* power-up settle */
+	}
+	if (cfg->fault_gpio.port != NULL && gpio_pin_get_dt(&cfg->fault_gpio) > 0) {
+		LOG_ERR("slot %s: load-switch fault after power-up -- slot switched off",
+			cfg->label);
+		slot_power_set(dev, false);
+		return -EIO;
+	}
+	return 0;
+}
+
+int healthylink_slot_power(const struct device *dev, bool on)
+{
+	const struct healthylink_config *cfg = healthylink_get_config(dev);
+	struct healthylink_data *data = healthylink_get_data(dev);
+	int ret = 0;
+
+	if (cfg->power_gpio.port == NULL) {
+		return -ENOTSUP;
+	}
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+	if (on) {
+		ret = slot_power_on_checked(dev);
+	} else {
+		slot_power_set(dev, false);
+		/* An unpowered module is not driving the shared pins, so stop
+		 * holding them on its behalf. */
+		healthylink_pinmux_release(dev);
+	}
+	k_mutex_unlock(&data->lock);
+
+	LOG_INF("slot %s: power %s%s", cfg->label, on ? "on" : "off",
+		ret == 0 ? "" : " refused (load-switch fault)");
+	return ret;
+}
+
+bool healthylink_slot_is_powered(const struct device *dev)
+{
+	return healthylink_get_data(dev)->powered;
+}
+
+const char *healthylink_slot_label(const struct device *dev)
+{
+	return healthylink_get_config(dev)->label;
+}
+
 /* Detect and initialize module */
 int healthylink_detect(const struct device *dev)
 {
@@ -587,42 +721,44 @@ int healthylink_detect(const struct device *dev)
 
 	k_mutex_lock(&data->lock, K_FOREVER);
 
-	/*
-	 * Power-then-identify: v4 wires the slot ID EEPROM on the switched rail,
-	 * so it cannot ACK on I2C until the slot load switch is closed. Enable
-	 * slot power first, give the EEPROM ~10 ms to come out of POR, then
-	 * probe. (An unpowered first probe would only suit boards with an
-	 * always-on EEPROM rail.)
-	 */
-	if (cfg->power_gpio.port != NULL) {
-		LOG_INF("EEPROM: enabling slot power (v4 switched rail)");
-		gpio_pin_set_dt(&cfg->power_gpio, 1);
+	/* Start from nothing, so a re-run never reports the previous module. */
+	if (data->active_driver != NULL && data->active_driver->remove != NULL) {
+		data->active_driver->remove(dev);
+	}
+	/* Whatever this slot held is no longer in use; give it back so the other
+	 * slot can take it. A no-op if this slot never claimed anything. */
+	healthylink_pinmux_release(dev);
+	data->active_driver = NULL;
+	data->module_id = 0;
+	memset(&data->module_header, 0, sizeof(data->module_header));
+	data->status = HEALTHYLINK_STATUS_NOT_PRESENT;
+
+	/* Identify-then-power: probe with the slot off, unless the EEPROM is on
+	 * the switched rail and cannot ACK without power. */
+	if (cfg->eeprom_switched) {
+		slot_power_set(dev, true);
 		k_msleep(10);  /* tPWR + EEPROM POR */
+	} else {
+		slot_power_set(dev, false);
 	}
 
-	LOG_INF("EEPROM: probing AT24CS02 @ I2C 0x51");
+	LOG_INF("slot %s: probing ID EEPROM @ I2C 0x%02x", cfg->label,
+		cfg->eeprom.addr);
 	bool present = healthylink_module_present(dev);
-	if (present) {
-		LOG_INF("EEPROM: [PASS] ACK at 0x51");
-	} else {
-		LOG_WRN("EEPROM: [FAIL] no ACK at 0x51 with slot powered");
-		LOG_WRN("  check: I2C3 wiring (PH7 SCL, PH8 SDA), chip presence,");
-		LOG_WRN("  address pins (A0 must be HIGH, A1/A2 LOW for 0x51)");
-		if (cfg->power_gpio.port != NULL) {
-			gpio_pin_set_dt(&cfg->power_gpio, 0);  /* empty slot - drop power */
-		}
-	}
 
 	if (!present) {
-		LOG_WRN("HealthyLink: No module EEPROM detected on I2C3 @ 0x51");
-		data->status = HEALTHYLINK_STATUS_NOT_PRESENT;
-		data->module_id = 0;
-		data->active_driver = NULL;
-		/* Reset pins to safe state when no module present */
-		healthylink_pinmux_reset();
+		/* Nothing to undo here: the release above already gave back
+		 * anything this slot held, and it is ownership -- not the
+		 * absence of this call -- that keeps us off pins the other slot
+		 * is using. */
+		LOG_INF("slot %s: empty (no ACK at 0x%02x)", cfg->label,
+			cfg->eeprom.addr);
+		slot_power_set(dev, false);
 		k_mutex_unlock(&data->lock);
 		return -ENODEV;
 	}
+	LOG_INF("slot %s: ID EEPROM answered at 0x%02x", cfg->label,
+		cfg->eeprom.addr);
 
 #if IS_ENABLED(CONFIG_HEALTHYLINK_AUTO_PROVISION)
 	/* Check if EEPROM is blank and needs provisioning */
@@ -641,8 +777,9 @@ int healthylink_detect(const struct device *dev)
 	/* Read module header */
 	ret = healthylink_read_header(dev, &data->module_header);
 	if (ret < 0) {
-		LOG_ERR("Failed to read module header: %d", ret);
+		LOG_ERR("slot %s: failed to read module header: %d", cfg->label, ret);
 		data->status = HEALTHYLINK_STATUS_ERROR;
+		slot_power_set(dev, false);   /* unidentified: never powered */
 		k_mutex_unlock(&data->lock);
 		return ret;
 	}
@@ -658,7 +795,7 @@ int healthylink_detect(const struct device *dev)
 	data->module_id = data->module_header.module_id;
 	data->status = HEALTHYLINK_STATUS_DETECTED;
 
-	LOG_INF("HealthyLink module detected:");
+	LOG_INF("HealthyLink module detected in slot %s:", cfg->label);
 	LOG_INF("  Name: %s", data->module_header.name);
 	LOG_INF("  ID: 0x%04X (%s)", data->module_id,
 		healthylink_module_name(data->module_id));
@@ -668,27 +805,22 @@ int healthylink_detect(const struct device *dev)
 	LOG_INF("  Serial: %u", data->module_header.serial);
 	LOG_INF("  Capabilities: 0x%08X", data->module_header.capabilities);
 
-	/* Identify-then-power: the module is recognized, so now apply slot power
-	 * (idempotent if the v4 switched-rail fallback already enabled it) and
-	 * verify the load switch reports no fault before bringing the module up. */
-	if (cfg->power_gpio.port != NULL) {
-		gpio_pin_set_dt(&cfg->power_gpio, 1);
-		k_msleep(10);  /* power-up settle */
-	}
-	if (cfg->fault_gpio.port != NULL && gpio_pin_get_dt(&cfg->fault_gpio) > 0) {
-		LOG_ERR("HealthyLink: load-switch fault after power-up - disabling slot");
-		if (cfg->power_gpio.port != NULL) {
-			gpio_pin_set_dt(&cfg->power_gpio, 0);
-		}
+	/* Identified: power the slot. */
+	ret = slot_power_on_checked(dev);
+	if (ret < 0) {
 		data->status = HEALTHYLINK_STATUS_ERROR;
 		k_mutex_unlock(&data->lock);
-		return -EIO;
+		return ret;
 	}
 
-	/* Configure pins for this module type (runtime pinmux) */
-	ret = healthylink_pinmux_configure_for_module(data->module_id);
+	/* Configure pins for this module type (runtime pinmux). The slot device
+	 * is the owner token: the SPI6/FDCAN1 pins reach both slots, so this
+	 * refuses with -EBUSY rather than reprogramming pins the other slot's
+	 * module is using. */
+	ret = healthylink_pinmux_configure_for_module(dev, data->module_id);
 	if (ret < 0) {
-		LOG_ERR("Failed to configure pins for module: %d", ret);
+		LOG_ERR("slot %s: failed to configure pins for module: %d",
+			cfg->label, ret);
 		data->status = HEALTHYLINK_STATUS_ERROR;
 		k_mutex_unlock(&data->lock);
 		return ret;
@@ -810,21 +942,22 @@ static int healthylink_init(const struct device *dev)
 	/* No detection GPIO: module presence is determined by probing the slot
 	 * ID EEPROM over I2C (see healthylink_module_present()). */
 
-	/* Configure power GPIO if available. Must be GPIO_OUTPUT_ACTIVE, not
-	 * INACTIVE: on v4 the slot ID EEPROM sits on the switched rail, which
-	 * platform code asserts early in boot -- configuring INACTIVE here would
-	 * drop the rail and force the EEPROM to cold-start with only detect()'s
-	 * 10 ms re-settle to recover, which is marginal. */
+	/* The slot starts off until detect() identifies a module -- except a
+	 * switched-rail slot, whose EEPROM needs the rail and stays on. */
 	if (cfg->power_gpio.port != NULL) {
 		if (!gpio_is_ready_dt(&cfg->power_gpio)) {
-			LOG_ERR("Power GPIO not ready");
+			LOG_ERR("slot %s: power GPIO not ready", cfg->label);
 			return -ENODEV;
 		}
-		ret = gpio_pin_configure_dt(&cfg->power_gpio, GPIO_OUTPUT_ACTIVE);
+		ret = gpio_pin_configure_dt(&cfg->power_gpio,
+					    cfg->eeprom_switched ? GPIO_OUTPUT_ACTIVE
+								 : GPIO_OUTPUT_INACTIVE);
 		if (ret < 0) {
-			LOG_ERR("Failed to configure power GPIO: %d", ret);
+			LOG_ERR("slot %s: failed to configure power GPIO: %d",
+				cfg->label, ret);
 			return ret;
 		}
+		data->powered = cfg->eeprom_switched;
 	}
 
 	/* Configure slot load-switch fault GPIO if available */
@@ -840,7 +973,8 @@ static int healthylink_init(const struct device *dev)
 		}
 	}
 
-	LOG_INF("HealthyLink controller initialized");
+	LOG_INF("HealthyLink slot %s initialized (ID EEPROM @0x%02x)", cfg->label,
+		cfg->eeprom.addr);
 
 	/* Auto-detect if configured */
 #if IS_ENABLED(CONFIG_HEALTHYLINK_AUTO_DETECT)
@@ -852,30 +986,16 @@ static int healthylink_init(const struct device *dev)
 	return 0;
 }
 
-/* Use the EEPROM nodelabel directly - simpler than phandle resolution */
-#define HEALTHYLINK_EEPROM_NODE DT_NODELABEL(healthylink_eeprom)
-
-/* Per-slot load-switch enable / fault come from the primary HealthyLink slot
- * node (v4+). On boards without slot nodes (v3) they default to disabled, and
- * detection falls back to a plain EEPROM probe with no power sequencing. */
-#if DT_NODE_EXISTS(DT_NODELABEL(healthylink_slot_a))
-#define HEALTHYLINK_SLOT_POWER \
-	GPIO_DT_SPEC_GET_OR(DT_NODELABEL(healthylink_slot_a), power_gpios, {0})
-#define HEALTHYLINK_SLOT_FAULT \
-	GPIO_DT_SPEC_GET_OR(DT_NODELABEL(healthylink_slot_a), fault_gpios, {0})
-#else
-#define HEALTHYLINK_SLOT_POWER {0}
-#define HEALTHYLINK_SLOT_FAULT {0}
-#endif
-
-/* Device instance macro */
-#define HEALTHYLINK_INIT(inst)                                              \
+/* One device per slot node; a slot without an `eeprom` gets none. */
+#define HEALTHYLINK_SLOT_DEFINE(inst)                                        \
 	static struct healthylink_data healthylink_data_##inst;              \
                                                                              \
 	static const struct healthylink_config healthylink_config_##inst = { \
-		.eeprom = I2C_DT_SPEC_GET(HEALTHYLINK_EEPROM_NODE),          \
-		.power_gpio = HEALTHYLINK_SLOT_POWER,                        \
-		.fault_gpio = HEALTHYLINK_SLOT_FAULT,                        \
+		.eeprom = I2C_DT_SPEC_GET(DT_INST_PHANDLE(inst, eeprom)),    \
+		.power_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, power_gpios, {0}), \
+		.fault_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, fault_gpios, {0}), \
+		.eeprom_switched = DT_INST_PROP(inst, eeprom_switched_rail), \
+		.label = DT_INST_PROP_OR(inst, slot_label, "?"),              \
 	};                                                                   \
                                                                              \
 	DEVICE_DT_INST_DEFINE(inst, healthylink_init, NULL,                  \
@@ -884,4 +1004,8 @@ static int healthylink_init(const struct device *dev)
 			      POST_KERNEL, CONFIG_HEALTHYLINK_INIT_PRIORITY, \
 			      NULL);
 
-DT_INST_FOREACH_STATUS_OKAY(HEALTHYLINK_INIT)
+#define HEALTHYLINK_SLOT_INIT(inst)                                          \
+	COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, eeprom),                     \
+		    (HEALTHYLINK_SLOT_DEFINE(inst)), ())
+
+DT_INST_FOREACH_STATUS_OKAY(HEALTHYLINK_SLOT_INIT)

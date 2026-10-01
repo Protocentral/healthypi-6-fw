@@ -17,7 +17,8 @@
 extern "C" {
 #endif
 
-struct hp6_vitals;   /* core/sample_formats.h */
+struct hp6_vitals;         /* core/sample_formats.h */
+struct hp6_infer_sample;
 
 lv_obj_t *hpi_scr_live_create(lv_obj_t *parent);
 
@@ -28,6 +29,9 @@ void hpi_scr_live_push_ppg(int32_t ir);
 
 /* Inline lane numerics (HR / SpO2 / RR); "--" until produced (truthful-data). */
 void hpi_scr_live_set_vitals(const struct hp6_vitals *v);
+
+/* Beat class from HPI_CH_INFER. STUB (or no sample yet) renders as an em dash. */
+void hpi_scr_live_set_infer(const struct hp6_infer_sample *s);
 
 #ifdef __cplusplus
 }

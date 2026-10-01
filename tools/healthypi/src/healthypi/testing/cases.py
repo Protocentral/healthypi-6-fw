@@ -301,6 +301,32 @@ async def module_list(conn, g, is_error, fmt_error):
     return ok("module_list", f"slot A={resp.a} slot B={resp.b}")
 
 
+@case("module_eeprom_read", group="system", requires=(REQ_UNLOCK,))
+async def module_eeprom_read(conn, g, is_error, fmt_error):
+    """Read the head of slot A's ID EEPROM.
+
+    An empty slot is a SKIP, not a failure: it is the normal state of a bench
+    unit, and reporting it as a pass would make the case worthless -- the whole
+    point is to prove the I2C path to the module actually works.
+    """
+    resp = await conn.request(g.module_eeprom_read(slot=0, off=0, len=16))
+    if _is_err(resp, catalog.GROUP_ID, 256):   # NOT_READY
+        return skip("module_eeprom_read", "slot A is empty (no EEPROM answering)")
+    if is_error(resp):
+        return _err("module_eeprom_read", resp, fmt_error, "refused")
+    head = bytes(resp.data)
+    if len(head) != 16:
+        return fail("module_eeprom_read",
+                    f"asked for 16 B, got {len(head)}")
+    if head[:4] != b"HLNK":
+        return fail("module_eeprom_read",
+                    f"slot A answered but holds no HealthyLink image "
+                    f"(magic {head[:4].hex()}) -- program it with "
+                    f"`healthypi hl eeprom program`")
+    module_id = int.from_bytes(head[6:8], "little")
+    return ok("module_eeprom_read", f"slot A module 0x{module_id:04X}")
+
+
 @case("wifi_status", group="system")
 async def wifi_status(conn, g, is_error, fmt_error):
     resp = await conn.request(g.wifi_status())

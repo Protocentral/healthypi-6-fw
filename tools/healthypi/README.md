@@ -3,8 +3,11 @@
 One package instead of nineteen scripts, on the same rule the firmware uses:
 a capability is implemented once, and the CLI is a thin adapter over it.
 
-Distribution name **`protocentral-healthypi`**; the import package and both
-console scripts stay `healthypi` (and the short alias `hpi`).
+Distribution name **`protocentral-healthypi`**; the import package and the
+console script are both `healthypi`. There is no `hpi` alias: the firmware's
+own shell registers a root command by that name, which runs on the device and
+has different verbs, so `hpi ...` in any instruction means the device shell and
+`healthypi ...` means this tool.
 
 ```bash
 pip install protocentral-healthypi            # library only, stdlib deps
@@ -23,7 +26,7 @@ pip install -e tools/smpgroup -e "tools/healthypi[device]"
 | `healthypi.smp.group64` | ✅ wire classes, **generated** from the catalog |
 | `healthypi.transport` | ✅ CDC 1 connect + autodetect |
 | `healthypi.openview` | ✅ Wi-Fi (OpenView v2) decode + monitor |
-| `healthypi.cli` | ✅ the `healthypi` / `hpi` command |
+| `healthypi.cli` | ✅ the `healthypi` command |
 | `healthypi.fw` | ✅ `.hpifw` bundles, M7+M4 update, MCUboot serial recovery |
 | `healthypi.hw` | ✅ HealthyLink module EEPROM images |
 | `healthypi.testing` | ✅ the group-64 acceptance suite, importable |
@@ -94,10 +97,9 @@ async with SMPClient(SMPSerialTransport(), port) as client:
 ```
 
 **Generated** from the catalog by [`smpgroup`](https://pypi.org/project/smpgroup/) — there are no
-hand-written request/response classes, and there must never be. The generated
-requests are asserted byte-identical to the hand-written set they replaced,
-frozen in `tests/legacy_g64_reference.py` as it stood when the update path was
-validated on v5 hardware.
+hand-written request/response classes, and there must never be. A set of
+requests is checked against golden wire bytes recorded when the update path was
+validated on v5 hardware, so a catalog edit cannot silently change an encoding.
 
 ## CLI
 
@@ -107,7 +109,7 @@ healthypi hp6 verify REC0001.HP6      # CRCs, gaps, counters
 healthypi hp6 to-csv REC0001.HP6 out/
 healthypi device info                 # port autodetected
 healthypi device reset                # reboot (e.g. after an M4 commit)
-hpi telemetry --json
+healthypi telemetry --json
 healthypi stream start --ch 0x03      # ECG + PPG
 healthypi record start --name walk
 healthypi transfer arm                # SD card as a USB disk (drops the connection)

@@ -42,6 +42,7 @@ static const char *const SWEEP_LBL[] = { "5 s", "2.4 s", "1.2 s", "0.6 s" };
 static struct {
 	struct live_lane ecg, ppg, resp;
 	lv_obj_t *leads;        /* "LEADS OK" / "LEADS OFF · RA" */
+	lv_obj_t *beat;         /* "BEAT —" / "BEAT V" from HPI_CH_INFER */
 	lv_obj_t *pause_lbl;
 	lv_obj_t *zoom_lbl, *sweep_lbl;
 	uint8_t   zoom_i, sweep_i;
@@ -170,6 +171,11 @@ static void controls_create(lv_obj_t *root)
 	lv_label_set_text(s_l.leads, "LEADS OK");
 	lv_obj_set_style_text_font(s_l.leads, HPI_M3_FONT_CAPS_SM, 0);
 	lv_obj_set_style_text_color(s_l.leads, HPI_M3_SUCCESS, 0);
+
+	s_l.beat = lv_label_create(lead);
+	lv_label_set_text(s_l.beat, "BEAT \xE2\x80\x94");
+	lv_obj_set_style_text_font(s_l.beat, HPI_M3_FONT_CAPS_SM, 0);
+	lv_obj_set_style_text_color(s_l.beat, HPI_M3_ON_SURFACE_MUTED, 0);
 }
 
 /* ---- one waveform lane: header (dot/label/value/unit) + waveform ---- */
@@ -363,4 +369,28 @@ void hpi_scr_live_set_vitals(const struct hp6_vitals *v)
 	} else {
 		lv_label_set_text(s_l.resp.value, NA_STR);
 	}
+}
+
+void hpi_scr_live_set_infer(const struct hp6_infer_sample *s)
+{
+	static const char letters[] = "NSVFQ";
+
+	if (s_l.beat == NULL || s == NULL) {
+		return;
+	}
+	if (s->flags & HP6_INF_STUB) {
+		lv_label_set_text(s_l.beat, "BEAT \xE2\x80\x94");
+		lv_obj_set_style_text_color(s_l.beat, HPI_M3_ON_SURFACE_MUTED, 0);
+		return;
+	}
+
+	char buf[12];
+	char letter = (s->class_id < 5) ? letters[s->class_id] : '?';
+
+	snprintf(buf, sizeof(buf), "BEAT %c", letter);
+	lv_label_set_text(s_l.beat, buf);
+	lv_obj_set_style_text_color(s_l.beat,
+				    (s->flags & HP6_INF_LOW_CONF) ? HPI_M3_WARNING
+								 : HPI_M3_ON_SURFACE,
+				    0);
 }

@@ -354,6 +354,15 @@
 	clock-frequency = <I2C_BITRATE_FAST>;
 	sq-size = <1024>;
 	cq-size = <1024>;
+
+	/* External AS6221 skin-temp probe. ADDR pin straps 0x48 or 0x49;
+	 * this node is 0x49 so tmp108 binds. core/temp_sensor.c probes
+	 * both addresses on this bus (I2C1 PB6/PB7). */
+	as6221: as6221@49 {
+		compatible = "ams,as6221";
+		status = "okay";
+		reg = <0x49>;
+	};
 };
 
 &i2c2 {
@@ -366,29 +375,6 @@
 		compatible = "maxim,max17048";
 		status = "okay";
 		reg = <0x36>;
-	};
-
-	/* ams AS6221 digital temperature sensor. Driven by Zephyr's tmp108
-	 * driver, which covers the TI TMP108 and the ams AS621x/AS6221 --
-	 * CONFIG_TMP108 turns itself on from this compatible.
-	 *
-	 * v5 ONLY. v2/v3/v4 keep their maxim,max30205 nodes -- those boards
-	 * carry the Maxim part, and pointing them at ams would be worse than
-	 * leaving them: the MAX30205 node was inert (no driver existed for it
-	 * anywhere in the tree), whereas this compatible pulls in a real driver
-	 * that writes a config register at init and would fail on the wrong
-	 * silicon.
-	 *
-	 * The address is carried over unchanged from the node this replaced.
-	 * CONFIRM 0x49 against the schematic -- it is set by the AS6221's ADDR
-	 * pin strapping, a different pin on a different part. Nothing answered
-	 * at 0x49 on the bench unit (2026-08-31): a full 7-bit scan of i2c2
-	 * found only 0x36 (MAX17048) and 0x69 (BMI323), and i2c1 was empty, so
-	 * no temperature sensor is fitted on that particular board. */
-	as6221: as6221@49 {
-		compatible = "ams,as6221";
-		status = "okay";
-		reg = <0x49>;
 	};
 
 	/* Bosch BMI323 6-axis IMU. SDO is strapped high on v4, so the

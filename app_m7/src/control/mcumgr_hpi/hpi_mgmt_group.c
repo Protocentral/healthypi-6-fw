@@ -11,6 +11,11 @@
  *
  * Adapter-parity: these handlers are thin adapters over the same service APIs
  * the shell adapter (control/shell_hpi) calls -- neither reimplements logic.
+ *
+ * Returning an error: a bare `return` carries a protocol-wide MGMT_ERR code;
+ * a group-64 code (>= 256) must go out through smp_add_cmd_err(). See the
+ * comment on `enum hpi_mgmt_err` in hpi_mgmt_group.h -- getting this wrong
+ * produces a reply no client can parse.
  */
 
 #include "hpi_mgmt_group.h"
@@ -58,6 +63,9 @@ int hpi_diag_lead_off_read(struct smp_streamer *ctxt);
 /* Implemented in hpi_modules.c. */
 int hpi_module_list_read(struct smp_streamer *ctxt);
 int hpi_module_power_write(struct smp_streamer *ctxt);
+int hpi_module_eeprom_read(struct smp_streamer *ctxt);
+int hpi_module_eeprom_write(struct smp_streamer *ctxt);
+int hpi_module_i2c_scan(struct smp_streamer *ctxt);
 #if defined(CONFIG_HPI_SECURITY)
 /* Implemented in hpi_security_cmd.c. */
 int hpi_unlock_challenge(struct smp_streamer *ctxt);
@@ -128,6 +136,12 @@ static const struct mgmt_handler hpi_mgmt_group_handlers[] = {
 					 .mh_write = NULL },
 	[HPI_MGMT_CMD_MODULE_POWER]  = { .mh_read = NULL,
 					 .mh_write = hpi_module_power_write },
+	[HPI_MGMT_CMD_MODULE_EEPROM_READ]  = { .mh_read = hpi_module_eeprom_read,
+					       .mh_write = NULL },
+	[HPI_MGMT_CMD_MODULE_EEPROM_WRITE] = { .mh_read = NULL,
+					       .mh_write = hpi_module_eeprom_write },
+	[HPI_MGMT_CMD_MODULE_I2C_SCAN]     = { .mh_read = hpi_module_i2c_scan,
+					       .mh_write = NULL },
 	[HPI_MGMT_CMD_SD_STATUS]       = { .mh_read = hpi_recording_status_read,
 					   .mh_write = NULL },
 	[HPI_MGMT_CMD_SD_RECORD_START] = { .mh_read = NULL,

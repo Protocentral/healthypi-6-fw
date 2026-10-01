@@ -152,8 +152,8 @@ int32. Do not scale them; compute ratios.
 struct vitals_sample {
     uint16_t hr_bpm;         /* heart rate, bpm */
     uint16_t spo2_x10;       /* SpO2 percent × 10  (975 = 97.5 %) */
-    uint16_t rr_bpm;         /* respiration rate — always 0 in 1.0.0 */
-    int16_t  temp_c_x100;    /* °C × 100 — always 0 in 1.0.0 */
+    uint16_t rr_bpm;         /* breaths/min; 0 = not locked / RA,LA,LL off */
+    int16_t  temp_c_x100;    /* °C × 100; 0 = AS6221 unplugged / not ready */
     uint16_t hrv_sdnn_ms;    /* SDNN, milliseconds */
     uint16_t hrv_rmssd_ms;   /* RMSSD, milliseconds */
     uint16_t hrv_lf_hf_x10;  /* LF/HF ratio × 10; 0 = not computed */
@@ -171,9 +171,10 @@ Python: `struct.unpack("<HHHhHHHBx", buf)` → `(hr_bpm, spo2_x10, rr_bpm, temp_
 > clamped 255 could not be distinguished from a measured one. The payload grew
 > 12 B → 16 B.
 
-**Zero means "not available", not "measured zero."** In 1.0.0, `rr_bpm` and
-`temp_c_x100` always read 0 (no producer / no sensor). Render unavailable values
-as blank — never as a measurement.
+**Zero means "not available", not "measured zero."** `rr_bpm` is 0 until the
+thoracic-Z detector has a 6–40 bpm estimate, and while RA/LA/LL are off.
+`temp_c_x100` is 0 when the external AS6221 is unplugged.
+Render unavailable values as blank — never as a measurement.
 
 #### `flags` — where `hr_bpm` came from
 
@@ -182,6 +183,7 @@ as blank — never as a measurement.
 | 0 | `HR_FROM_PPG` | `hr_bpm` is a **PPG pulse rate**, not an ECG heart rate |
 | 1 | `ECG_LEAD_OFF` | at least one ECG electrode was off; ECG-derived rates are suppressed while set |
 | 2 | `PPG_WEAK` | PPG perfusion was low — **`spo2_x10` and any PPG-sourced `hr_bpm` are provisional**. Set whenever the PPG signal was poor, whichever sensor supplied `hr_bpm` |
+| 3 | `MOTION` | BMI323 accel saw motion. **Qualifies** the sample (artifact hint); rates are still filled |
 
 The device prefers the ECG rate and falls back to the PPG pulse rate when the
 ECG one is unavailable (leads off, or no beats for 5 s). **A rate with
@@ -245,11 +247,12 @@ exactly: `score = confidence - 128`. The unmodified per-class scores are in
 | 1 | `LOW_CONF` | below the model's usable confidence |
 | 2 | `ECG_SUSPECT` | the input beat came from a poor-quality trace |
 
-> **Always check `STUB` before using a result.** The compute module's inference
-> path is not finished: `RUN_INFERENCE` currently returns five zero bytes. A
-> producer that cannot prove it ran a network must set this bit, so that a
-> recording made during bring-up can be told apart from a clinical one after the
-> fact. **Treat a set `STUB` bit as "no classification", not as class N.**
+> **Always check `STUB` before using a result.** The host sets this bit unless
+> the module returned a well-formed reply whose five scores are not all zero.
+> Five zero bytes are not class N, even if the module's `runs_ok` counter
+> incremented. A set `STUB` bit means "no classification" — render it as an
+> em dash, never as N. A clear `STUB` bit means the network ran; it is **not**
+> a clinical claim (AAMI class of a window, not a diagnosis).
 
 ### EVENT — 8 bytes
 
@@ -468,15 +471,17 @@ the `healthypi` Python package, which does.
 - **`t_ms` is uptime, not wall time.** Anchor with `timestamp_start` and the
   sync markers.
 - **Zero is not a measurement.** `rr_bpm`, `temp_c_x100`, and the HRV fields
-  read 0 when unavailable — in 1.0.0, always for the first two.
+  read 0 when unavailable (`rr_bpm` until the thoracic-Z detector locks;
+  `temp_c_x100` when the AS6221 is unplugged).
 - **PPG values are raw counts.** Not a physical unit; not comparable across
   devices.
 - **Signed fields are signed.** ECG/EEG/PPG values, `temp_c_x100`, and the
   `ibat_ma` telemetry field. Reading them as unsigned produces
   plausible-looking garbage on negative excursions — for ECG, half the
   waveform.
-- **`board_variant` is unreliable in firmware 1.0.0** — it reports `v4`
-  regardless of the board. Don't branch on it; fixed in a later release.
+- **`board_variant`** is `v5` / `v4` / `v3` / `v2` from the board Kconfig
+  (`recording_service.c`). Older 1.0.0 images before that change always wrote
+  `v4`.
 - **Don't trust the `.IDX` for an interrupted file.** See §6.
 - **Nothing enforces block ordering between channels.** Blocks interleave in
   production order; sort by `t_ms` per channel, don't assume a pattern.
