@@ -267,3 +267,49 @@ def test_wrong_curve_refused(tmp_path):
     # signature fails long after the release was cut.
     with pytest.raises(KeyError_, match="P-256"):
         load_private_key(path)
+
+
+# --- refusals made before anything is written -------------------------------
+
+
+def test_a_dev_build_is_refused_not_reported_up_to_date():
+    """A unit on `scripts/build.sh m7` has no img group and no M4-update service.
+    Found 2026-09-30: --dry-run against one said "nothing to do"."""
+    from healthypi.fw.update import unsupported
+
+    why = unsupported({"m7": False, "m4": False}, ["m4", "m7"])
+    assert why and "no MCUboot image group" in why and "no M4-update service" in why
+    assert "scripts/flash.sh factory" in why
+
+
+def test_a_signed_build_is_supported():
+    from healthypi.fw.update import unsupported
+
+    assert unsupported({"m7": True, "m4": True}, ["m4", "m7"]) is None
+
+
+def test_support_is_judged_only_for_what_will_be_written():
+    """--only m4 must not be refused for a missing img group."""
+    from healthypi.fw.update import unsupported
+
+    assert unsupported({"m7": False, "m4": True}, ["m4"]) is None
+    assert "no M4-update service" in unsupported({"m7": True, "m4": False}, ["m4"])
+
+
+@pytest.mark.parametrize(
+    "installed, bundle, refused",
+    [
+        ("1.0.1", "1.0.0", True),   # downgrade: MCUboot would refuse after a 40 s upload
+        ("1.0.1", "1.0.1", False),  # same: left to the version skip / --force
+        ("1.0.1", "1.0.2", False),
+        ("1.0.1-dev", "1.0.1", False),  # suffixes are not an ordering
+        ("", "1.0.0", False),       # unknown installed version: let MCUboot decide
+    ],
+)
+def test_m7_downgrade_is_refused_up_front(installed, bundle, refused):
+    from healthypi.fw.update import m7_downgrade
+
+    msg = m7_downgrade(installed, bundle)
+    assert bool(msg) is refused
+    if refused:
+        assert "fw recover" in msg

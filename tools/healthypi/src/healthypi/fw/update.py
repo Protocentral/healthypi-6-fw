@@ -173,6 +173,66 @@ def mcuboot_image_hash(image: bytes) -> bytes | None:
             return None
 
 
+def unsupported(support: dict[str, bool], wanted: list[str]) -> str | None:
+    """Why this unit cannot take the wanted images over USB, or None.
+
+    A development build (``scripts/build.sh m7``) has no bootloader, no MCUmgr
+    img group and no M4-update service. Comparing version strings against such a
+    unit used to report "nothing to do" or "already at" -- true, and useless:
+    the unit cannot be updated over USB at all, whatever the versions say.
+    """
+    missing = [n for n in wanted if n in support and not support[n]]
+    if not missing:
+        return None
+    what = {
+        "m7": "no MCUboot image group (no bootloader)",
+        "m4": "no M4-update service",
+    }
+    lines = "\n".join(f"  {n}: {what[n]}" for n in missing)
+    return (
+        "this unit cannot be updated over USB -- its firmware has\n"
+        f"{lines}\n"
+        "It is running a development build. Program a signed factory image over "
+        "SWD (scripts/flash.sh factory); after that, updates work over USB."
+    )
+
+
+def m7_downgrade(installed: str, bundle: str) -> str | None:
+    """Refusal text if the bundle's M7 is older than the running one, else None.
+
+    MCUboot refuses an older M7 at boot (downgrade prevention), but only after
+    the whole image has been uploaded -- about 40 s -- and the updater then
+    reports a hash mismatch it can only guess at. Refusing up front is honest.
+    """
+    if not installed or _ver_tuple(bundle) >= _ver_tuple(installed):
+        return None
+    return (
+        f"m7: the bundle's M7 {bundle} is older than the installed {installed}.\n"
+        "  MCUboot refuses older M7 images (downgrade prevention), so uploading "
+        "it would change nothing.\n"
+        "  To install an older M7 deliberately, use recovery, which writes the "
+        "image directly:\n"
+        "    healthypi fw enter-recovery --port <CDC1>\n"
+        "    healthypi fw recover --port <recovery-port> --bundle <file>"
+    )
+
+
+async def _update_support(conn, g, is_error) -> dict[str, bool]:
+    """Which processors this unit can update over USB, asked of the device."""
+    from smpclient.requests.image_management import ImageStatesRead
+
+    support: dict[str, bool] = {}
+    try:
+        support["m7"] = not is_error(await conn.request(ImageStatesRead()))
+    except Exception:  # noqa: BLE001 -- no answer is "not supported"
+        support["m7"] = False
+    try:
+        support["m4"] = not is_error(await conn.request(g.m4fw_status()))
+    except Exception:  # noqa: BLE001
+        support["m4"] = False
+    return support
+
+
 async def _m7_slot_hashes(conn, is_error) -> dict[int, bytes]:
     """slot -> MCUboot image hash, as the device reports it."""
     from smpclient.requests.image_management import ImageStatesRead
@@ -414,13 +474,20 @@ async def apply_bundle(
                 cur = installed.get(name) or "?"
                 log(f"  {name:<8} installed {cur:<14} bundle {entry['version']}")
 
+        wanted = [
+            n for n in APPLY_ORDER if bundle.images().get(n) and (not only or n == only)
+        ]
+        why = unsupported(await _update_support(conn, g, is_error), wanted)
+        if why:
+            raise UpdateError(why)
+
         plan: list[str] = []
-        for name in APPLY_ORDER:
-            entry = bundle.images().get(name)
-            if not entry:
-                continue
-            if only and name != only:
-                continue
+        for name in wanted:
+            entry = bundle.images()[name]
+            if name == "m7":
+                refusal = m7_downgrade(installed.get("m7", ""), entry["version"])
+                if refusal:
+                    raise UpdateError(refusal)
             if not force and same_version(installed.get(name, ""), entry["version"]):
                 log(f"  {name}: already at {entry['version']} — skipping (force to reapply)")
                 result.skipped.append(name)
@@ -441,9 +508,8 @@ async def apply_bundle(
         for name in plan:
             if name == "esp32c6":
                 log(
-                    "esp32c6: skipped — the C6 updates itself over WiFi "
-                    "(POST /api/ota/upload); it has no wired path through the "
-                    "M7. See docs/ARCHITECTURE.md §1."
+                    "esp32c6: skipped — this tool cannot update the C6 yet. "
+                    "Program it over its own USB port: scripts/flash.sh esp32."
                 )
                 result.skipped.append(name)
                 continue
