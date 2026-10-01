@@ -284,9 +284,16 @@ their hardware genuinely differs.
 The M7 image, the M4 image and the release manifest are signed with **one**
 ECDSA-P256 release key — see [Keys](#keys).
 
-> **The M4 has no downgrade protection, and the M7 does.** MCUboot enforces
-> `MCUBOOT_DOWNGRADE_PREVENTION` on the M7 and will refuse an older image
-> (`E: Insufficient version in secondary slot`). The M4 path
+> **Downgrade protection covers the M7's normal update path only.** MCUboot
+> enforces `MCUBOOT_DOWNGRADE_PREVENTION` when it installs from the secondary
+> slot, and refuses an older M7 there (`E: Insufficient version in secondary
+> slot`). **Serial recovery is not that path:** it writes the primary slot
+> directly, so MCUboot never compares versions, and an older *validly signed* M7
+> installs through recovery. That is how a deliberate downgrade is done, and
+> it means the version check is a guard against accidents, not a security
+> boundary. Entering recovery (`0x00A5`) is not behind the unlock gate. The
+> signature check is unaffected: recovery accepts only images signed with the
+> release key. The M4 path
 > verifies *authenticity* — SHA-256, ECDSA-P256 and a vector-table check — but
 > nothing compares versions, so an **older M4 image installs happily**. The asymmetry is a consequence of the M4 having
 > no bootloader and no image header to carry a version, not a decision anyone
@@ -405,6 +412,10 @@ so a hanging image never reaches a bundle.
   (`boards/protocentral/healthypi6_v5/healthypi6_v5_bootmode.dtsi`) — they must
   agree byte-for-byte, so it is declared exactly once.
 - MCUboot clears the flag once it has acted on it; recovery is not sticky.
+- **Recovery skips the downgrade check.** It writes slot0 directly rather than
+  installing from the secondary slot, so any M7 image signed with the release
+  key is accepted, older ones included. `healthypi fw update` refuses an older
+  M7 and names this route for a deliberate downgrade.
 - **`fw recover` writes the M7 only.** In recovery nothing but MCUboot is running,
   so the group-64 M4 path does not exist — a recovered unit keeps whatever M4
   image it had. That is usually right (the M4 is rarely the reason you are in

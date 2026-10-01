@@ -27,6 +27,15 @@ than from scratch:
    application at commit. That holds whether the unlock gate is on or off. The
    gate protects against a *local USB actor issuing privileged commands*, which
    is a different and much smaller threat.
+
+   What is verified is *authenticity*, not *version*. A local USB actor can put
+   an older, validly signed image on a unit: the M4 path compares no versions,
+   and MCUboot serial recovery writes the M7's primary slot directly, so its
+   downgrade check never runs. Turning the gate on would not close the M7 case:
+   entering recovery (group-64 `0x00A5`) is not one of the gated commands, and
+   the bootloader itself has no notion of the lock. Closing it would take a
+   gated recovery entry *and* a monotonic counter that MCUboot checks on every
+   write.
 2. **The only honest implementation is not available yet.** A real gate needs a
    per-device secret in OTP. `HPI_UNLOCK_SECRET_SOURCE_OTP` is unimplemented and
    fails closed (the device cannot be unlocked at all).
