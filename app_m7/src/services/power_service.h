@@ -18,11 +18,13 @@
 extern "C" {
 #endif
 
+/* From the BQ24074's PGOOD/CHG pins; see derive_charge_state(). Reported as-is
+ * in group-64 telemetry `charge`. */
 enum hpi_charge_state {
-    HPI_CHG_DISCHARGING = 0,
-    HPI_CHG_CHARGING    = 1,
-    HPI_CHG_FULL        = 2,
-    HPI_CHG_FAULT       = 3,
+    HPI_CHG_DISCHARGING = 0,   /* no input, or input with no cell answering */
+    HPI_CHG_CHARGING    = 1,   /* CHG steady low */
+    HPI_CHG_FULL        = 2,   /* input present, CHG released: terminated */
+    HPI_CHG_FAULT       = 3,   /* CHG flashing ~2 Hz: charger safety timer */
 };
 
 struct hpi_power_status {

@@ -207,7 +207,7 @@ Request `{}` →
 | `ibat_ma` | **int** | Battery current, mA — signed; negative while charging |
 | `soc` | uint | State of charge, % |
 | `tc_x10` | **int** | Temperature × 10 — **always the unavailable sentinel in 1.0.0** |
-| `charge` | uint | Charge state |
+| `charge` | uint | Charge state, from the charger's status pins: 0 discharging · 1 charging · 2 full (charging terminated; independent of `soc`) · 3 fault (charger safety timer expired) |
 | `usb` | bool | USB power present |
 | `batt` | bool | Running on battery — currently just `!usb` |
 | `ok` | bool | Reading is valid |

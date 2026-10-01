@@ -161,7 +161,7 @@ COMMANDS: tuple[Command, ...] = (
             Field("ibat_ma", T.INT),
             Field("soc", T.UINT, "state of charge, %"),
             Field("tc_x10", T.INT, "always the unavailable sentinel in 1.0.0"),
-            Field("charge", T.UINT),
+            Field("charge", T.UINT, "0 discharging, 1 charging, 2 full, 3 fault (charger timer)"),
             Field("usb", T.BOOL, "input supply present (charger PGOOD)"),
             Field("batt", T.BOOL, "literally !usb"),
             # Optional so this CLI still parses a reply from firmware built
