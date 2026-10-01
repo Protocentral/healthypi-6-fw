@@ -141,21 +141,24 @@ if [ "$REQUIRE_RELEASE" = 1 ] || [ -n "$BOOT_CFG" ]; then
   # USB identity. Assert the product VID rather than merely rejecting the
   # Zephyr development one: an unset or mistyped value would otherwise pass.
   #
-  # Deliberately NOT asserted: any relationship between the application and
-  # recovery PIDs. They happen to be equal today because pid.codes allocates one
-  # PID per entry, but nothing depends on that. Both ports enumerate either way,
-  # and a host tells them apart from the PROTOCOL -- the application answers
-  # group 64, the bootloader does not -- which is what `healthypi fw recover`
-  # probes. Pinning the two together here would buy nothing and would break a
-  # future second allocation.
+  # The PID is asserted against HealthyPi 6's pid.codes allocation, on both
+  # images. Nothing *depends* on the application and recovery PIDs being equal --
+  # a host tells the two ports apart by PROTOCOL (the application answers group
+  # 64, the bootloader does not), which is what `healthypi fw recover` probes --
+  # but each must be a PID we hold. A second allocation would be added to
+  # HP6_PIDS, not exempted.
+  HP6_PIDS="0xff91"   # pid.codes 1209/FF91, approved 2026-10-01
+  is_hp6_pid() { case " $HP6_PIDS " in *" $1 "*) return 0 ;; esac; return 1; }
   app_vid="$(val_of CONFIG_HPI_USB_VID "$APP_CFG" | tr 'A-F' 'a-f')"
   app_pid="$(val_of CONFIG_HPI_USB_PID "$APP_CFG" | tr 'A-F' 'a-f')"
   if [ "$app_vid" = "0x2fe3" ]; then
     fail "CONFIG_HPI_USB_VID is still the 0x2FE3 Zephyr development VID"
   elif [ "$app_vid" != "0x1209" ]; then
     fail "CONFIG_HPI_USB_VID is '${app_vid:-<unset>}', expected 0x1209 (pid.codes)"
-  elif [ "$app_pid" = "0x0100" ] || [ -z "$app_pid" ]; then
-    fail "CONFIG_HPI_USB_PID is '${app_pid:-<unset>}' — that is the development default, not an allocated PID"
+  elif [ "$app_pid" = "0xff90" ]; then
+    fail "CONFIG_HPI_USB_PID is 0xFF90 — that is HealthyPi 5's PID; HealthyPi 6 is 0xFF91"
+  elif ! is_hp6_pid "$app_pid"; then
+    fail "CONFIG_HPI_USB_PID is '${app_pid:-<unset>}', expected HealthyPi 6's pid.codes PID ($HP6_PIDS)"
   else
     note "usb: app VID=$app_vid PID=$app_pid"
   fi
@@ -166,15 +169,13 @@ if [ "$REQUIRE_RELEASE" = 1 ] || [ -n "$BOOT_CFG" ]; then
     elif [ "$boot_vid" != "0x1209" ]; then
       fail "MCUboot CONFIG_USB_DEVICE_VID is '${boot_vid:-<unset>}', expected 0x1209"
     else
-      note "usb: recovery VID=$boot_vid PID=$(val_of CONFIG_USB_DEVICE_PID "$BOOT_CFG")"
+      boot_pid="$(val_of CONFIG_USB_DEVICE_PID "$BOOT_CFG" | tr 'A-F' 'a-f')"
+      if ! is_hp6_pid "$boot_pid"; then
+        fail "MCUboot CONFIG_USB_DEVICE_PID is '${boot_pid:-<unset>}', expected HealthyPi 6's pid.codes PID ($HP6_PIDS) -- the recovery port ships too"
+      else
+        note "usb: recovery VID=$boot_vid PID=$boot_pid"
+      fi
     fi
-  fi
-  # Visible on every release build until the allocation is confirmed. Not a
-  # failure: adopting the applied-for PID was a deliberate call.
-  if [ "$app_pid" = "0xff90" ]; then
-    fail "usb: PID 0xFF90 belongs to HealthyPi 5 — HealthyPi 6 uses 0xFF91"
-  elif [ "$app_pid" = "0xff91" ]; then
-    note "usb: PID 0xFF91 is PROVISIONAL — pid.codes allocation unconfirmed as of 2026-09-30"
   fi
 fi
 
