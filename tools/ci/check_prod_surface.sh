@@ -179,6 +179,47 @@ if [ "$REQUIRE_RELEASE" = 1 ] || [ -n "$BOOT_CFG" ]; then
   fi
 fi
 
+# QSPI NOR layout, from the build's final devicetree. The v5 DTS once declared a
+# 128 MiB part on a board carrying 64 MiB, and put LittleFS at 0x4000000; the
+# part ignores address bit 26, so LittleFS silently aliased the M7 update slot
+# and an in-app M7 update hung the device. The driver only logged "Unexpected
+# flash size" and carried on, so the build must refuse instead:
+#   - every QSPI partition ends inside the declared size (any board);
+#   - healthypi6_v5 (and later) declares 64 MiB, the only part fitted.
+APP_DTS="$(dirname "$APP_CFG")/zephyr.dts"
+if [ -f "$APP_DTS" ]; then
+  board="$(val_of CONFIG_BOARD "$APP_CFG" | tr -d '"')"
+  qspi_msgs="$(python3 - "$APP_DTS" "$board" <<'PY'
+import re, sys
+dts, board = open(sys.argv[1]).read(), sys.argv[2]
+m = re.search(r"qspi-nor-flash[^{]*\{", dts)
+if not m:
+    sys.exit(0)                       # no QSPI NOR on this board
+# The node body: match braces from the opening one.
+i, depth = m.end(), 1
+while depth:
+    depth += {"{": 1, "}": -1}.get(dts[i], 0); i += 1
+node = dts[m.end():i]
+size = re.search(r"^\s*size = < (0x[0-9a-f]+|\d+) >;", node, re.M)
+size_bytes = int(size.group(1), 0) // 8
+print(f"NOTE qspi: {size_bytes >> 20} MiB declared")
+if board.startswith("healthypi6_v") and board[len("healthypi6_v"):].isdigit() \
+        and int(board[len("healthypi6_v"):]) >= 5 and size_bytes != 64 << 20:
+    print(f"FAIL qspi: {board} declares {size_bytes >> 20} MiB; every v5+ board carries a 64 MiB part")
+for label, off, ln in re.findall(r"(\w+): partition@[0-9a-f]+ \{[^}]*?reg = < (0x[0-9a-f]+) (0x[0-9a-f]+) >", node):
+    end = int(off, 16) + int(ln, 16)
+    if end > size_bytes:
+        print(f"FAIL qspi: {label} ends at {end:#x}, past the {size_bytes >> 20} MiB part -- it would wrap onto the start of the chip")
+PY
+)"
+  while IFS= read -r line; do
+    case "$line" in
+      NOTE*) note "${line#NOTE }" ;;
+      FAIL*) fail "${line#FAIL }" ;;
+    esac
+  done <<< "$qspi_msgs"
+fi
+
 if [ "$rc" -eq 0 ]; then
   echo "check_prod_surface: OK"
 fi

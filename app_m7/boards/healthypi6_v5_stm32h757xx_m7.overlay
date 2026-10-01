@@ -12,7 +12,7 @@
         watchdog0 = &iwdg1;
     };
 
-    /* Auto-mount a LittleFS at /lfs on the QSPI lfs_partition (64 MB).
+    /* Auto-mount a LittleFS at /lfs on the QSPI lfs_partition (8 MB).
      * Backs persistent settings (/lfs/settings); auto-formats on the first
      * boot if the partition is blank. */
     fstab {

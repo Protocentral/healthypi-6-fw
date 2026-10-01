@@ -79,6 +79,23 @@ flash_factory() {
     done
 
     echo "=== FACTORY PROGRAMMING ==="
+    # Say which build is about to be programmed, and when it was built. The
+    # default prefers build/release/m7s (release.sh output) over build/m7s
+    # (build.sh signed), so a stale release tree silently won over a fresh
+    # signed build -- the gate then refused it with no hint why.
+    local img="$out/app_m7/zephyr/zephyr.signed.bin"
+    if [ -f "$img" ]; then
+        echo "  programming: $out (built $(date -r "$img" '+%Y-%m-%d %H:%M'))"
+        local other=""
+        [ "$out" != "build/m7s" ] && other="build/m7s"
+        [ "$out" != "build/release/m7s" ] && other="${other:-build/release/m7s}"
+        local other_img="$other/app_m7/zephyr/zephyr.signed.bin"
+        if [ -z "${HPI_SIGNED_OUT:-}" ] && [ -f "$other_img" ] && [ "$other_img" -nt "$img" ]; then
+            echo "  ⚠️  $other is NEWER (built $(date -r "$other_img" '+%Y-%m-%d %H:%M'))."
+            echo "     To program that one: HPI_SIGNED_OUT=$other scripts/flash.sh factory"
+            echo "     (or run scripts/release.sh to refresh $out)."
+        fi
+    fi
     if [ -d "$out" ]; then
         HPI_SIGNED_OUT="$out" bash "$HPI_ROOT/tools/ci/check_prod_surface.sh" \
             --release "$out" || {

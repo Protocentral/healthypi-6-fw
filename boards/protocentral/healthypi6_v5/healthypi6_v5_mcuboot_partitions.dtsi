@@ -12,15 +12,15 @@
  *     0x000000  boot_partition   128 KB  MCUboot (1 sector)
  *     0x020000  slot0_partition  896 KB  M7 primary (7 sectors, XIP)
  *
- *   w25q01jv (QSPI NOR, 128 MB, 4 KB sectors)
+ *   qspi_nor (QSPI NOR, 64 MiB, 4 KB sectors) -- nothing may end past 0x4000000
  *     0x000000  slot1_partition      896 KB  M7 secondary (upload staging)
  *     0x100000  m4_staging_partition 384 KB  M4 update staging (NOT an MCUboot slot)
  *
  *   bank2 (0x0810_0000, 1 MB) is the M4's execution region. It is deliberately
  *   NOT a partition here — the M4 is not an MCUboot image; see below.
- *     0x200000  xip_partition    54 MB  was 56 MB @ 0x0 (shifted +2 MB)
- *     0x3800000 model_partition  8 MB   unchanged (inherited)
- *     0x4000000 lfs_partition    64 MB  unchanged (inherited)
+ *     0x200000  xip_partition    46 MB  was 48 MB @ 0x0 (shifted +2 MB)
+ *     0x3000000 model_partition  8 MB   unchanged (inherited)
+ *     0x3800000 lfs_partition    8 MB   unchanged (inherited)
  *
  * The old 2 KB storage_partition (flash0 @ 0xff800) is deleted — it is
  * unreferenced by the app (settings live on /lfs) and sits inside slot0.
@@ -49,7 +49,7 @@
 	};
 };
 
-&w25q01jv {
+&qspi_nor {
 	partitions {
 		/* MUST equal slot0's size: mcuboot's boot_slots_compatible() walks
 		 * primary/secondary sectors in lockstep and rejects a secondary
@@ -82,7 +82,7 @@
 
 		xip_partition: partition@200000 {
 			label = "xip";
-			reg = <0x200000 DT_SIZE_M(54)>;
+			reg = <0x200000 DT_SIZE_M(46)>;
 		};
 	};
 };

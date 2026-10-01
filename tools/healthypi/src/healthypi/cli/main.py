@@ -1527,7 +1527,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_fw_keys)
 
     p = fws.add_parser("info", help="describe a bundle (no device needed)")
-    p.add_argument("--bundle", required=True)
+    p.add_argument("--bundle", required=True,
+                   help="the release .zip, or the folder it was extracted to")
     p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
                    "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.add_argument("--json", action="store_true")
@@ -1535,7 +1536,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = fws.add_parser("update", help="bring a device up to a bundle")
     _add_device_opts(p)
-    p.add_argument("--bundle", required=True)
+    p.add_argument("--bundle", required=True,
+                   help="the release .zip, or the folder it was extracted to")
     p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
                    "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.add_argument("--only", choices=("esp32c6", "m4", "m7"),
@@ -1554,7 +1556,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = fws.add_parser("recover",
                        help="write the M7 to a device already in recovery")
     _add_device_opts(p)
-    p.add_argument("--bundle", required=True)
+    p.add_argument("--bundle", required=True,
+                   help="the release .zip, or the folder it was extracted to")
     p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
                    "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.set_defaults(func=cmd_fw_recover)

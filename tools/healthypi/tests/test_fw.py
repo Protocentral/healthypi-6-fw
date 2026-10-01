@@ -388,3 +388,54 @@ def test_a_private_key_and_its_public_half_share_a_fingerprint(key, tmp_path):
     pub = _public_half(key, tmp_path / "k.pub.pem")
     assert fingerprint(key) == fingerprint(pub)
     assert len(fingerprint(pub)) == 16
+
+
+# --- an extracted bundle (a browser unpacked the .zip) ----------------------
+
+
+def _extract(bundle_path, dest):
+    import zipfile
+
+    dest.mkdir()
+    with zipfile.ZipFile(bundle_path) as zf:
+        zf.extractall(dest)
+    return dest
+
+
+def test_an_extracted_folder_is_a_bundle(bundle_path, key, tmp_path):
+    """Safari's default "Open safe files after downloading" unpacks a .zip.
+    The folder carries the same manifest, signature and images, so it must
+    verify exactly as the zip does."""
+    folder = _extract(bundle_path, tmp_path / "hpi6-firmware-1.0.0")
+    b = fw.Bundle(folder)
+    b.verify(key)
+    assert b.read_image("m7") == fw.Bundle(bundle_path).read_image("m7")
+    assert b.image_sig("m4") == fw.Bundle(bundle_path).image_sig("m4")
+
+
+def test_a_tampered_file_in_the_folder_fails_its_digest(bundle_path, tmp_path):
+    folder = _extract(bundle_path, tmp_path / "x")
+    (folder / "m4.bin").write_bytes(b"\x00" * 2048)
+    with pytest.raises(fw.BundleError, match="digest mismatch"):
+        fw.Bundle(folder).verify(None)
+
+
+def test_a_missing_file_in_the_folder_is_named(bundle_path, tmp_path):
+    folder = _extract(bundle_path, tmp_path / "x")
+    (folder / "m7.bin").unlink()
+    with pytest.raises(fw.BundleError, match="m7.bin is missing"):
+        fw.Bundle(folder).read_image("m7")
+
+
+def test_a_folder_manifest_cannot_reach_outside_the_folder(bundle_path, tmp_path):
+    """Member names come from manifest.json. In folder form they are paths, so
+    one must not be able to point the reader at a file elsewhere."""
+    import json
+
+    (tmp_path / "secret.bin").write_bytes(b"not part of the bundle")
+    folder = _extract(bundle_path, tmp_path / "x")
+    man = json.loads((folder / "manifest.json").read_text())
+    man["images"]["m7"]["file"] = "../secret.bin"
+    (folder / "manifest.json").write_text(json.dumps(man))
+    with pytest.raises(fw.BundleError, match="outside the bundle"):
+        fw.Bundle(folder).read_image("m7")

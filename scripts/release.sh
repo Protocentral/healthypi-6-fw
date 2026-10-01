@@ -67,21 +67,40 @@ echo ""
 FLAVOR=prod HPI_SIGNED_OUT="$M7S" "$HPI_ROOT/scripts/build.sh" signed prod
 "$HPI_ROOT/scripts/build.sh" m4
 
-# The C6 image is OPTIONAL in a bundle: the C6 updates itself over WiFi and has
-# no wired path through the M7, so a missing ESP-IDF must not take the whole
-# release down with it. Warn and carry on.
+# The C6 image is OPTIONAL in a bundle. Nothing applies it yet -- `fw update`
+# skips the C6, and the C6 has no OTA slots until its A/B partition table lands
+# -- so a missing ESP-IDF must not take the whole release down. Carry it when it
+# builds, and say loudly when it does not.
+#
+# The image's file name is read from ESP-IDF's own build metadata rather than
+# guessed: the project name (and so the .bin name) is per-target, and a guessed
+# "healthybridge.bin" never existed, so the image was silently left out of
+# every bundle.
+c6_image() {   # <healthybridge dir> -> path of the HP6 (esp32c6) app image
+    python3 - "$1/build.hp6/project_description.json" <<'PY'
+import json, pathlib, sys
+desc = pathlib.Path(sys.argv[1])
+d = json.loads(desc.read_text())
+if d.get("target") != "esp32c6":
+    sys.exit(f"build.hp6 was built for {d.get('target')!r}, not esp32c6")
+img = pathlib.Path(d["build_dir"]) / d["app_bin"]
+if not img.is_file():
+    sys.exit(f"{img} is missing")
+print(img)
+PY
+}
 if [ "$SKIP_ESP32" = 0 ]; then
     if hb="$(hpi_find_healthybridge 2>/dev/null)"; then
         if ( cd "$hb" && ./hp6.sh build ); then
-            ESP_BIN="$hb/build.hp6/healthybridge.bin"
+            if ! ESP_BIN="$(c6_image "$hb")"; then
+                ESP_BIN=""
+                echo "⚠️  ESP32-C6 built, but its image could not be located (above)."
+            fi
         else
-            echo "⚠️  ESP32-C6 build failed (ESP-IDF not sourced?) — the bundle"
-            echo "   will carry no C6 image. Source ESP-IDF's export.sh and re-run,"
-            echo "   or pass --no-esp32 if that is intentional."
+            echo "⚠️  ESP32-C6 build failed (ESP-IDF not sourced?)."
         fi
     else
-        echo "ℹ️  HealthyBridge repo not found — the bundle will carry no C6 image."
-        echo "   --no-esp32 silences this."
+        echo "ℹ️  HealthyBridge repo not found."
     fi
 fi
 
@@ -111,8 +130,12 @@ BUNDLE_ARGS=(
     --release "$M7_VER" --hw-rev v5
     --key "$HP6_SIGNING_KEY" --created "$CREATED"
 )
-if [ -n "${ESP_BIN:-}" ] && [ -f "${ESP_BIN:-}" ]; then
+if [ -n "${ESP_BIN:-}" ]; then
+    echo "  esp32c6: $ESP_BIN"
     BUNDLE_ARGS+=(--esp32c6 "$ESP_BIN")
+elif [ "$SKIP_ESP32" = 0 ]; then
+    echo "⚠️  This bundle carries NO ESP32-C6 image. Source ESP-IDF's export.sh"
+    echo "   and re-run, or pass --no-esp32 if that is intentional."
 fi
 healthypi fw bundle create "${BUNDLE_ARGS[@]}"
 

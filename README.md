@@ -84,7 +84,7 @@ boards and the enclosure — are in
 - **ESP32-C6** network co-processor for Wi-Fi and BLE, reached over a framed UART
   link at 2 Mbaud with hardware flow control
 - **4" 480×800 touch display** (GC9503V, MIPI-DSI) driven by LVGL
-- **32 MB SDRAM**, **128 MB QSPI NOR**, **microSD**
+- **32 MB SDRAM**, **64 MB QSPI NOR**, **microSD**
 - **USB-C** composite device — two CDC ACM ports, plus mass storage on demand
 - **HealthyLink expansion port** — M.2 connector carrying SPI, UART, I²C, CAN-FD
   and ADC for add-on modules
