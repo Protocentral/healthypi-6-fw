@@ -56,9 +56,11 @@ class Connection:
     transport: SMPSerialTransport | None = None
 
     async def request(self, req, timeout_s: float | None = None):
-        if timeout_s is None:
-            return await self.client.request(req)
-        return await asyncio.wait_for(self.client.request(req), timeout=timeout_s)
+        # Pass the budget to SMPClient itself. Wrapping the call in
+        # asyncio.wait_for() instead left the client's own 2.5 s default in
+        # charge, so every longer budget (the M4 commit's, above all) was
+        # silently cut to 2.5 s.
+        return await self.client.request(req, timeout_s=timeout_s)
 
 
 def candidates() -> list[str]:
