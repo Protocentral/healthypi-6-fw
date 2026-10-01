@@ -770,26 +770,19 @@ static uint8_t assess_signal_quality(const int32_t *samples, size_t count)
     
     int32_t min_val = samples[0];
     int32_t max_val = samples[0];
-    int64_t sum = 0;
     
     for (size_t i = 0; i < count; i++) {
         if (samples[i] < min_val) min_val = samples[i];
         if (samples[i] > max_val) max_val = samples[i];
-        sum += samples[i];
     }
     
-    int32_t mean = sum / count;
     int32_t amplitude = max_val - min_val;
     
-    /* Quality based on amplitude (expected range: 100-5000 for good signal) */
+    /* Quality based on amplitude (expected range: 100-5000 for good signal).
+     * A flat line (poor contact) is the amplitude <= 100 case below. */
     uint8_t quality = 0;
     if (amplitude > 100 && amplitude < 10000) {
         quality = 80;  /* Good amplitude */
-        
-        /* Check for flat line (poor contact) */
-        if (amplitude < 50) {
-            quality = 20;  /* Likely flat line */
-        }
     } else if (amplitude >= 10000) {
         quality = 30;  /* Too noisy or saturated */
     } else {
@@ -987,7 +980,6 @@ static size_t interpolate_rr_intervals(const uint16_t *rr_intervals, size_t rr_c
     }
 
     /* Build cumulative time array and RR values */
-    float32_t t_cumulative = 0;
     size_t rr_idx = 0;
     float32_t t_prev = 0;
     float32_t rr_prev = 0;

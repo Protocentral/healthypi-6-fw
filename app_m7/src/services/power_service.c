@@ -19,6 +19,16 @@ LOG_MODULE_REGISTER(hpi_power, CONFIG_HPI_APP_LOG_LEVEL);
 
 #define POWER_POLL_MS 2000
 
+/* CHG is sampled CHG_SAMPLES times, CHG_SAMPLE_MS apart, on every poll. On a
+ * safety-timer fault the BQ24074 flashes CHG at about 2 Hz, i.e. it holds each
+ * level for ~250 ms. Sampling faster than that guarantees both levels are seen
+ * inside the window; one read per 2 s poll aliased the flashing into random
+ * CHARGING/DISCHARGING and the fault was never reported. */
+#define CHG_SAMPLES    7
+#define CHG_SAMPLE_MS  200
+BUILD_ASSERT(CHG_SAMPLE_MS < 250, "must be under half the ~2 Hz fault-flash period");
+BUILD_ASSERT((CHG_SAMPLES - 1) * CHG_SAMPLE_MS < POWER_POLL_MS, "sampling must fit in a poll");
+
 static const struct device *const fg_dev =
     DEVICE_DT_GET_OR_NULL(DT_NODELABEL(max17048));
 
@@ -89,37 +99,75 @@ static bool pin_asserted(const struct gpio_dt_spec *g)
 /* Charge state, measured from the BQ24074 pins rather than inferred (PGOOD
  * also sees a dumb wall charger, which USB enumeration never can).
  *
- * The truth table, straight off the part's two open-drain outputs:
+ * The truth table, straight off the part's two open-drain outputs (CE is tied
+ * low on this board, so the part is always enabled):
  *
- *   PGOOD  CHG  meaning                                   reported
- *   -----  ---  ----------------------------------------  --------------
- *   no     x    no valid input: running off the cell      DISCHARGING
- *   yes    yes  a charge cycle is running                 CHARGING
- *   yes    no   input present, no cycle: termination,     FULL if the gauge
- *               or suspended (timer/thermal/no battery)   agrees, else
- *                                                         DISCHARGING
+ *   PGOOD  CHG            meaning                               reported
+ *   -----  -------------  ------------------------------------  -----------
+ *   no     x              no valid input: running off the cell  DISCHARGING
+ *   yes    flashing ~2Hz  safety timer expired                  FAULT
+ *   yes    steady low     a charge cycle is running             CHARGING
+ *   yes    steady high    terminated (or a silent refresh       FULL if the
+ *                         top-up: refresh cycles leave CHG      gauge answers,
+ *                         released)                             else
+ *                                                               DISCHARGING
  *
- * PGOOD asserted with CHG deasserted is genuinely ambiguous -- the part does
- * not distinguish "finished" from "gave up" on these two pins -- so only
- * termination is reported as FULL, and only when the gauge agrees.
+ * FULL does NOT depend on the gauge's percentage. It used to require
+ * soc >= 95, and on units whose MAX17048 settles near 91 % after a complete
+ * charge a terminated charger on USB was reported as DISCHARGING, so the UI
+ * never showed "full". The charger, not the gauge, knows when charging is done.
  *
- * `soc_valid` gates FULL and nothing else. It deliberately does NOT feed the
- * result otherwise: the charger's state is a property of the charger, and a
- * fuel gauge that will not answer says nothing about whether current is
- * flowing into the cell. This used to return HPI_CHG_FAULT whenever the gauge
- * read failed, which both mislabelled a gauge problem as a charger fault and
- * -- once the status bar grew a charge bolt -- hid the charging indication on
- * a unit whose gauge was merely unhappy. Gauge health travels in `valid`.
+ * `soc_valid` gates FULL and nothing else: a gauge that answers is what tells
+ * "terminated" apart from "input present but no cell fitted". It deliberately
+ * does NOT feed the result otherwise: the charger's state is a property of the
+ * charger, and a fuel gauge that will not answer says nothing about whether
+ * current is flowing into the cell. This used to return HPI_CHG_FAULT whenever
+ * the gauge read failed, which both mislabelled a gauge problem as a charger
+ * fault and -- once the status bar grew a charge bolt -- hid the charging
+ * indication on a unit whose gauge was merely unhappy. Gauge health travels in
+ * `valid`.
+ *
+ * Not detectable: a battery-temperature (TS) fault holds CHG low, so it reads
+ * as CHARGING. The part reports nothing else on these pins.
  */
-static uint8_t derive_charge_state(bool soc_valid, uint32_t soc, bool pgood, bool chg)
+static uint8_t derive_charge_state(bool soc_valid, bool pgood, bool chg, bool chg_flashing)
 {
     if (!pgood) {
         return HPI_CHG_DISCHARGING;
     }
+    if (chg_flashing) {
+        return HPI_CHG_FAULT;
+    }
     if (chg) {
         return HPI_CHG_CHARGING;
     }
-    return (soc_valid && soc >= 95U) ? HPI_CHG_FULL : HPI_CHG_DISCHARGING;
+    return soc_valid ? HPI_CHG_FULL : HPI_CHG_DISCHARGING;
+}
+
+/* Read CHG CHG_SAMPLES times over ~1.2 s. Returns true if it changed level more
+ * than once -- the timer-fault flash. A single change is an ordinary transition
+ * (e.g. charging -> terminated) landing inside the window. *last is the final
+ * level, which is the one to report when it is not flashing. */
+static bool chg_is_flashing(bool *last)
+{
+    bool prev = pin_asserted(&chg_gpio);
+    int changes = 0;
+
+    if (chg_gpio.port == NULL) {
+        *last = false;
+        return false;
+    }
+    for (int i = 1; i < CHG_SAMPLES; i++) {
+        k_msleep(CHG_SAMPLE_MS);
+        bool now = pin_asserted(&chg_gpio);
+
+        if (now != prev) {
+            changes++;
+        }
+        prev = now;
+    }
+    *last = prev;
+    return changes > 1;
 }
 
 static void power_thread(void *a, void *b, void *c)
@@ -139,12 +187,13 @@ static void power_thread(void *a, void *b, void *c)
         uint32_t vbat = 0, soc = 0;
         int rc = read_gauge(&vbat, &soc);
         bool ok = (rc == 0);
+        bool chg;
+        bool chg_flashing = chg_is_flashing(&chg);   /* takes ~1.2 s */
         bool pgood = pin_asserted(&pgood_gpio);
-        bool chg = pin_asserted(&chg_gpio);
         /* Input power present, from the charger -- not USB enumeration, which
          * only sees a host that talks to us. */
         bool usb = pgood_gpio.port ? pgood : hpi_usb_attached();
-        uint8_t cs = derive_charge_state(ok, soc, pgood, chg);
+        uint8_t cs = derive_charge_state(ok, pgood, chg, chg_flashing);
 
         k_mutex_lock(&g_lock, K_FOREVER);
         g_status.valid = ok;
@@ -169,11 +218,13 @@ static void power_thread(void *a, void *b, void *c)
             if (ok) {
                 LOG_INF("battery: %u mV, %u%%, pgood=%d chg=%d, %s",
                         vbat, soc, (int)pgood, (int)chg,
+                        cs == HPI_CHG_FAULT ? "CHARGER FAULT (safety timer)" :
                         cs == HPI_CHG_FULL ? "full" :
                         cs == HPI_CHG_CHARGING ? "charging" : "discharging");
             } else {
                 LOG_INF("battery: gauge unavailable, pgood=%d chg=%d, %s",
                         (int)pgood, (int)chg,
+                        cs == HPI_CHG_FAULT ? "CHARGER FAULT (safety timer)" :
                         cs == HPI_CHG_CHARGING ? "charging" : "not charging");
             }
             last_state = cs;
@@ -186,7 +237,8 @@ static void power_thread(void *a, void *b, void *c)
             LOG_WRN("fuel gauge read failed (%d); battery shows unavailable", rc);
             logged_fault = true;
         }
-        k_msleep(POWER_POLL_MS);
+        /* CHG sampling already took (CHG_SAMPLES - 1) * CHG_SAMPLE_MS. */
+        k_msleep(POWER_POLL_MS - (chg_gpio.port ? (CHG_SAMPLES - 1) * CHG_SAMPLE_MS : 0));
     }
 }
 
