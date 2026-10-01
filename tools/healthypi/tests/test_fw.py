@@ -210,9 +210,25 @@ def test_signature_is_raw_not_der(key):
     upload."""
     import hashlib
 
-    sig = fw.sign_digest_raw(hashlib.sha256(b"x").digest(), key)
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import (
+        Prehashed,
+        encode_dss_signature,
+    )
+
+    digest = hashlib.sha256(b"x").digest()
+    sig = fw.sign_digest_raw(digest, key)
     assert len(sig) == 64
-    assert sig[0] != 0x30  # a DER SEQUENCE would start here
+    # Prove the layout rather than sniff it: split as r||s, re-encode, verify.
+    # (Checking sig[0] != 0x30 for "not DER" failed 1 run in 256, whenever r
+    # happened to start with 0x30.)
+    r = int.from_bytes(sig[:32], "big")
+    s = int.from_bytes(sig[32:], "big")
+    priv = serialization.load_pem_private_key(key.read_bytes(), password=None)
+    priv.public_key().verify(
+        encode_dss_signature(r, s), digest, ec.ECDSA(Prehashed(hashes.SHA256()))
+    )
 
 
 def test_verify_accepts_a_public_pem(tmp_path, key):
