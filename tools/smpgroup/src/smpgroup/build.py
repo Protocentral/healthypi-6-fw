@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 try:
-    from pydantic import BaseModel, ConfigDict, create_model
+    from pydantic import BaseModel, ConfigDict, create_model, model_validator
     from smp import error as smperror
     from smp.message import ReadRequest, ReadResponse, WriteRequest, WriteResponse
 except ImportError as exc:  # pragma: no cover
@@ -37,18 +37,54 @@ _BASES = {
 }
 
 
-def _nested_model(name: str, fields: tuple[Field, ...]) -> type[BaseModel]:
-    """A pydantic model for a nested CBOR map, forbidding unknown keys too."""
+#: Top-level keys that make a reply an SMP *error*, whatever command it answers:
+#: ``{"rc": n}`` (legacy, ErrorV1) and ``{"err": {"group", "rc"}}`` (ErrorV2).
+_ERROR_KEYS = ("rc", "err")
+
+
+def _tolerant(base: type) -> type:
+    """``base`` with unknown keys dropped instead of rejected.
+
+    A host tool and the firmware it talks to ship separately, so a newer device
+    will send keys an older catalog does not know. Rejecting the whole reply
+    for that is what turned an added telemetry field into a crash.
+
+    The SMP error keys are the exception. ``smpclient`` tries a reply as the
+    success class *first*, so a success class that ignored ``err`` would accept
+    ``{"err": {...}}`` -- every error to a command with no declared reply fields
+    would read as success. Undeclared error keys therefore still fail
+    validation, and the reply falls through to the error classes. A command
+    that declares ``err``/``rc`` itself validates it by type as usual.
+    """
+
+    class Tolerant(base):  # type: ignore[valid-type,misc]
+        model_config = ConfigDict(extra="ignore")
+
+        @model_validator(mode="before")
+        @classmethod
+        def _reject_error_shape(cls, data: Any) -> Any:
+            if isinstance(data, dict):
+                for key in _ERROR_KEYS:
+                    if key in data and key not in cls.model_fields:
+                        raise ValueError(f"reply carries {key!r}: an SMP error, not a success")
+            return data
+
+    Tolerant.__name__ = Tolerant.__qualname__ = f"Tolerant{base.__name__}"
+    return Tolerant
+
+
+def _nested_model(name: str, fields: tuple[Field, ...], strict: bool) -> type[BaseModel]:
+    """A pydantic model for a nested CBOR map, with the reply's key policy."""
     return create_model(  # type: ignore[call-overload,no-any-return]
         name,
-        __config__=ConfigDict(extra="forbid", frozen=True),
-        **{f.name: _annotation(f) for f in fields},
+        __config__=ConfigDict(extra="forbid" if strict else "ignore", frozen=True),
+        **{f.name: _annotation(f, strict=strict) for f in fields},
     )
 
 
-def _annotation(f: Field, owner: str = "") -> tuple[Any, Any]:
+def _annotation(f: Field, owner: str = "", *, strict: bool = True) -> tuple[Any, Any]:
     if f.nested:
-        py: Any = _nested_model(f"{owner}{f.name.title()}", f.nested)
+        py: Any = _nested_model(f"{owner}{f.name.title()}", f.nested, strict)
     else:
         py = f.type.py
     return (py | None, None) if f.optional else (py, ...)
@@ -59,15 +95,25 @@ def _camel(name: str) -> str:
 
 
 def _make(
-    group_id: int, cmd: Command, op: Op, kind: str, fields: tuple[Field, ...]
+    group_id: int,
+    cmd: Command,
+    op: Op,
+    kind: str,
+    fields: tuple[Field, ...],
+    *,
+    strict: bool = True,
 ) -> type:
     base = _BASES[(op, kind)]
+    # Only replies are tolerant. A request is built by us, so an unknown key
+    # there is a caller bug and should still fail loudly.
+    if kind == "resp" and not strict:
+        base = _tolerant(base)
     suffix = "Request" if kind == "req" else "Response"
     cls_name = f"{_camel(cmd.name)}{suffix}"
     model = create_model(
         cls_name,
         __base__=base,
-        **{f.name: _annotation(f, _camel(cmd.name)) for f in fields},
+        **{f.name: _annotation(f, _camel(cmd.name), strict=strict or kind == "req") for f in fields},
     )
     model._GROUP_ID = group_id  # type: ignore[attr-defined]
     model._COMMAND_ID = cmd.cmd_id  # type: ignore[attr-defined]
@@ -109,8 +155,9 @@ class BoundGroup:
     and ``g.transfer_mode_write``.
     """
 
-    def __init__(self, group: Group):
+    def __init__(self, group: Group, *, strict: bool = False):
         self.group = group
+        self.strict = strict
         self._by_name: dict[str, BoundCommand] = {}
 
         err_v1 = type(
@@ -127,7 +174,7 @@ class BoundGroup:
                     (smperror.ErrorV2[int],),
                     {"_GROUP_ID": group.group_id, "_COMMAND_ID": cmd.cmd_id},
                 )
-                Response = _make(group.group_id, cmd, op, "resp", resp_fields)
+                Response = _make(group.group_id, cmd, op, "resp", resp_fields, strict=strict)
                 Request = _make(group.group_id, cmd, op, "req", req_fields)
                 Request._Response = Response  # type: ignore[attr-defined]
                 Request._ErrorV1 = err_v1  # type: ignore[attr-defined]
@@ -159,9 +206,15 @@ class BoundGroup:
         )
 
 
-def build(group: Group) -> BoundGroup:
-    """Generate SMP classes for every routed command in ``group``."""
-    return BoundGroup(group)
+def build(group: Group, *, strict: bool = False) -> BoundGroup:
+    """Generate SMP classes for every routed command in ``group``.
+
+    By default a reply may carry keys the spec does not declare; they are
+    dropped, so a device newer than the spec still parses. ``strict=True``
+    rejects them instead -- for test benches that must notice the spec falling
+    behind the firmware. Requests are always strict.
+    """
+    return BoundGroup(group, strict=strict)
 
 
 def format_error(

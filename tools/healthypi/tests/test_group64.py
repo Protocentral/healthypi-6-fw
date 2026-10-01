@@ -158,16 +158,17 @@ def test_m4fw_begin_signature_is_optional():
     assert set(signed) == {"len", "sha", "sig"}
 
 
-def test_unknown_reply_key_is_rejected():
-    """A device field the catalog does not declare must fail loudly."""
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        _reply(
-            g.stream_status.Response,
-            {"active": True, "ch": 3, "ann": 0, "sent": 1, "dropped": 0, "new": 1},
-            0x0022,
-        )
+def test_newer_firmware_reply_still_parses():
+    """A field the catalog does not know yet is dropped, not fatal. Found on
+    hardware 2026-09-30: firmware that added `usb_att` to the telemetry reply
+    made this tool fail every telemetry read. The drift test, not the runtime,
+    is what keeps the catalog complete."""
+    r = _reply(
+        g.stream_status.Response,
+        {"active": True, "ch": 3, "ann": 0, "sent": 1, "dropped": 0, "new": 1},
+        0x0022,
+    )
+    assert (r.active, r.sent) == (True, 1)
 
 
 def test_error_formatting_uses_the_group_table():
