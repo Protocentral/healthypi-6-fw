@@ -5,7 +5,6 @@
 #
 #   scripts/release.sh                        dev key, for rehearsing the flow
 #   HP6_SIGNING_KEY=/abs/release.pem scripts/release.sh
-#   scripts/release.sh --allow-test-vid       bench-only escape (see below)
 #
 # Output: build/release/
 #   m7s/                       the sysbuild tree (MCUboot + signed app)
@@ -26,11 +25,9 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 cd "$HPI_ROOT"
 
-ALLOW_TEST_VID=0
 SKIP_ESP32=0
 for arg in "$@"; do
     case "$arg" in
-        --allow-test-vid) ALLOW_TEST_VID=1 ;;
         --no-esp32)       SKIP_ESP32=1 ;;
         -h|--help)        sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option $arg" >&2; exit 1 ;;
@@ -89,27 +86,19 @@ fi
 echo ""
 echo "--- shippability check ---"
 CHECK_ARGS=(--release "$M7S")
+# No escape hatch. --allow-test-vid existed to rehearse the pipeline before the
+# pid.codes allocation existed; it is allocated (1209/FF91), and the flag
+# bypassed *any* gate failure, not only the VID.
 if ! bash tools/ci/check_prod_surface.sh "${CHECK_ARGS[@]}"; then
-    if [ "$ALLOW_TEST_VID" = 1 ]; then
-        # Narrow escape so the whole pipeline can be rehearsed before the
-        # pid.codes allocation exists. It does NOT make the output shippable,
-        # and the bundle is renamed so nobody can mistake it for one.
-        echo ""
-        echo "⚠️  --allow-test-vid: proceeding with a NON-SHIPPABLE build."
-        SUFFIX="-TESTVID"
-    else
-        echo ""
-        echo "❌ refusing to build a release bundle."
-        echo "   Fix the violations above. If this is the USB VID and you are"
-        echo "   only rehearsing the flow, re-run with --allow-test-vid."
-        exit 1
-    fi
+    echo ""
+    echo "❌ refusing to build a release bundle. Fix the violations above."
+    exit 1
 fi
 
 # --- 3. package -------------------------------------------------------------
 echo ""
 echo "--- bundle ---"
-BUNDLE="$OUT/hpi6-${M7_VER}${SUFFIX:-}.hpifw"
+BUNDLE="$OUT/hpi6-${M7_VER}.hpifw"
 CREATED="$(git log -1 --format=%cI 2>/dev/null || echo unknown)"
 
 BUNDLE_ARGS=(

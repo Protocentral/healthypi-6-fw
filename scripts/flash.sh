@@ -8,7 +8,6 @@
 #   scripts/flash.sh m4            M4 only
 #   scripts/flash.sh signed        MCUboot + signed M7, from build/m7s
 #   scripts/flash.sh factory       production programming: signed M7 + M4 + checks
-#                                  (--allow-test-vid to rehearse before F7)
 #   scripts/flash.sh esp32 [PORT]  ESP32-C6 (external HealthyBridge repo)
 #
 # DEV AND SIGNED ARE MUTUALLY EXCLUSIVE ON A BOARD. Both link at internal-flash
@@ -75,33 +74,18 @@ flash_factory() {
     local out="${HPI_SIGNED_OUT:-build/release/m7s}"
     [ -d "$out" ] || out="build/m7s"
 
-    local allow_test_vid=0
     for a in "$@"; do
-        case "$a" in
-            --allow-test-vid) allow_test_vid=1 ;;
-            *) echo "unknown factory option '$a'" >&2; exit 1 ;;
-        esac
+        echo "unknown factory option '$a'" >&2; exit 1
     done
 
     echo "=== FACTORY PROGRAMMING ==="
     if [ -d "$out" ]; then
         HPI_SIGNED_OUT="$out" bash "$HPI_ROOT/tools/ci/check_prod_surface.sh" \
             --release "$out" || {
-            # Same narrow escape release.sh carries, and for the same reason: the
-            # gate fails on the unregistered USB VID, whose allocation has
-            # external latency. Without this the factory path itself — programming
-            # order, the option bytes, the EOL self-test — could not be rehearsed
-            # on a bench until the allocation lands, which is exactly backwards.
-            if [ "$allow_test_vid" = 1 ]; then
-                echo ""
-                echo "⚠️  --allow-test-vid: programming a NON-SHIPPABLE build."
-                echo "   Bench rehearsal only. Do NOT ship this unit."
-            else
-                echo "❌ refusing to program: that build is not fit to ship." >&2
-                echo "   Rehearsing before the VID allocation? re-run:" >&2
-                echo "     scripts/flash.sh factory --allow-test-vid" >&2
-                exit 1
-            fi
+            # No escape hatch: --allow-test-vid existed only to rehearse before
+            # the pid.codes allocation, which is now 1209/FF91.
+            echo "❌ refusing to program: that build is not fit to ship." >&2
+            exit 1
         }
     fi
     flash_m4

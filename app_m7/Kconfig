@@ -264,7 +264,8 @@ config HPI_USB_PID
 	hex "USB Product ID (idProduct)"
 	default 0x0100
 	help
-	  Paired with HPI_USB_VID. Set to the assigned pid.codes PID for shipment.
+	  Paired with HPI_USB_VID. Production builds set HealthyPi 6's pid.codes
+	  PID, 0xFF91 (app_m7/prj.prod.conf).
 
 config HPI_USB_MANUFACTURER
 	string "USB manufacturer string descriptor"

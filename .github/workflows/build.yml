@@ -130,9 +130,8 @@ jobs:
         # This used to tolerate a failure on the USB VID while the image still
         # carried a development one. It now carries the pid.codes VID (0x1209)
         # and the check passes outright, so the exemption is gone -- a
-        # shippability violation fails the build. The PID remains provisional
-        # until the pid.codes allocation is confirmed; the check warns about
-        # that without failing.
+        # shippability violation fails the build. The PID is asserted against
+        # HealthyPi 6's pid.codes allocation (1209/FF91).
         run: bash tools/ci/check_prod_surface.sh --release build/m7s
 
       - name: Upload artifacts
