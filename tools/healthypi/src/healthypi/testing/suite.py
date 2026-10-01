@@ -240,6 +240,10 @@ async def run(conn, *, group: str | None = None, include_destructive: bool = Fal
         except Exception as exc:  # noqa: BLE001 -- a crashing case is a failure,
             # not a crashed suite: the remaining cases still carry information.
             res = fail(c.name, f"{type(exc).__name__}: {exc}")
+        # The registered name is the case's identity. A case builds its own
+        # Result, and a label copied from a sibling case (the clock-write case
+        # reported itself as "datetime") made two cases indistinguishable.
+        res.name = c.name
         res.ms = (time.monotonic() - t0) * 1000.0
         report.results.append(res)
         if on_result:

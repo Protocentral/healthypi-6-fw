@@ -144,7 +144,7 @@ async def datetime_rw(conn, g, is_error, fmt_error):
     try:
         from smpclient.requests.os_management import DateTimeRead, DateTimeWrite
     except ImportError:
-        return skip("datetime", "this smpclient build has no datetime request")
+        return skip("datetime write", "this smpclient build has no datetime request")
 
     resp = await conn.request(DateTimeRead())
     if is_error(resp):
@@ -156,21 +156,21 @@ async def datetime_rw(conn, g, is_error, fmt_error):
             # here -- so it is an unmet precondition, which this suite reports
             # as SKIP rather than as a failure someone learns to ignore.
             return skip(
-                "datetime",
+                "datetime write",
                 "device clock has never been set (os/RTC_NOT_SET); set it with "
                 "`healthypi device datetime --set now` and re-run",
             )
-        return _err("datetime", resp, fmt_error, "read refused")
+        return _err("datetime write", resp, fmt_error, "read refused")
     before = getattr(resp, "datetime", None)
 
     stamp = "2026-08-03T12:34:56"
     w = await conn.request(DateTimeWrite(datetime=stamp))
     if is_error(w):
-        return _err("datetime", w, fmt_error, "write refused")
+        return _err("datetime write", w, fmt_error, "write refused")
 
     back = await conn.request(DateTimeRead())
     if is_error(back):
-        return _err("datetime", back, fmt_error, "read-back refused")
+        return _err("datetime write", back, fmt_error, "read-back refused")
     got = getattr(back, "datetime", "") or ""
     if not got.startswith("2026-08-03T12:34:5"):
         return fail("datetime write", f"wrote {stamp}, read back {got!r}")

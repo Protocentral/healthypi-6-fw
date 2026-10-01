@@ -187,6 +187,25 @@ def test_a_crashing_case_fails_without_killing_the_suite():
         S._REGISTRY[:] = saved
 
 
+def test_a_result_carries_its_case_name_whatever_the_case_wrote():
+    """The clock-write case reported its skips as "datetime", the read case's
+    name, so the two were indistinguishable in a report (seen 2026-10-01)."""
+    from healthypi.testing import suite as S
+
+    saved = list(S._REGISTRY)
+    try:
+        S._REGISTRY.clear()
+
+        @S.case("clock write")
+        async def mislabelled(conn, g, is_error, fmt_error):
+            return S.skip("clock", "copied from a sibling case")
+
+        report = asyncio.run(S.run(_FakeConn()))
+        assert [r.name for r in report.results] == ["clock write"]
+    finally:
+        S._REGISTRY[:] = saved
+
+
 def test_destructive_cases_skipped_by_default():
     from healthypi.testing import suite as S
 
