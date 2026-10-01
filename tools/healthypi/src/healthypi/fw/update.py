@@ -452,12 +452,9 @@ async def apply_bundle(
     """
     from ..smp.group64 import fmt_error, g, is_error
 
-    bundle.verify(pubkey)
+    checked = bundle.authenticate(pubkey)
     log(bundle.describe())
-    if pubkey:
-        log(f"  manifest signature verified against {pubkey}")
-    else:
-        log("  note: no pubkey given, manifest signature NOT checked (digests were)")
+    log(f"  {checked}")
 
     result = Result()
 

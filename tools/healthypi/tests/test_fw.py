@@ -320,3 +320,71 @@ def test_m7_downgrade_is_refused_up_front(installed, bundle, refused):
     assert bool(msg) is refused
     if refused:
         assert "fw recover" in msg
+
+
+# --- the release key(s) shipped with the tool -------------------------------
+
+
+def _public_half(private_pem, dest):
+    from cryptography.hazmat.primitives import serialization
+
+    priv = serialization.load_pem_private_key(private_pem.read_bytes(), password=None)
+    dest.write_bytes(
+        priv.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    )
+    return dest
+
+
+@pytest.fixture
+def release_keys(tmp_path, monkeypatch):
+    """Point the shipped-release-key directory at an empty temp dir."""
+    from healthypi.fw import keys as K
+
+    d = tmp_path / "release_keys"
+    d.mkdir()
+    monkeypatch.setattr(K, "RELEASE_KEY_DIR", d)
+    return d
+
+
+def test_no_pubkey_verifies_against_the_shipped_release_key(bundle_path, key, release_keys):
+    _public_half(key, release_keys / "hp6_release_ec256.pub.pem")
+    msg = fw.Bundle(bundle_path).authenticate(None)
+    assert "release key" in msg
+
+
+def test_a_bundle_signed_by_another_key_is_refused_without_pubkey(
+    bundle_path, other_key, release_keys
+):
+    """The point of shipping the key: without --pubkey, a repackaged bundle used
+    to pass on digests alone."""
+    _public_half(other_key, release_keys / "hp6_release_ec256.pub.pem")
+    with pytest.raises(fw.BundleError, match="pass --pubkey"):
+        fw.Bundle(bundle_path).authenticate(None)
+
+
+def test_either_of_two_release_keys_is_accepted(bundle_path, key, other_key, release_keys):
+    """Primary + backup: a bundle signed by the backup key still verifies."""
+    _public_half(other_key, release_keys / "a_primary.pub.pem")
+    _public_half(key, release_keys / "b_backup.pub.pem")
+    assert "release key" in fw.Bundle(bundle_path).authenticate(None)
+
+
+def test_no_shipped_key_checks_digests_and_says_so(bundle_path, release_keys):
+    msg = fw.Bundle(bundle_path).authenticate(None)
+    assert "NOT checked" in msg
+
+
+def test_explicit_pubkey_wins_over_the_shipped_key(bundle_path, key, other_key, release_keys):
+    """An owner who re-keyed their unit, or the bench with a dev key."""
+    _public_half(other_key, release_keys / "hp6_release_ec256.pub.pem")
+    assert "verified against" in fw.Bundle(bundle_path).authenticate(key)
+
+
+def test_a_private_key_and_its_public_half_share_a_fingerprint(key, tmp_path):
+    from healthypi.fw.keys import fingerprint
+
+    pub = _public_half(key, tmp_path / "k.pub.pem")
+    assert fingerprint(key) == fingerprint(pub)
+    assert len(fingerprint(pub)) == 16

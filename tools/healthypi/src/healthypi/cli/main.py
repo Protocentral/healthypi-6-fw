@@ -537,6 +537,30 @@ def _bundle_or_fail(args):
         return None, _fail(str(exc))
 
 
+def cmd_fw_keys(args) -> int:
+    """The release public keys this tool trusts, or one key's fingerprint."""
+    try:
+        from ..fw.keys import RELEASE_KEY_DIR, fingerprint, release_public_keys
+    except ImportError:
+        return _fail("this command needs `cryptography`: pip install 'protocentral-healthypi[device]'", 4)
+    if args.key:
+        from pathlib import Path
+
+        try:
+            print(f"{fingerprint(Path(args.key))}  {args.key}")
+        except (OSError, ValueError) as exc:
+            return _fail(f"{args.key}: not a PEM key ({exc})")
+        return 0
+    keys = release_public_keys()
+    if not keys:
+        print(f"no release public key shipped in {RELEASE_KEY_DIR}")
+        print("  bundles are checked for digests only unless --pubkey is given")
+        return 0
+    for k in keys:
+        print(f"{fingerprint(k)}  {k.name}")
+    return 0
+
+
 def cmd_fw_info(args) -> int:
     from ..fw import BundleError
 
@@ -544,17 +568,14 @@ def cmd_fw_info(args) -> int:
     if bundle is None:
         return err
     try:
-        bundle.verify(args.pubkey)
+        checked = bundle.authenticate(args.pubkey)
     except BundleError as exc:
         return _fail(str(exc))
     if getattr(args, "json", False):
         _emit(args, bundle.manifest)
         return 0
     print(bundle.describe())
-    if args.pubkey:
-        print(f"  manifest signature verified against {args.pubkey}")
-    else:
-        print("  digests OK (pass --pubkey to check the manifest signature too)")
+    print(f"  {checked}")
     return 0
 
 
@@ -1501,16 +1522,22 @@ def build_parser() -> argparse.ArgumentParser:
     fw = sub.add_parser("fw", help="firmware bundles, update and recovery")
     fws = fw.add_subparsers(dest="verb", metavar="<verb>")
 
+    p = fws.add_parser("keys", help="release keys this tool trusts; or a key's fingerprint")
+    p.add_argument("--key", help="print this PEM key's fingerprint instead")
+    p.set_defaults(func=cmd_fw_keys)
+
     p = fws.add_parser("info", help="describe a bundle (no device needed)")
     p.add_argument("--bundle", required=True)
-    p.add_argument("--pubkey", help="PEM key to verify the manifest signature")
+    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+                   "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_fw_info)
 
     p = fws.add_parser("update", help="bring a device up to a bundle")
     _add_device_opts(p)
     p.add_argument("--bundle", required=True)
-    p.add_argument("--pubkey", help="PEM key to verify the manifest signature")
+    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+                   "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.add_argument("--only", choices=("esp32c6", "m4", "m7"),
                    help="restrict to one processor")
     p.add_argument("--force", action="store_true",
@@ -1528,7 +1555,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="write the M7 to a device already in recovery")
     _add_device_opts(p)
     p.add_argument("--bundle", required=True)
-    p.add_argument("--pubkey")
+    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+                   "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.set_defaults(func=cmd_fw_recover)
 
     bnd = fws.add_parser("bundle", help="build a release bundle")

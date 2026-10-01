@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .keys import KeyError_, sign_digest_raw, verify_digest_raw
+from .keys import KeyError_, fingerprint, release_public_keys, sign_digest_raw, verify_digest_raw
 
 MANIFEST_NAME = "manifest.json"
 SIGNATURE_NAME = "manifest.sig"
@@ -213,6 +213,43 @@ class Bundle:
             raise BundleError(
                 f"{self.path}: manifest signature does NOT verify against {pubkey}"
             )
+
+    def authenticate(self, pubkey: Path | None = None) -> str:
+        """Check digests, then the manifest signature, and say what was checked.
+
+        With `pubkey`, the signature must verify against it -- the bench case,
+        a dev key, or an owner who re-keyed their unit. Without it, against the
+        HealthyPi 6 release key(s) shipped in this package; any one may match
+        (primary + backup). Only when the package ships no release key is the
+        signature left unchecked, and the returned line says so.
+
+        Every device-facing command goes through here, so "no --pubkey" can no
+        longer mean "anyone's repackaged bundle is accepted".
+        """
+        if pubkey is not None:
+            self.verify(Path(pubkey))
+            return f"manifest signature verified against {pubkey} ({fingerprint(Path(pubkey))})"
+        keys = release_public_keys()
+        if not keys:
+            self.verify(None)
+            return (
+                "note: this healthypi carries no release public key, so the manifest "
+                "signature was NOT checked (digests were). Pass --pubkey to check it."
+            )
+        self.verify(None)  # digests first: a corrupt download is the common case
+        for key in keys:
+            try:
+                self.verify(key)
+            except BundleError:
+                continue
+            return f"manifest signature verified: HealthyPi 6 release key {fingerprint(key)}"
+        known = ", ".join(fingerprint(k) for k in keys)
+        raise BundleError(
+            f"{self.path}: manifest signature does not verify against the HealthyPi 6 "
+            f"release key(s) shipped with this tool ({known}).\n"
+            "  If you built and signed this bundle yourself (your own key, or the dev "
+            "key), pass --pubkey <that key>.pem."
+        )
 
     def read_image(self, name: str) -> bytes:
         entry = self.images().get(name)
