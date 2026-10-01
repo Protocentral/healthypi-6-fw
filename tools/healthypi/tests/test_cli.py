@@ -338,3 +338,11 @@ def test_no_docs_or_source_invoke_the_removed_alias():
         "the CLI is invoked as `healthypi`; `hpi` is the device's own shell:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_device_reset_is_a_verb():
+    """The updater's hints say `healthypi device reset`; it must exist."""
+    from healthypi.cli.main import build_parser, cmd_device_reset
+
+    args = build_parser().parse_args(["device", "reset", "--port", "/dev/null"])
+    assert args.func is cmd_device_reset

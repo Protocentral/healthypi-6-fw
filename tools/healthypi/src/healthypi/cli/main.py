@@ -146,6 +146,43 @@ def _conn_enable(args) -> int:
     return _run_device(args, lambda conn, g: conn.request(g["conn_enable"](radios=mask)))
 
 
+def cmd_device_reset(args) -> int:
+    """Reboot the device (stock MCUmgr os reset).
+
+    Needed in the field more often than it looks: a committed M4 image waits
+    for a reset, and an M7 install that leaves the M4 unbound is fixed by one.
+    Without this verb the only instruction available was "power-cycle it".
+    """
+    import asyncio
+
+    try:
+        from smpclient.requests.os_management import ResetWrite
+    except ImportError:
+        return _fail(
+            "this command needs the device stack, which is not installed.\n"
+            "  Run: pip install 'healthypi[device]'",
+            4,
+        )
+
+    async def reset(conn, g):
+        from ..smp.group64 import is_error
+
+        try:
+            resp = await conn.request(ResetWrite(), timeout_s=3.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            resp = None  # rebooted before the reply got out: that is success
+        if resp is not None and is_error(resp):
+            return resp  # a refusal: _run_device names it and exits non-zero
+        print(
+            "reset sent; the device re-enumerates in a few seconds "
+            "(its M4 reports a version again ~10 s after boot).",
+            file=sys.stderr,
+        )
+        return None
+
+    return _run_device(args, reset)
+
+
 def cmd_device_datetime(args) -> int:
     """Read, or set, the on-device RTC.
 
@@ -963,6 +1000,10 @@ def build_parser() -> argparse.ArgumentParser:
         p = devs.add_parser(verb, help=helptext)
         _add_device_opts(p)
         p.set_defaults(func=_simple(cmd))
+
+    p = devs.add_parser("reset", help="reboot the device")
+    _add_device_opts(p)
+    p.set_defaults(func=cmd_device_reset)
 
     p = devs.add_parser("datetime", help="read or set the on-device clock")
     _add_device_opts(p)

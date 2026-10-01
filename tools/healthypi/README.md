@@ -106,6 +106,7 @@ healthypi catalog                     # every group-64 command, and its real sta
 healthypi hp6 verify REC0001.HP6      # CRCs, gaps, counters
 healthypi hp6 to-csv REC0001.HP6 out/
 healthypi device info                 # port autodetected
+healthypi device reset                # reboot (e.g. after an M4 commit)
 hpi telemetry --json
 healthypi stream start --ch 0x03      # ECG + PPG
 healthypi record start --name walk

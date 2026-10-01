@@ -340,8 +340,8 @@ async def _apply_m4(
             raise UpdateError(f"M4 abort of the stale upload failed: {fmt_error(resp)}")
     elif status.st == _M4FW_COMMITTED:
         raise UpdateError(
-            "M4: a committed image is waiting for a reset. Power-cycle the "
-            "device and run the update again."
+            "M4: a committed image is waiting for a reset. Run "
+            "`healthypi device reset`, then the update again."
         )
 
     log(
