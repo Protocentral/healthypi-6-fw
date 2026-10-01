@@ -5,6 +5,7 @@
 #
 #   scripts/release.sh                        dev key, for rehearsing the flow
 #   HP6_SIGNING_KEY=/abs/release.pem scripts/release.sh
+#   HP6_SIGNING_KEY=/abs/my_key.pem scripts/release.sh --own-key   (a re-keyed unit)
 #
 # Output: build/release/
 #   m7s/                       the sysbuild tree (MCUboot + signed app)
@@ -26,9 +27,11 @@ set -euo pipefail
 cd "$HPI_ROOT"
 
 SKIP_ESP32=0
+OWN_KEY=0
 for arg in "$@"; do
     case "$arg" in
         --no-esp32)       SKIP_ESP32=1 ;;
+        --own-key)        OWN_KEY=1 ;;
         -h|--help)        sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option $arg" >&2; exit 1 ;;
     esac
@@ -115,6 +118,27 @@ healthypi fw bundle create "${BUNDLE_ARGS[@]}"
 
 # --- 4. verify what was just written ---------------------------------------
 healthypi fw info --bundle "$BUNDLE" --pubkey "$HP6_SIGNING_KEY"
+# An OFFICIAL release must also verify against the release public key(s) the
+# published tools ship with -- otherwise every user's `healthypi fw update`
+# refuses it. Not for the dev key (the tools never trust it), and not with
+# --own-key: an owner who re-keyed their unit signs with a key the tools do not
+# ship, and applies with --pubkey (.github/SECURITY.md, "Your device, your key").
+REL_KEYS="$HPI_ROOT/tools/healthypi/src/healthypi/fw/release_keys"
+if [ "$OWN_KEY" = 1 ]; then
+    echo "  --own-key: signed with your key; apply with --pubkey $HP6_SIGNING_KEY"
+elif [ "$HP6_SIGNING_KEY" != "$HPI_ROOT/keys/hp6_dev_ec256.pem" ]; then
+    if ! ls "$REL_KEYS"/*.pub.pem > /dev/null 2>&1; then
+        echo "⚠️  no release public key in $REL_KEYS -- the published tools cannot"
+        echo "   verify this release. Add it (keys/README.md) before publishing."
+    elif ! healthypi fw info --bundle "$BUNDLE" > /dev/null; then
+        echo "❌ this bundle does not verify against the release public key(s) in"
+        echo "   $REL_KEYS -- signed with the wrong key?"
+        echo "   (Signing for your own re-keyed unit? Re-run with --own-key.)"
+        exit 1
+    else
+        echo "  verifies against the release key(s) shipped with the healthypi tools"
+    fi
+fi
 
 echo ""
 echo "✅ release ready: $BUNDLE"
