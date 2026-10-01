@@ -259,3 +259,38 @@ def test_generated_requests_are_byte_identical_to_the_legacy_classes(
     assert new.header.group_id == old.header.group_id == 64
     assert new.header.command_id == old.header.command_id
     assert new.header.op == old.header.op
+
+
+def test_unparseable_reply_names_the_command_not_a_TypeError():
+    """smpclient mishandles a reply that fits no schema and raises
+    `TypeError: ValidationError.__new__() missing ... 'line_errors'`, naming
+    neither the command nor the cause. Seen on hardware 2026-09-30 and
+    2026-10-01."""
+    import asyncio
+
+    from healthypi.transport.serial_smp import Connection, UnparseableReplyError
+
+    class Client:
+        async def request(self, req, timeout_s=None):
+            raise TypeError("ValidationError.__new__() missing 1 required positional argument: 'line_errors'")
+
+    conn = Connection(client=Client(), port="/dev/null")
+    with pytest.raises(UnparseableReplyError) as exc:
+        asyncio.run(conn.request(g.m4fw_begin(len=1, sha=b"\x00" * 32)))
+    msg = str(exc.value)
+    assert "M4FwBegin" in msg and "command 160" in msg
+    assert "healthypi device versions" in msg and "smp_add_cmd_err" in msg
+
+
+def test_an_unrelated_TypeError_is_not_relabelled():
+    import asyncio
+
+    from healthypi.transport.serial_smp import Connection
+
+    class Client:
+        async def request(self, req, timeout_s=None):
+            raise TypeError("a genuine programming error")
+
+    conn = Connection(client=Client(), port="/dev/null")
+    with pytest.raises(TypeError, match="genuine"):
+        asyncio.run(conn.request(g.device_info()))

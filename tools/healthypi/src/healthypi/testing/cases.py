@@ -116,7 +116,7 @@ async def datetime_read(conn, g, is_error, fmt_error):
     """Stock `os` datetime, READ ONLY.
 
     The write half lives in its own destructive case. It used to run here, on
-    every default `hpi test run`, and it set the clock to a hardcoded date in
+    every default `healthypi test run`, and it set the clock to a hardcoded date in
     the past and never put it back -- so a suite advertised as "read-only by
     default" silently backdated the device, and any recording started just
     afterwards carried a wrong wall-clock timestamp.
@@ -442,7 +442,7 @@ async def soak(conn, iterations: int, on_progress=None) -> tuple[int, list[float
     """Tight-loop `os echo`, returning (errors, latencies_ms).
 
     Kept out of the case registry: it takes a count, runs for minutes, and is
-    driven explicitly by `hpi test soak`.
+    driven explicitly by `healthypi test soak`.
     """
     from smpclient.requests.os_management import EchoWrite
 

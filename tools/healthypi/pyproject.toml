@@ -5,8 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "protocentral-healthypi"
 version = "0.1.0"
-# Distribution name is protocentral-healthypi; the import package is
-# `healthypi` and the console scripts are `healthypi` / `hpi`.
+# Distribution name is protocentral-healthypi; the import package and the
+# single console script are both `healthypi`.
+#
+# There is deliberately NO `hpi` alias. The firmware's own Zephyr shell
+# registers a root command called `hpi` (app_m7/src/control/shell_hpi), which
+# runs ON the device and is a different program with different verbs. One name
+# for two of them made written instructions ambiguous about which machine was
+# meant to run the command.
 description = "Host library and CLI for HealthyPi 6 — .HP6 decoding, MCUmgr group 64, firmware update"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +33,6 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 healthypi = "healthypi.cli.main:main"
-hpi = "healthypi.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

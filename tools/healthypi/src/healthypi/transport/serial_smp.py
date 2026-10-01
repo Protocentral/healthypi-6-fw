@@ -44,6 +44,42 @@ class NoDeviceError(RuntimeError):
     """No port answered SMP."""
 
 
+class UnparseableReplyError(RuntimeError):
+    """The device answered something that fits none of the command's schemas.
+
+    Two causes produce it in practice:
+
+    * the catalog declares a reply field this firmware does not send -- a
+      firmware/host version mismatch, or a catalog error (seen 2026-10-01: the
+      catalog gave m4fw_begin's empty reply an `off` field). Extra keys no longer
+      cause it; replies tolerate fields the catalog does not know.
+    * a handler returned a group-64 error code (>= 256) as its return value
+      instead of encoding it with ``smp_add_cmd_err()``, which puts the number
+      in the protocol-wide ``rc`` field where it does not exist.
+
+    It exists because the failure is otherwise close to undiagnosable: smpclient
+    raises ``pydantic.ValidationError`` incorrectly while handling it and the
+    user sees ``TypeError: ValidationError.__new__() missing 1 required
+    positional argument`` -- which names neither the device, nor the command,
+    nor the reply.
+    """
+
+
+def _reply_error(req, exc: Exception) -> "UnparseableReplyError":
+    cmd = getattr(type(req), "_COMMAND_ID", "?")
+    grp = getattr(type(req), "_GROUP_ID", "?")
+    name = type(req).__name__.removesuffix("Request")
+    return UnparseableReplyError(
+        f"the device's reply to {name} (group {grp}, command {cmd}) matches "
+        f"neither its success nor its error schema ({type(exc).__name__}).\n"
+        "  Most likely the host tool and the firmware disagree about this reply: "
+        "check that healthypi matches the firmware version (healthypi device "
+        "versions).\n"
+        "  If they match, it is a firmware bug -- usually a handler that returned "
+        "a group error code directly instead of via smp_add_cmd_err()."
+    )
+
+
 @dataclass(slots=True)
 class Connection:
     """A live CDC 1 session."""
@@ -60,7 +96,15 @@ class Connection:
         # asyncio.wait_for() instead left the client's own 2.5 s default in
         # charge, so every longer budget (the M4 commit's, above all) was
         # silently cut to 2.5 s.
-        return await self.client.request(req, timeout_s=timeout_s)
+        try:
+            return await self.client.request(req, timeout_s=timeout_s)
+        except (TypeError, ValueError) as exc:
+            # smpclient raises these out of its own error handling when a reply
+            # matches none of a request's models. Re-raise as something that
+            # says which command, and where to look.
+            if isinstance(exc, TypeError) and "ValidationError" not in str(exc):
+                raise
+            raise _reply_error(req, exc) from exc
 
 
 def candidates() -> list[str]:

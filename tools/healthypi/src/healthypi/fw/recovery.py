@@ -63,7 +63,7 @@ async def enter_recovery(target: Target, *, log: Log = _stdout) -> None:
     log("Recovery armed; the device is rebooting into MCUboot serial recovery.")
     log('It will re-enumerate as a SINGLE CDC port named "HealthyPi 6 Recovery"')
     log("— NOT the port you just used. Find it, then:")
-    log("    hpi fw recover --port <recovery-port> --bundle <file>")
+    log("    healthypi fw recover --port <recovery-port> --bundle <file>")
     log("If you pick the wrong port, recover says so rather than failing")
     log("obscurely; it identifies the mode from the protocol, not the USB IDs.")
 
@@ -112,8 +112,8 @@ async def recover(bundle: Bundle, target: Target, *, pubkey=None, log: Log = _st
             if not is_error(probe):
                 raise UpdateError(
                     f"{conn.port} is the APPLICATION, not the bootloader.\n"
-                    "  Run `hpi fw update` to update normally, or "
-                    "`hpi fw enter-recovery` first if that is what you meant."
+                    "  Run `healthypi fw update` to update normally, or "
+                    "`healthypi fw enter-recovery` first if that is what you meant."
                 )
         except asyncio.TimeoutError:
             pass  # no group 64 -> bootloader, which is what we want
@@ -136,4 +136,4 @@ async def recover(bundle: Bundle, target: Target, *, pubkey=None, log: Log = _st
 
     log("Reset sent. The device should now boot the application and enumerate")
     log("as the two-port composite again. If the M4 also needs updating, run")
-    log("`hpi fw update` against the application's CDC 1 port.")
+    log("`healthypi fw update` against the application's CDC 1 port.")

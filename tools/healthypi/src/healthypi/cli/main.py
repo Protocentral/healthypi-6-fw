@@ -80,6 +80,8 @@ def _run_device(args, coro_factory) -> int:
                     return _fail(fmt_error(resp), 2)
                 _emit(args, _model_dict(resp))
                 return 0
+        except serial_smp.UnparseableReplyError as exc:
+            return _fail(str(exc), 2)
         except serial_smp.NoDeviceError as exc:
             return _fail(str(exc), 3)
         except (TimeoutError, asyncio.TimeoutError):
@@ -203,6 +205,8 @@ def cmd_device_datetime(args) -> int:
                 dt = getattr(resp, "datetime", None)
                 _emit(args, {"datetime": dt}, f"RTC: {dt}")
                 return 0
+        except serial_smp.UnparseableReplyError as exc:
+            return _fail(str(exc), 2)
         except serial_smp.NoDeviceError as exc:
             return _fail(str(exc), 3)
         except (TimeoutError, asyncio.TimeoutError):
@@ -425,7 +429,7 @@ def cmd_stream_capture(args) -> int:
     if not raw:
         return _fail(
             f"no data on {args.stream_port}. Is streaming enabled "
-            "(hpi stream start) and is this CDC 0?"
+            "(healthypi stream start) and is this CDC 0?"
         )
     hp6.wrap_capture(raw, args.out, hp6.new_header(session_name=args.name or "capture"))
     rep = hp6.verify(args.out)
@@ -578,6 +582,8 @@ def _fw_device(args, coro_factory) -> int:
     try:
         return asyncio.run(coro_factory(target))
     except UpdateError as exc:
+        return _fail(str(exc), 2)
+    except serial_smp.UnparseableReplyError as exc:
         return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
@@ -801,6 +807,8 @@ def cmd_test_run(args) -> int:
 
     try:
         return asyncio.run(_main())
+    except serial_smp.UnparseableReplyError as exc:
+        return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
     except KeyboardInterrupt:
@@ -852,6 +860,8 @@ def cmd_test_soak(args) -> int:
 
     try:
         return asyncio.run(_main())
+    except serial_smp.UnparseableReplyError as exc:
+        return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
     except KeyboardInterrupt:
@@ -1013,8 +1023,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_simple("sd_status"))
 
     rec.epilog = (
-        "Recordings are retrieved over USB mass storage: `hpi transfer arm`, "
-        "copy from the mounted disk, then `hpi transfer disarm`. Firmware 1.0.0 "
+        "Recordings are retrieved over USB mass storage: `healthypi transfer arm`, "
+        "copy from the mounted disk, then `healthypi transfer disarm`. Firmware 1.0.0 "
         "has no file-download command."
     )
 
@@ -1278,7 +1288,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = build_parser()
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):
-        # `hpi`, or `hpi hp6` with no verb: show the relevant help.
+        # `healthypi`, or `healthypi hp6` with no verb: show the relevant help.
         if getattr(args, "group", None):
             for action in ap._subparsers._group_actions[0].choices.items():  # type: ignore[union-attr]
                 if action[0] == args.group:
