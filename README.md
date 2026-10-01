@@ -299,7 +299,6 @@ end to end.
 | **Files derived from or co-copyright with upstream** (Zephyr, Linaro, ST, Nordic, NXP, Espressif) | Apache-2.0 — retained, and identified per file |
 | **Bundled fonts** | SIL Open Font License 1.1 |
 | **Documentation** | CC BY-SA 4.0 |
-| **Hardware** (separate repository, [protocentral_healthypi6_hardware](https://github.com/Protocentral/protocentral_healthypi6_hardware)) | CERN-OHL-P v2 |
 
 Every source file written for this project carries an `SPDX-License-Identifier`,
 and **that identifier is authoritative for that file**. Third-party components,
