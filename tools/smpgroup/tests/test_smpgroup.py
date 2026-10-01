@@ -399,6 +399,29 @@ def test_error_formatting():
     assert format_error(DEMO, FakeErr()) == "HW_FAULT (257) -- hardware"
 
 
+def test_success_with_an_err_field_is_not_an_error():
+    """A success reply may legitimately carry a field named `err`. Deciding by
+    `hasattr` called group 64's m4fw_status an error on every signed device,
+    which made `healthypi fw update` refuse every M4 update."""
+    from smpgroup.build import build, is_error
+
+    grp = Group(
+        group_id=64,
+        name="status_demo",
+        commands=(
+            Command(0x0001, "status", (R,), response=(Field("st", T.UINT), Field("err", T.INT))),
+        ),
+    )
+    cmd = build(grp).status
+
+    ok = _reply(cmd.Response, {"st": 0, "err": 0}, 0x0001, smp.header.OP.READ_RSP)
+    assert ok.err == 0
+    assert not is_error(ok)
+
+    err = _reply(cmd.ErrorV2, {"err": {"group": 64, "rc": 257}}, 0x0001, smp.header.OP.READ_RSP)
+    assert is_error(err)
+
+
 def test_error_from_another_group_is_not_named_from_ours():
     """An `err` map says which group the code belongs to. A code from a stock
     group means nothing in this group's table, and reading it there is how

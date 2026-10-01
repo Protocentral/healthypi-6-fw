@@ -213,4 +213,17 @@ def format_error(
 
 
 def is_error(response: Any) -> bool:
+    """True for an SMP error reply, decided by type, never by field name.
+
+    A group may declare a success field called ``err`` or ``rc`` -- group 64's
+    ``m4fw_status`` reports the last commit's ``err`` -- so ``hasattr`` alone
+    would call every such success an error. Every generated error class
+    derives from ``smp.error.ErrorV1``/``ErrorV2``, and every generated success
+    class from a ``smp.message`` response, so the type settles it. Only an
+    object that is neither (a test double) falls back to the field check.
+    """
+    if isinstance(response, (smperror.ErrorV1, smperror.ErrorV2)):
+        return True
+    if isinstance(response, (ReadResponse, WriteResponse)):
+        return False
     return hasattr(response, "err") or hasattr(response, "rc")
