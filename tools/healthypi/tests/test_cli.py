@@ -367,3 +367,20 @@ def test_device_reset_is_a_verb():
 
     args = build_parser().parse_args(["device", "reset", "--port", "/dev/null"])
     assert args.func is cmd_device_reset
+
+
+def test_version_has_a_single_source():
+    """pyproject.toml is the only place the version is written; the package and
+    the CLI report what the installed distribution says."""
+    import tomllib
+    from importlib.metadata import version
+    from pathlib import Path
+
+    import healthypi
+
+    declared = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )["project"]["version"]
+    init = (Path(healthypi.__file__)).read_text()
+    assert declared not in init, "the version is restated in __init__.py"
+    assert healthypi.__version__ == version("protocentral-healthypi")
