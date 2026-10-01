@@ -470,8 +470,8 @@ async def apply_bundle(
         conn = await _reset_and_reconnect(conn, target, log)
         after = await _fw_versions(conn, g, is_error, fmt_error)
 
-        # Updating BOTH cores in one cycle costs the M4 its IPC bind, and it takes
-        # a second reset to get it back.
+        # Installing a new M7 costs the M4 its IPC bind, and it takes a second
+        # reset to get it back -- whether or not the M4 was updated too.
         #
         # Why: the M4 has no bootloader. It self-delays ~7 s after a chip reset and
         # binds RPMSG exactly once, because static vrings cannot re-bind against an
@@ -484,12 +484,23 @@ async def apply_bundle(
         #
         # The second reset has no image to copy (slot 1 is already consumed, swap
         # type none), so the cores boot together and bind normally. Reproduced and
-        # verified on v5, F8 2026-07-25. An M4-only update never hits this.
-        if "m4" in plan and "m7" in plan:
-            m4_want = (bundle.images().get("m4") or {}).get("version", "")
-            if not same_version(after.get("m4") or "", m4_want):
+        # verified on v5, F8 2026-07-25 (both cores) and 2026-10-01 (M7 only --
+        # the cause is the M7 install, so the M4 being in the plan is irrelevant).
+        # An M4-only update has no MCUboot copy and never hits this.
+        if "m7" in plan:
+            m4_want = (
+                (bundle.images().get("m4") or {}).get("version", "")
+                if "m4" in plan
+                else installed.get("m4") or ""
+            )
+            m4_now = after.get("m4") or ""
+            # An empty m4 version is the unbound case itself: the M7 learns it
+            # from the M4 over IPC. A device with no M4 version before the
+            # update either had no M4 image or was already unbound -- reset
+            # anyway; a second reset is harmless.
+            if not m4_now or (m4_want and not same_version(m4_now, m4_want)):
                 log(
-                    "\nM4 did not bind after the combined update (expected — "
+                    "\nM4 did not bind after the M7 install (expected — "
                     "MCUboot's image copy delayed the M7 past the M4's one-shot "
                     "RPMSG bind). Resetting once more to re-pair the cores…"
                 )
