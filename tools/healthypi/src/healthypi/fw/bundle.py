@@ -147,17 +147,33 @@ def create(
 
 
 class Bundle:
+    """A release bundle: the zip, or the folder it was extracted to.
+
+    The folder form exists because browsers unpack downloads -- Safari's
+    default "Open safe files after downloading" turns hpi6-firmware-*.zip into
+    a directory -- and a user holding that directory has everything the zip
+    had. Nothing is trusted more for it: the digests in manifest.json and the
+    manifest signature are checked exactly as for the zip.
+    """
+
     def __init__(self, path: Path):
         self.path = Path(path)
-        try:
-            self._zf = zipfile.ZipFile(self.path)
-        except FileNotFoundError:
-            raise BundleError(f"{self.path}: no such file") from None
-        except zipfile.BadZipFile as exc:
-            raise BundleError(f"{self.path} is not a firmware bundle (zip): {exc}") from exc
+        self._zf: zipfile.ZipFile | None = None
+        self._dir: Path | None = None
+        if self.path.is_dir():
+            self._dir = self.path.resolve()
+        else:
+            try:
+                self._zf = zipfile.ZipFile(self.path)
+            except FileNotFoundError:
+                raise BundleError(f"{self.path}: no such file") from None
+            except zipfile.BadZipFile as exc:
+                raise BundleError(
+                    f"{self.path} is not a firmware bundle (zip): {exc}"
+                ) from exc
 
         try:
-            self.raw_manifest = self._zf.read(MANIFEST_NAME)
+            self.raw_manifest = self._read(MANIFEST_NAME)
         except KeyError:
             raise BundleError(f"{self.path} has no {MANIFEST_NAME}") from None
         self.manifest = json.loads(self.raw_manifest)
@@ -168,6 +184,20 @@ class Bundle:
                 f"{self.path}: bundle format {fmt}, this tool understands "
                 f"{FORMAT_VERSION}"
             )
+
+    def _read(self, member: str) -> bytes:
+        """One member's bytes, from the zip or the extracted folder. Raises
+        KeyError when it is absent, like ZipFile.read()."""
+        if self._zf is not None:
+            return self._zf.read(member)
+        target = (self._dir / member).resolve()
+        # Member names come from manifest.json; never follow one out of the
+        # bundle folder.
+        if self._dir not in target.parents and target != self._dir:
+            raise BundleError(f"{self.path}: member {member!r} is outside the bundle")
+        if not target.is_file():
+            raise KeyError(member)
+        return target.read_bytes()
 
     @property
     def release(self) -> str:
@@ -201,7 +231,7 @@ class Bundle:
         if pubkey is None:
             return
         try:
-            sig = self._zf.read(SIGNATURE_NAME)
+            sig = self._read(SIGNATURE_NAME)
         except KeyError:
             raise BundleError(f"{self.path} is unsigned but a key was given") from None
         digest = hashlib.sha256(self.raw_manifest).digest()
@@ -218,7 +248,10 @@ class Bundle:
         entry = self.images().get(name)
         if entry is None:
             raise BundleError(f"no {name} image in {self.path}")
-        return self._zf.read(entry["file"])
+        try:
+            return self._read(entry["file"])
+        except KeyError:
+            raise BundleError(f"{self.path}: {entry['file']} is missing") from None
 
     def image_sig(self, name: str) -> bytes | None:
         entry = self.images().get(name) or {}
