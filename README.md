@@ -22,6 +22,11 @@ over Wi-Fi and BLE by a network co-processor.
 This repository builds the images that run on the STM32H757 and drives the
 ESP32-C6.
 
+> **Looking for the hardware?** The KiCad schematics and PCB layouts for the
+> HealthyPi 6 main and display boards, the HealthyLink modules and the
+> enclosure are in
+> **[protocentral_healthypi6_hardware](https://github.com/Protocentral/protocentral_healthypi6_hardware)**.
+
 > **HealthyPi 6 is a research and education instrument, not a medical device.**
 > Read [Important notice](#important-notice) before connecting it to a person.
 > It also says which derived values are not yet trustworthy, and why.
@@ -69,6 +74,10 @@ the wire, so the hardware and the metadata cannot drift apart.
 ---
 
 ## Hardware
+
+Hardware design files — KiCad schematics and PCB layouts, HealthyLink module
+boards and the enclosure — are in
+[`protocentral_healthypi6_hardware`](https://github.com/Protocentral/protocentral_healthypi6_hardware).
 
 - **STM32H757BI** (LQFP208) — Cortex-M7 @ 400 MHz (application) + Cortex-M4 @ 200 MHz
   (algorithms), communicating over OpenAMP/RPMSG
@@ -194,9 +203,11 @@ enumerates only while armed.
 |---|---|
 | [`healthypi-6-fw`](https://github.com/protocentral/healthypi-6-fw) | This repository — STM32H757 firmware |
 | [`healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32) | ESP32 network co-processor firmware, shared with HealthyPi 5 |
+| [`protocentral_healthypi6_hardware`](https://github.com/Protocentral/protocentral_healthypi6_hardware) | Open hardware design files — KiCad boards, HealthyLink modules, enclosure |
 
-> The two update together. The link between them carries a versioned wire
-> contract, and mismatched firmware on either side is not a graceful degradation.
+> The two firmware repositories update together. The link between them carries
+> a versioned wire contract, and mismatched firmware on either side is not a
+> graceful degradation.
 
 Design documentation is in [`docs/`](docs/):
 
@@ -234,6 +245,7 @@ Please open an issue in the repository that matches the problem:
 
 - Firmware, build or update issues → this repository
 - Wi-Fi, BLE, MQTT or the dashboard → [`healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32)
+- Schematics, PCB or board hardware → [`protocentral_healthypi6_hardware`](https://github.com/Protocentral/protocentral_healthypi6_hardware)
 
 For a firmware issue, include the board revision, the exact `scripts/build.sh`
 command you used, and the device's reported firmware versions.
