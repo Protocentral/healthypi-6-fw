@@ -107,8 +107,32 @@ class Connection:
             raise _reply_error(req, exc) from exc
 
 
+#: USB vendor ids a HealthyPi 6 enumerates with: the pid.codes VID of a
+#: release build, and Zephyr's development VID of a dev build.
+_HEALTHYPI_VIDS = (0x1209, 0x2FE3)
+
+
+def _healthypi_usb_ports() -> list[str]:
+    """Ports whose USB vendor id is a HealthyPi's, CDC 1 first.
+
+    Matching on the VID alone, not the PID: the application and the bootloader
+    share one PID, and a tool that must know which it reached asks the protocol.
+    Empty when pyserial cannot report USB ids on this platform.
+    """
+    try:
+        from serial.tools import list_ports
+    except ImportError:  # pragma: no cover - pyserial ships with smpclient
+        return []
+    ports = [p.device for p in list_ports.comports() if p.vid in _HEALTHYPI_VIDS]
+    return sorted(ports, reverse=True)
+
+
 def candidates() -> list[str]:
-    """Serial ports that could be a HealthyPi, most likely first."""
+    """Serial ports that could be a HealthyPi, most likely first.
+
+    HealthyPi USB devices come first, so autodetection does not start by sending
+    SMP to whatever else is plugged in (a debug probe's virtual COM port, say).
+    The rest follow, for platforms where USB ids are not available."""
     if sys.platform == "win32":  # pragma: no cover - platform specific
         try:
             from serial.tools import list_ports
@@ -121,7 +145,8 @@ def candidates() -> list[str]:
         found.extend(sorted(glob.glob(pattern)))
     # CDC 1 is the higher-numbered interface on the same device, so probing the
     # highest first usually hits on the first try.
-    return sorted(set(found), reverse=True)
+    preferred = _healthypi_usb_ports()
+    return preferred + [p for p in sorted(set(found), reverse=True) if p not in preferred]
 
 
 def make_transport(
