@@ -161,7 +161,10 @@ is authoritative; see [LICENSE.md](LICENSE.md).
 
 1. Ensure `scripts/build.sh m7`, `scripts/build.sh m4` **and `scripts/build.sh signed`**
    all build without warnings. The signed flavor is the one that ships and the one
-   that breaks; a green dev build says nothing about it.
+   that breaks; a green dev build says nothing about it. Signed builds use your
+   own dev key (`keys/hp6_dev_ec256.pem`, generated on first use, never
+   committed). To run your builds on a unit programmed at the factory, see
+   "Your device, your key" in [`.github/SECURITY.md`](.github/SECURITY.md).
 2. Test on actual hardware if possible
 3. Update documentation if needed
 4. Create a pull request with:

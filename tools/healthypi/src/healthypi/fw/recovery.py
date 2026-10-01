@@ -95,7 +95,7 @@ async def recover(bundle: Bundle, target: Target, *, pubkey=None, log: Log = _st
     from ..smp.group64 import g, is_error
     from ..transport import serial_smp
 
-    bundle.verify(pubkey)
+    log(f"  {bundle.authenticate(pubkey)}")
     image = bundle.read_image("m7")
 
     logging.getLogger("smpclient").addFilter(_DropParamProbe())

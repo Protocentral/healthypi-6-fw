@@ -50,6 +50,11 @@ healthypi = "healthypi.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The release public key(s) ship inside the package, so a pip-installed
+# healthypi can check a bundle's signature with no key handed to it.
+[tool.setuptools.package-data]
+"healthypi.fw" = ["release_keys/*.pub.pem", "release_keys/README.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["hw: requires a connected HealthyPi 6 (pass --port)"]

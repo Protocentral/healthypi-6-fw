@@ -44,11 +44,25 @@ jobs:
           # Losing control of the release key means shipped units can no longer
           # be updated over any non-SWD path. keys/.gitignore is the first line
           # of defence; this is the second.
-          if git ls-files | grep -E '\.(pem|key|p12|pfx)$'; then
-            echo "::error::a private key is tracked in git — see keys/README.md"
-            exit 1
+          #
+          # Public keys ARE allowed, as *.pub.pem: the release public key ships
+          # in tools/healthypi/src/healthypi/fw/release_keys/ so the host tools
+          # can verify bundles by default. Everything else that looks like key
+          # material fails, and a PEM private-key header fails in ANY tracked
+          # file, whatever its name -- a key renamed to .txt is still a key.
+          bad=0
+          while IFS= read -r f; do
+            case "$f" in
+              *.pub.pem) ;;
+              *) echo "::error file=$f::key file tracked in git — see keys/README.md"; bad=1 ;;
+            esac
+          done < <(git ls-files | grep -E '\.(pem|key|p12|pfx|der)$' || true)
+          if git grep -lIE '^-----BEGIN ([A-Z]+ )?PRIVATE KEY-----' -- .; then
+            echo "::error::the files above contain a PEM private key — see keys/README.md"
+            bad=1
           fi
-          echo "no tracked key material."
+          [ "$bad" = 0 ] || exit 1
+          echo "no tracked private key material."
 
   build:
     needs: [layer-check, no-private-keys]
