@@ -76,9 +76,8 @@ a recording and a live capture are the same bytes. They are defined in
 | `hp6_vitals` | `hr_bpm`, `spo2_x10`, `rr_bpm`, `temp_c_x100`, `hrv_sdnn_ms`, `hrv_rmssd_ms`, `hrv_lf_hf_x10` |
 | `hp6_eeg_sample` | `ch[8]` (µV, int32), `lead_off` |
 
-`rr_bpm` and `temp_c_x100` are present in the struct but read 0 — the
-respiration-rate and temperature paths are not wired yet. The fields exist so the
-format does not change when they are.
+A field whose producer is not running reads 0, so the format does not change
+when a producer is added.
 
 The `.HP6` container itself (magic `HPI6`, version `0x0300`) is described in
 [`HOST_INTERFACE.md`](HOST_INTERFACE.md).
@@ -122,12 +121,11 @@ Two constraints that are easy to break:
 - **Callbacks must not block.** IPC callbacks run in RPMSG context: queue the work
   (`k_msgq_put` + `k_work_submit`) and return.
 
-## 5. What the M4 actually computes today
+## 5. What the M4 computes
 
-Intended scope is QRS/HR/HRV, SpO2, and EEG band power via CMSIS-DSP. What is
-live today is **the ECG → HR path only** — SpO2 is compiled out, EEG is a stub,
-and HRV is implemented but off by default. There is no TFLite or ML on the M4;
-inference belongs to the HealthyLink NPU module.
+QRS detection, heart rate and HRV from ECG; SpO2 from PPG; and EEG band power —
+all in C with CMSIS-DSP. The M4 runs no TFLite or other ML; inference belongs to
+the HealthyLink NPU module.
 
 ## 6. Host interface
 
@@ -152,11 +150,9 @@ ESP32-C6 PLL_F80M 80 MHz / 40 — so there is no baud error to chase. It runs th
 link at roughly 9.5% utilisation, and that margin is what absorbs a co-processor
 stall before CTS back-pressure reaches the transmitter.
 
-> An earlier revision used SPI2. That transport was **deleted on 2026-07-27**;
-> `&spi2` is `disabled` on v5 and the pins, though still routed, are driven by
-> nothing. The wire contract outlived it — it was never SPI-specific — and now
-> lives transport-independently in
-> `drivers/misc/healthybridge_esp32/healthybridge_esp32_protocol.h` as `HPI_HB_*`.
+The wire contract is transport-independent and lives in
+`drivers/misc/healthybridge_esp32/healthybridge_esp32_protocol.h` as `HPI_HB_*`.
+`&spi2` is routed to the co-processor on v5 but is `disabled` and unused.
 
 ### Data path
 
@@ -170,7 +166,7 @@ sample bus ── ECG/PPG/VITALS ──► connectivity service (thread)
                                    ▼
                          HealthyBridge UART driver (UART4, RTS/CTS)
                                    ▼
-                            ESP32-C6  ──► Wi-Fi TCP / BLE GATT / SMP gateway
+                            ESP32-C6  ──► Wi-Fi TCP / BLE GATT
 ```
 
 The service reaches the wire through a vtable (`healthybridge_esp32_link.h`), so
@@ -233,10 +229,6 @@ Turning it on is always explicit, from three places: the Connectivity screen
 `conn_enable` with `radios = 0` powers the C6 without starting a radio — needed
 because a C6 held in reset cannot be flashed over its own USB port.
 
-Because the co-processor also runs an MCUmgr SMP gateway — forwarding SMP to the
-M7 over the same UART — a host that speaks the control protocol over USB speaks
-it over Wi-Fi unchanged. Only the connection transport differs.
-
 ### Firmware
 
 The ESP32-C6 firmware is **not in this repository**. It lives in
@@ -280,24 +272,23 @@ This page is the operational view.
 
 ### What is updateable
 
-A HealthyPi 6 is three processors. All three can be updated in the field, by
-three different mechanisms, because their hardware genuinely differs.
+A HealthyPi 6 is three processors, each updated by its own mechanism because
+their hardware genuinely differs.
 
 | Processor | Role | How it is updated | Verified by |
 |---|---|---|---|
 | **STM32H757 M7** | application | MCUboot image 0, stock MCUmgr **img group** over USB CDC1 | **MCUboot**, ECDSA-P256, before boot |
 | **STM32H757 M4** | algorithm core | group-64 `0x00A0-0x00A4` → QSPI staging → M7 writes bank 2 | **the M7 app**: SHA-256 + ECDSA-P256 + vector-table sanity |
-| **ESP32-C6** | network coprocessor | its own `esp_ota` over WiFi (`POST /api/ota/upload`) | ESP-IDF app descriptor + rollback |
+| **ESP32-C6** | network coprocessor | `esptool` over its own USB-Serial/JTAG port (`scripts/flash.sh esp32`) | ESP-IDF image checks |
 
-Every image is signed with **one** ECDSA-P256 release key. There is not a
-separate key per processor — see [Keys](#keys).
+The M7 image, the M4 image and the release manifest are signed with **one**
+ECDSA-P256 release key — see [Keys](#keys).
 
 > **The M4 has no downgrade protection, and the M7 does.** MCUboot enforces
 > `MCUBOOT_DOWNGRADE_PREVENTION` on the M7 and will refuse an older image
-> (`E: Insufficient version in secondary slot`, observed during F8). The M4 path
+> (`E: Insufficient version in secondary slot`). The M4 path
 > verifies *authenticity* — SHA-256, ECDSA-P256 and a vector-table check — but
-> nothing compares versions, so an **older M4 image installs happily**; 1.0.1 →
-> 1.0.0 was accepted on hardware. The asymmetry is a consequence of the M4 having
+> nothing compares versions, so an **older M4 image installs happily**. The asymmetry is a consequence of the M4 having
 > no bootloader and no image header to carry a version, not a decision anyone
 > took. It is recorded rather than fixed because the threat it would address —
 > an attacker who can already reach group-64 over USB choosing to install an
@@ -339,7 +330,7 @@ and refuses to produce a bundle if it fails.
 One file, one command, all three processors:
 
 ```bash
-healthypi fw update --port <CDC1-port> --bundle hpi6-2.0.1.hpifw
+healthypi fw update --port <CDC1-port> --bundle hpi6-1.0.0.hpifw
 ```
 
 The tool reads the device's current versions (group-64 `hpi/fw_versions`), skips
@@ -420,12 +411,11 @@ so a hanging image never reaches a bundle.
   recovery), but it means **recovery does not restore a bundle in full**: follow it
   with a normal `healthypi fw update --port <CDC1> --bundle …` against the
   recovered application to bring the M4 into line. The tool says so on completion.
-  Confirmed on hardware during F8 — a unit recovered to M7 1.0.0 still reported
-  `m4fw=1.0.1`.
-- **Updating both cores in one bundle needs two resets, and the updater does the
-  second one for you.** MCUboot copies ~646 KB from the secondary slot before the
-  M7 application starts, which delays the M7 past the M4's single RPMSG bind
-  attempt, so the first boot after a combined update comes up with **no vitals**
+- **Installing a new M7 image needs two resets, and the updater does the second
+  one for you** — whether or not the M4 is updated too. MCUboot copies the image
+  from the secondary slot before the M7 application starts, which delays the M7
+  past the M4's single RPMSG bind attempt, so the first boot after an M7 install
+  comes up with **no vitals**
   (`W: M4 IPC bind timeout`). A second reset boots the cores together and they
   pair normally. There is no live re-bind to fall back on: RPMSG static vrings
   cannot bind against an already-running host (`app_m7/src/platform/ipc.c`). If
@@ -441,7 +431,7 @@ understands its M4.
 
 ```bash
 scripts/release.sh                       # build prod + package + verify
-healthypi fw info --bundle build/release/hpi6-2.0.1.hpifw
+healthypi fw info --bundle build/release/hpi6-1.0.0.hpifw
 ```
 
 The manifest carries, per processor: version, sha256, size, transport, optional
@@ -450,11 +440,10 @@ The manifest carries, per processor: version, sha256, size, transport, optional
 
 ### Transports
 
-| Transport | Status | Notes |
+| Transport | Role | Notes |
 |---|---|---|
-| **USB CDC1 (SMP)** | **primary, validated** | works before WiFi is provisioned, needs no infrastructure, best throughput |
-| **WiFi TCP:9000 → UART4** | secondary, not yet exercised | raw byte relay on the ESP32-C6 (`HB_ENABLE_SMP_GATEWAY`); the ESP does no SMP parsing |
-| **BLE** | **excluded** | SMP-over-BLE is far too slow for ~1 MB images on typical phones; BLE stays a data-only GATT surface |
+| **USB CDC1 (SMP)** | updates | works before WiFi is provisioned, needs no infrastructure, best throughput |
+| **BLE** | not used for updates | SMP-over-BLE is far too slow for ~1 MB images on typical phones; BLE stays a data-only GATT surface |
 | **SWD** | factory / recovery | |
 
 ### Keys
@@ -501,30 +490,6 @@ healthypi fw update --port <CDC1> --bundle build/release/hpi6-<ver>.hpifw
 > `STM32_Programmer_CLI -c port=SWD mode=UR -u 0x08100000 <len> /tmp/rb.bin` and
 > compare digests. This is what actually established that `flash0 + 0x100000`
 > resolves to bank 2.
-
-### Current state
-
-| Item | State |
-|---|---|
-| M7 signed OTA over CDC1 | ✅ HW-validated (2026-07-23) — full cycle, downgrade + wrong-key rejected |
-| M4 update via the M7 | ✅ HW-validated (2026-07-24) — bank 2 readback matched over SWD |
-| M4 signature + vector check | 🟡 implemented, build-verified; HW run pending |
-| Serial recovery over USB CDC | 🟡 implemented, builds (MCUboot 61.3 KB / 128 KB); HW run pending |
-| Release bundle + unified updater | 🟡 implemented; HW run pending |
-| Registered USB VID/PID | 🔴 external — pid.codes allocation not yet made; blocks a real release |
-| ESP32-C6 self-OTA | 🔴 not implemented (healthybridge-esp32 Phase D) |
-| WiFi OTA end-to-end | 🔴 not implemented (healthybridge-esp32 Phase C + UART4 wire test) |
-| `espfw` version reporting | 🟡 unblocked (SPI return path fixed); needs an ESP-side `GET_VERSION` handler — see below |
-
-**`espfw` is empty because no one reports it yet.** It was previously blocked on
-the dead ESP→M7 SPI return path; that turned out to be a fault on one board and
-the path works (2026-07-25, no firmware change). What is still missing is a
-`GET_VERSION` handler in the external HealthyBridge firmware's `control.c` —
-`healthybridge_spi_get_version()` returns `-ENOTSUP` without transmitting.
-
-Whether the C6 version arrives over SPI or over UART4 (the SMP-gateway line) is
-now an open choice rather than a forced one. Either way the update system is
-deliberately built so **nothing in §3 or §4 depends on it**.
 
 ## 10. The release bundle
 
@@ -645,8 +610,8 @@ replacing it first would mean applying the rest with firmware that is about to b
 overwritten, across a reboot.
 
 ```bash
-healthypi fw update --port <CDC1> --bundle hpi6-2.0.1.hpifw
-healthypi fw info --bundle hpi6-2.0.1.hpifw                  # no device
+healthypi fw update --port <CDC1> --bundle hpi6-1.0.0.hpifw
+healthypi fw info --bundle hpi6-1.0.0.hpifw                  # no device
 ```
 
 The tool reads `hpi/fw_versions` first and skips processors already at the
@@ -662,7 +627,7 @@ it.
 - Unknown keys inside an image entry are ignored, so additive fields are safe.
 - Adding a processor is additive; a tool that does not know the name skips it and
   says so.
-- `hw_rev` is advisory today (the device reports its revision as `br` in
+- `hw_rev` is advisory (the device reports its revision as `br` in
   `hpi/device_info`); enforcing it is the natural place to stop a v5 image
   reaching a future v6.
 
@@ -672,8 +637,7 @@ it.
   saving does not pay for the failure modes.
 - **Encryption.** The images are open-source firmware; signing establishes
   authenticity, which is the property that matters here.
-- **A remote manifest / auto-update server** — not built yet. When it
-  lands it will serve exactly this manifest shape with a URL per image, so the
+- **A remote manifest / auto-update server.** One would serve exactly this manifest shape with a URL per image, so the
   format does not change — only where the bytes come from.
 
 ## 11. Where to go next
