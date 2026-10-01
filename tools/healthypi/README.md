@@ -10,8 +10,8 @@ console scripts stay `healthypi` (and the short alias `hpi`).
 pip install protocentral-healthypi            # library only, stdlib deps
 pip install "protocentral-healthypi[device]"  # + smpclient/pyserial/cryptography
 
-pip install -e tools/healthypi                # from a checkout
-pip install -e "tools/healthypi[device]"
+# from a checkout: install smpgroup from the same checkout, not from PyPI
+pip install -e tools/smpgroup -e "tools/healthypi[device]"
 ```
 
 ## What works today
@@ -58,7 +58,7 @@ hp6.wrap_capture(cdc0_bytes, "capture.HP6")   # a raw stream is not a file
 
 The same `DBLK` frame carries the live CDC0 stream and the recorded file; only
 the container differs (the file adds the 256-byte header, sync markers and
-sidecars). Layout: [`docs/HP6_DATA_FORMAT.md`](../../docs/HP6_DATA_FORMAT.md).
+sidecars). Layout: [`docs/HP6_DATA_FORMAT.md`](https://github.com/Protocentral/healthypi-6-fw/blob/main/docs/HP6_DATA_FORMAT.md).
 
 The reader **never aborts on bad data** — a corrupt block resyncs to the next
 `DBLK` and the loss is counted in `ReadStats`. That is required, not defensive:
@@ -78,9 +78,9 @@ catalog.err_hint(267)                      # 'no SD card present'
 
 Transcribed from `hpi_mgmt_group.h`, the dispatch table in `hpi_mgmt_group.c`,
 and the handler sources. `tests/test_catalog_drift.py` re-parses all three via
-[`smpgroup.drift`](../smpgroup/) and fails on any disagreement — command ids,
+[`smpgroup.drift`](https://pypi.org/project/smpgroup/) and fails on any disagreement — command ids,
 dispatch status, error codes, and every request/response key. Prose version with
-reference: [`docs/MCUMGR_COMMANDS.md`](../../docs/MCUMGR_COMMANDS.md).
+reference: [`docs/MCUMGR_COMMANDS.md`](https://github.com/Protocentral/healthypi-6-fw/blob/main/docs/MCUMGR_COMMANDS.md).
 
 ## `smp.group64` — the wire
 
@@ -93,7 +93,7 @@ async with SMPClient(SMPSerialTransport(), port) as client:
     await client.request(g.transfer_mode_write(on=True))
 ```
 
-**Generated** from the catalog by [`smpgroup`](../smpgroup/) — there are no
+**Generated** from the catalog by [`smpgroup`](https://pypi.org/project/smpgroup/) — there are no
 hand-written request/response classes, and there must never be. The generated
 requests are asserted byte-identical to the hand-written set they replaced,
 frozen in `tests/legacy_g64_reference.py` as it stood when the update path was
