@@ -33,6 +33,12 @@ from .bundle import APPLY_ORDER, Bundle
 # guessing low fails at runtime with "Data size N exceeds maximum".
 _CHUNK_OVERHEAD = 48
 
+# enum hpi_m4fw_state (app_m7/src/services/m4_update_service.h). m4fw_abort
+# clears exactly RECEIVING and FAILED; COMMITTED waits for a reset.
+_M4FW_RECEIVING = 1
+_M4FW_COMMITTED = 3
+_M4FW_FAILED = 4
+
 _RESET_SETTLE_S = 12.0  # M4 rebinds IPC at ~7-10 s; wait past that
 _RECONNECT_TRIES = 30
 
@@ -259,6 +265,23 @@ async def _apply_m4(
             "  Rebuild the bundle with scripts/release.sh (which signs), or use "
             "a device built with CONFIG_HPI_M4_UPDATE_REQUIRE_SIGNATURE=n for "
             "bench work."
+        )
+    # An upload left behind by an interrupted run (host crash, cable pull)
+    # holds the service in RECEIVING or FAILED, and begin then answers BUSY
+    # forever -- with no CLI verb to clear it, only a power cycle. Nothing
+    # else writes the M4 staging area, so a stale upload is ours to discard.
+    if status.st in (_M4FW_RECEIVING, _M4FW_FAILED):
+        log(
+            f"M4 : discarding a stale upload (state {status.st}, "
+            f"{status.rx}/{status.len} B, err {status.err})"
+        )
+        resp = await conn.request(g.m4fw_abort())
+        if is_error(resp):
+            raise UpdateError(f"M4 abort of the stale upload failed: {fmt_error(resp)}")
+    elif status.st == _M4FW_COMMITTED:
+        raise UpdateError(
+            "M4: a committed image is waiting for a reset. Power-cycle the "
+            "device and run the update again."
         )
 
     log(
