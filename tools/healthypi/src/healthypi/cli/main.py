@@ -1533,8 +1533,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     bnd = fws.add_parser("bundle", help="build a release bundle")
     bnds = bnd.add_subparsers(dest="bundle_verb", metavar="<verb>")
-    p = bnds.add_parser("create", help="pack signed images into a .hpifw")
-    p.add_argument("out", help="output .hpifw path")
+    p = bnds.add_parser("create", help="pack signed images into a bundle zip")
+    p.add_argument("out", help="output path, e.g. hpi6-firmware-1.0.3.zip")
     p.add_argument("--m7", required=True, help="MCUboot-signed M7 image")
     p.add_argument("--m7-version", required=True)
     p.add_argument("--m4", required=True, help="raw M4 image")

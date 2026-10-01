@@ -137,11 +137,11 @@ scripts/build.sh all                # m7 + m4
 ### What ships
 
 ```bash
-scripts/release.sh        # -> build/release/hpi6-<version>.hpifw
+scripts/release.sh        # -> build/release/hpi6-firmware-<version>.zip
 ```
 
 `release.sh` is the only supported production path. It builds the signed prod
-image, packages it with the M4 image into a `.hpifw` bundle, and refuses to emit
+image, packages it with the M4 image into a firmware bundle (zip), and refuses to emit
 one that fails the shippability check. A plain `scripts/build.sh m7` image has no
 bootloader, no update path and no recovery entry — a unit flashed with it can
 only ever be updated over SWD, with the case open.
@@ -171,7 +171,7 @@ Each processor updates differently, because the hardware differs:
 One release key signs all of it, and a release is a single bundle:
 
 ```bash
-healthypi fw update --port <control-port> --bundle build/release/hpi6-1.0.0.hpifw
+healthypi fw update --port <control-port> --bundle build/release/hpi6-firmware-1.0.0.zip
 ```
 
 If an update ever leaves a device unbootable, MCUboot's **serial recovery** takes

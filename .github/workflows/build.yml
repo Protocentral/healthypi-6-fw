@@ -200,7 +200,7 @@ jobs:
               serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
           (tmp / "m7.bin").write_bytes(b"\xa5" * 4096)
           (tmp / "m4.bin").write_bytes(b"\x5a" * 2048)
-          out = tmp / "t.hpifw"
+          out = tmp / "t.zip"
           subprocess.run(["healthypi", "fw", "bundle", "create", str(out),
               "--m7", str(tmp/"m7.bin"), "--m7-version", "1.0.0",
               "--m4", str(tmp/"m4.bin"), "--m4-version", "1.0.0",
@@ -212,7 +212,7 @@ jobs:
           zf = zipfile.ZipFile(out)
           members = {n: zf.read(n) for n in zf.namelist()}
           members["m4.bin"] = b"\x00" * 2048
-          bad = tmp / "bad.hpifw"
+          bad = tmp / "bad.zip"
           with zipfile.ZipFile(bad, "w", zipfile.ZIP_DEFLATED) as z:
               for n, b in members.items(): z.writestr(n, b)
           r = subprocess.run(["healthypi", "fw", "info", "--bundle", str(bad),

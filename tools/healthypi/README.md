@@ -27,7 +27,7 @@ pip install -e tools/smpgroup -e "tools/healthypi[device]"
 | `healthypi.transport` | ✅ CDC 1 connect + autodetect |
 | `healthypi.openview` | ✅ Wi-Fi (OpenView v2) decode + monitor |
 | `healthypi.cli` | ✅ the `healthypi` command |
-| `healthypi.fw` | ✅ `.hpifw` bundles, M7+M4 update, MCUboot serial recovery |
+| `healthypi.fw` | ✅ firmware bundles (zip), M7+M4 update, MCUboot serial recovery |
 | `healthypi.hw` | ✅ HealthyLink module EEPROM images |
 | `healthypi.testing` | ✅ the group-64 acceptance suite, importable |
 
@@ -118,11 +118,11 @@ healthypi transfer arm                # SD card as a USB disk (drops the connect
 healthypi wifi-stream monitor --udp   # Wi-Fi packet rate and loss
 
 # firmware
-healthypi fw info --bundle hpi6-1.0.0.hpifw --pubkey release.pem   # offline
-healthypi fw update --bundle hpi6-1.0.0.hpifw                      # all processors
-healthypi fw update --bundle hpi6-1.0.0.hpifw --only m4 --force
+healthypi fw info --bundle hpi6-firmware-1.0.0.zip --pubkey release.pem   # offline
+healthypi fw update --bundle hpi6-firmware-1.0.0.zip                      # all processors
+healthypi fw update --bundle hpi6-firmware-1.0.0.zip --only m4 --force
 healthypi fw enter-recovery                                        # into MCUboot
-healthypi fw recover --port <recovery-port> --bundle hpi6-1.0.0.hpifw
+healthypi fw recover --port <recovery-port> --bundle hpi6-firmware-1.0.0.zip
 
 # acceptance suite (the bench gate)
 healthypi test list                        # the cases and what each needs

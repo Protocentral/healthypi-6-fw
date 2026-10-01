@@ -1,7 +1,7 @@
 # Copyright (c) 2026 ProtoCentral Electronics
 # SPDX-License-Identifier: MIT
 
-"""Apply a ``.hpifw`` bundle to a device -- the supported way to update.
+"""Apply a firmware bundle (zip) to a device -- the supported way to update.
 
 One bundle, all three processors, in :data:`~healthypi.fw.bundle.APPLY_ORDER`.
 The M7 goes through the stock MCUmgr img group; the M4 through group-64

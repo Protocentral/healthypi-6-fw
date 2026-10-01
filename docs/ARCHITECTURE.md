@@ -337,7 +337,7 @@ and refuses to produce a bundle if it fails.
 One file, one command, all three processors:
 
 ```bash
-healthypi fw update --port <CDC1-port> --bundle hpi6-1.0.0.hpifw
+healthypi fw update --port <CDC1-port> --bundle hpi6-firmware-1.0.0.zip
 ```
 
 The tool reads the device's current versions (group-64 `hpi/fw_versions`), skips
@@ -435,14 +435,14 @@ so a hanging image never reaches a bundle.
 
 ### Release bundles
 
-A release is a single `.hpifw` file — a zip containing `manifest.json`, a
+A release is a single zip, `hpi6-firmware-<version>.zip`, containing `manifest.json`, a
 signature over it, and one image per processor. Handing out three loose `.bin`
 files plus an ordering rule is how a device ends up with an M7 that no longer
 understands its M4.
 
 ```bash
 scripts/release.sh                       # build prod + package + verify
-healthypi fw info --bundle build/release/hpi6-1.0.0.hpifw
+healthypi fw info --bundle build/release/hpi6-firmware-1.0.0.zip
 ```
 
 The manifest carries, per processor: version, sha256, size, transport, optional
@@ -483,7 +483,7 @@ scripts/flash.sh signed                              # MCUboot + signed app
 healthypi device info --port <CDC1>                  # group-64 reachable
 
 # full update cycle from the bundle
-healthypi fw update --port <CDC1> --bundle build/release/hpi6-<ver>.hpifw
+healthypi fw update --port <CDC1> --bundle build/release/hpi6-firmware-<ver>.zip
 
 # negatives — each must be REFUSED, and leave the running firmware intact
 #  a) image signed with a different key      -> MCUboot keeps the old image
@@ -504,7 +504,7 @@ healthypi fw update --port <CDC1> --bundle build/release/hpi6-<ver>.hpifw
 
 ## 10. The release bundle
 
-`.hpifw` — what a release actually is.
+The firmware bundle — what a release actually is.
 The wire/on-disk format for a HealthyPi 6 firmware release. Produced by
 `scripts/release.sh`, consumed by `healthypi fw update` and (later)
 by HealthyPi Studio's "check for updates".
@@ -532,7 +532,7 @@ A plain **zip**, so it can be inspected with `unzip -l` by anyone debugging a
 release without this repo checked out.
 
 ```
-hpi6-2.0.1.hpifw
+hpi6-firmware-2.0.1.zip
 ├── manifest.json     what is inside, per processor
 ├── manifest.sig      ECDSA-P256 over sha256(manifest.json), raw r||s (64 B)
 ├── m7.bin            MCUboot-signed M7 image
@@ -609,20 +609,20 @@ enforces its own two signatures regardless of what the host did.
 #### Raw r||s, not DER
 
 Device-side verification uses `psa_verify_hash()`, which takes a raw 64-byte
-r||s pair. Signing tools produce DER by default, so `hpifw.sign_digest_raw()`
+r||s pair. Signing tools produce DER by default, so `healthypi.fw.keys.sign_digest_raw()`
 converts once on the host. The alternative — an ASN.1 parser inside the firmware
 update path — buys nothing.
 
 ### Applying a bundle
 
-Order is fixed at `esp32c6 → m4 → m7` (`hpifw.APPLY_ORDER`). The M7 goes **last**
+Order is fixed at `esp32c6 → m4 → m7` (`healthypi.fw.bundle.APPLY_ORDER`). The M7 goes **last**
 because it is the processor that runs the update logic for the other two:
 replacing it first would mean applying the rest with firmware that is about to be
 overwritten, across a reboot.
 
 ```bash
-healthypi fw update --port <CDC1> --bundle hpi6-1.0.0.hpifw
-healthypi fw info --bundle hpi6-1.0.0.hpifw                  # no device
+healthypi fw update --port <CDC1> --bundle hpi6-firmware-1.0.0.zip
+healthypi fw info --bundle hpi6-firmware-1.0.0.zip                  # no device
 ```
 
 The tool reads `hpi/fw_versions` first and skips processors already at the

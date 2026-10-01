@@ -1,7 +1,7 @@
 # Copyright (c) 2026 ProtoCentral Electronics
 # SPDX-License-Identifier: MIT
 
-"""HealthyPi 6 firmware bundle (``.hpifw``) -- create, read, verify.
+"""HealthyPi 6 firmware bundle -- create, read, verify.
 
 A release is one file, not a directory of loose binaries, because a HealthyPi 6
 unit has three independently-updateable processors whose versions have to move
@@ -10,12 +10,16 @@ device ends up with an M7 that no longer understands its M4.
 
 Layout (a plain zip, so it can be inspected without this tool):
 
-    hpi6-2.0.1.hpifw
+    hpi6-firmware-2.0.1.zip
       manifest.json     what is inside, per processor, with digests
       manifest.sig      ECDSA-P256 over sha256(manifest.json), raw r||s
-      m7.signed.bin     MCUboot-signed M7 image      (stock SMP img group)
+      m7.bin            MCUboot-signed M7 image      (stock SMP img group)
       m4.bin            raw M4 image + its signature (group-64 0x00A0-0x00A4)
       esp32c6.bin       optional C6 image            (ESP self-OTA over HTTP)
+
+The extension is not significant: readers open the file as a zip, so bundles
+named ``.hpifw`` (the name used before 2026-10) still work. Releases are
+named ``hpi6-firmware-<version>.zip``.
 
 Signing the MANIFEST rather than the bundle covers every image at once through
 their digests, and keeps verification cheap on a host that has already streamed
@@ -87,7 +91,7 @@ def create(
     key_path: Path,
     created: str,
 ) -> Path:
-    """Write a .hpifw bundle. `created` is passed in rather than read from the
+    """Write a bundle zip. `created` is passed in rather than read from the
     clock so a release build is reproducible."""
     manifest: dict[str, Any] = {
         "format": FORMAT_VERSION,
@@ -150,7 +154,7 @@ class Bundle:
         except FileNotFoundError:
             raise BundleError(f"{self.path}: no such file") from None
         except zipfile.BadZipFile as exc:
-            raise BundleError(f"{self.path} is not a .hpifw bundle: {exc}") from exc
+            raise BundleError(f"{self.path} is not a firmware bundle (zip): {exc}") from exc
 
         try:
             self.raw_manifest = self._zf.read(MANIFEST_NAME)

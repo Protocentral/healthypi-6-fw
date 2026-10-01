@@ -62,7 +62,7 @@ There are four scripts, and they take a target:
 | `scripts/build.sh signed [dev\|prod]` | MCUboot + signed M7 → `build/m7s` |
 | `scripts/build.sh esp32` | ESP32-C6 (external HealthyBridge repo) |
 | `scripts/flash.sh [all\|m7\|m4\|signed\|factory\|esp32]` | Flash over SWD |
-| `scripts/release.sh` | Production build + `.hpifw` bundle |
+| `scripts/release.sh` | Production build + firmware bundle (zip) |
 | `source scripts/env.sh` | Just the environment (venv, board, paths) |
 
 **Never call `west build` directly.** The scripts select the board variant, the

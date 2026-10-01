@@ -1,7 +1,7 @@
 # Copyright (c) 2026 ProtoCentral Electronics
 # SPDX-License-Identifier: MIT
 
-"""The .hpifw bundle: create, verify, and refuse.
+"""The firmware bundle (zip): create, verify, and refuse.
 
 These cover the offline half of the update path -- the half that can be tested
 without a board. What they are really guarding is the *negative* cases: a
@@ -64,7 +64,7 @@ def bundle_path(tmp_path, key):
     m4 = tmp_path / "m4.bin"
     m4.write_bytes(b"\x5a" * 2048)
     return fw.create(
-        tmp_path / "hpi6-1.0.0.hpifw",
+        tmp_path / "hpi6-firmware-1.0.0.zip",
         [
             fw.ImageSpec("m7", m7, "1.0.0", "mcumgr-img"),
             fw.ImageSpec("m4", m4, "1.0.0", "hpi-g64", sign=True),
@@ -111,8 +111,8 @@ def test_manifest_is_reproducible(tmp_path, key):
     specs = lambda: [fw.ImageSpec("m7", m7, "1.0.0", "mcumgr-img")]  # noqa: E731
     kw = dict(release="1.0.0", hw_rev=["v5"], key_path=key,
               created="2026-08-03T00:00:00Z")
-    one = fw.create(tmp_path / "one.hpifw", specs(), **kw)
-    two = fw.create(tmp_path / "two.hpifw", specs(), **kw)
+    one = fw.create(tmp_path / "one.zip", specs(), **kw)
+    two = fw.create(tmp_path / "two.zip", specs(), **kw)
     assert (zipfile.ZipFile(one).read("manifest.json")
             == zipfile.ZipFile(two).read("manifest.json"))
 
@@ -132,7 +132,7 @@ def test_describe_lists_every_image(bundle_path):
 def test_missing_source_image_is_named(tmp_path, key):
     with pytest.raises(fw.BundleError, match="not found"):
         fw.create(
-            tmp_path / "x.hpifw",
+            tmp_path / "x.zip",
             [fw.ImageSpec("m7", tmp_path / "nope.bin", "1.0.0", "mcumgr-img")],
             release="1.0.0", hw_rev=["v5"], key_path=key, created="t",
         )
@@ -144,14 +144,14 @@ def test_missing_source_image_is_named(tmp_path, key):
 def test_digests_checked_without_a_key(tmp_path, bundle_path):
     """A missing key must not mean a missing check. Corruption in transit is the
     ordinary failure; the signature only catches a deliberate one."""
-    bad = _rebuild(bundle_path, tmp_path / "bad.hpifw",
+    bad = _rebuild(bundle_path, tmp_path / "bad.zip",
                    lambda m: m.__setitem__("m4.bin", b"\x00" * 2048))
     with pytest.raises(fw.BundleError, match="digest mismatch"):
         fw.Bundle(bad).verify(None)
 
 
 def test_truncated_payload_rejected(tmp_path, bundle_path, key):
-    bad = _rebuild(bundle_path, tmp_path / "trunc.hpifw",
+    bad = _rebuild(bundle_path, tmp_path / "trunc.zip",
                    lambda m: m.__setitem__("m7.bin", m["m7.bin"][:-16]))
     with pytest.raises(fw.BundleError, match="digest mismatch"):
         fw.Bundle(bad).verify(key)
@@ -163,7 +163,7 @@ def test_edited_manifest_fails_the_signature(tmp_path, bundle_path, key):
         d["release"] = "9.9.9"
         members["manifest.json"] = json.dumps(d, indent=2, sort_keys=True).encode()
 
-    bad = _rebuild(bundle_path, tmp_path / "edited.hpifw", bump)
+    bad = _rebuild(bundle_path, tmp_path / "edited.zip", bump)
     with pytest.raises(fw.BundleError, match="signature does NOT verify"):
         fw.Bundle(bad).verify(key)
 
@@ -173,16 +173,23 @@ def test_wrong_key_rejected(bundle_path, other_key):
         fw.Bundle(bundle_path).verify(other_key)
 
 
+def test_extension_is_not_significant(bundle_path, key, tmp_path):
+    # Bundles were named .hpifw before 2026-10; the same zip still opens.
+    legacy = tmp_path / "hpi6-1.0.0.hpifw"
+    legacy.write_bytes(bundle_path.read_bytes())
+    fw.Bundle(legacy).verify(key)
+
+
 def test_not_a_zip(tmp_path):
-    junk = tmp_path / "junk.hpifw"
+    junk = tmp_path / "junk.zip"
     junk.write_bytes(b"not a zip")
-    with pytest.raises(fw.BundleError, match="not a .hpifw"):
+    with pytest.raises(fw.BundleError, match="not a firmware bundle"):
         fw.Bundle(junk)
 
 
 def test_missing_file_is_not_a_traceback(tmp_path):
     with pytest.raises(fw.BundleError, match="no such file"):
-        fw.Bundle(tmp_path / "absent.hpifw")
+        fw.Bundle(tmp_path / "absent.zip")
 
 
 def test_unknown_format_version(tmp_path, bundle_path):
@@ -191,7 +198,7 @@ def test_unknown_format_version(tmp_path, bundle_path):
         d["format"] = 99
         members["manifest.json"] = json.dumps(d).encode()
 
-    bad = _rebuild(bundle_path, tmp_path / "future.hpifw", future)
+    bad = _rebuild(bundle_path, tmp_path / "future.zip", future)
     with pytest.raises(fw.BundleError, match="understands"):
         fw.Bundle(bad)
 

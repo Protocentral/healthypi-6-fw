@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Versions here are the **firmware** version reported by the device
-(`app_m7/VERSION`, `app_m4/VERSION`) and carried in the `.hpifw` release bundle.
+(`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
+
+## [Unreleased]
+
+### Changed
+- The release bundle is now named `hpi6-firmware-<version>.zip` instead of
+  `hpi6-<version>.hpifw`. The format and signing are unchanged: it was always a
+  plain zip. Tools read it by content, so existing `.hpifw` files still work.
 
 ## [1.0.0] — unreleased
 

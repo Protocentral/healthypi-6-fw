@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 ProtoCentral Electronics
 # SPDX-License-Identifier: MIT
-# HealthyPi 6 — build a shippable release: production images + a .hpifw bundle.
+# HealthyPi 6 — build a shippable release: production images + a firmware bundle (zip).
 #
 #   scripts/release.sh                        dev key, for rehearsing the flow
 #   HP6_SIGNING_KEY=/abs/release.pem scripts/release.sh
 #
 # Output: build/release/
 #   m7s/                       the sysbuild tree (MCUboot + signed app)
-#   hpi6-<version>.hpifw       the bundle a customer or Studio applies
+#   hpi6-firmware-<version>.zip  the bundle a customer or Studio applies
 #
 # This is the ONLY supported way to produce firmware for a unit that leaves the
 # building. It exists because "which build ships" was previously undefined: the
@@ -98,7 +98,7 @@ fi
 # --- 3. package -------------------------------------------------------------
 echo ""
 echo "--- bundle ---"
-BUNDLE="$OUT/hpi6-${M7_VER}.hpifw"
+BUNDLE="$OUT/hpi6-firmware-${M7_VER}.zip"
 CREATED="$(git log -1 --format=%cI 2>/dev/null || echo unknown)"
 
 BUNDLE_ARGS=(
