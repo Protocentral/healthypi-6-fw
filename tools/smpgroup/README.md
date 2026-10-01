@@ -131,8 +131,8 @@ It catches:
 - a command the firmware declares but your spec doesn't have (or vice versa)
 - a command your spec calls live that the firmware never dispatches
 - an error code that moved, was renamed, or is missing from either side
-- **a request or response key that appears in no handler** — a renamed or
-  removed field
+- **a request or response key missing from that command's handler** — a
+  renamed or removed field, or one the spec gave to the wrong command
 
 Drop it in a pytest and your CI now fails on protocol drift instead of your
 users discovering it:
@@ -143,9 +143,12 @@ def test_no_drift():
     assert report.ok, str(report)
 ```
 
-The checker parses rather than compiles, so it is deliberately shallow: it
-proves a key exists *somewhere in the handlers*, not that it belongs to that
-specific command. Shallow still catches the failure that actually happens.
+Keys are checked per command. The dispatch table names each op's handler, and
+a key must appear in that function, in a function it calls within the sources,
+or at file scope in its file (a static key table). A key that only *another*
+command emits does not count — a global search would have passed it. The
+checker parses rather than compiles, so when it cannot find a handler (a macro,
+or code outside the given sources) it falls back to searching every handler.
 
 ## Design notes
 

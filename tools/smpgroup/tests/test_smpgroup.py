@@ -193,6 +193,80 @@ def test_clean_spec_passes(fw):
     assert len(rep.declared) == 6 and len(rep.routed) == 5
 
 
+# Real functions this time, so keys can be scoped to the command that owns them.
+SCOPED_HANDLERS = """
+static int reply_ok(zcbor_state_t *zse)
+{
+    return zcbor_tstr_put_lit(zse, "ok") && zcbor_bool_put(zse, true);
+}
+
+int info_read(struct smp_streamer *ctxt)
+{
+    zcbor_tstr_put_lit(zse, "sn"); zcbor_tstr_put_lit(zse, "up");
+    zcbor_tstr_put_lit(zse, "hw");
+    return 0;
+}
+
+int both_r(struct smp_streamer *ctxt) { zcbor_tstr_put_lit(zse, "armed"); return 0; }
+int both_w(struct smp_streamer *ctxt)
+{
+    ZCBOR_MAP_DECODE_KEY_DECODER("on", d, &o);
+    zcbor_tstr_put_lit(zse, "armed");
+    return 0;
+}
+int set_thing(struct smp_streamer *ctxt)
+{
+    ZCBOR_MAP_DECODE_KEY_DECODER("name", d, &n);
+    ZCBOR_MAP_DECODE_KEY_DECODER("on", d, &o);
+    return reply_ok(zse);   /* "ok" comes from a helper */
+}
+int nested_read(struct smp_streamer *ctxt)
+{
+    zcbor_tstr_put_lit(zse, "top"); zcbor_tstr_put_lit(zse, "health");
+    zcbor_tstr_put_lit(zse, "a"); zcbor_tstr_put_lit(zse, "b");
+    return 0;
+}
+int stubbed(struct smp_streamer *ctxt) { return MGMT_ERR_ENOTSUP; }
+"""
+
+
+@pytest.fixture
+def scoped_fw(fw):
+    (fw.dispatch.parent / "demo_handlers.c").write_text(textwrap.dedent(SCOPED_HANDLERS))
+    return fw
+
+
+def test_scoped_clean_spec_passes(scoped_fw):
+    """Keys emitted by a called helper count for the handler that calls it."""
+    from smpgroup.drift import check
+
+    rep = check(DEMO, scoped_fw)
+    assert rep.ok, str(rep)
+
+
+def test_key_owned_by_another_command_is_caught(scoped_fw):
+    """The m4fw_begin case: the spec gave begin's reply an `off` key, and the
+    old global search passed it because the *chunk* handler emits `off`. Here
+    `armed` exists only in both's handlers, so declaring it on set_thing must
+    fail."""
+    import dataclasses
+
+    from smpgroup.drift import check
+
+    cmd = DEMO.by_name("set_thing")
+    bad = dataclasses.replace(
+        DEMO,
+        commands=tuple(
+            dataclasses.replace(c, response=(Field("armed", T.BOOL),)) if c is cmd else c
+            for c in DEMO.commands
+        ),
+    )
+    rep = check(bad, scoped_fw)
+    assert not rep.ok
+    assert any("set_thing: key 'armed' does not appear in its write handler set_thing()" in p
+               for p in rep.problems), str(rep)
+
+
 def test_missing_sources_is_reported_not_raised(tmp_path):
     from smpgroup.drift import Sources, check
 
@@ -206,7 +280,7 @@ def test_missing_sources_is_reported_not_raised(tmp_path):
     [
         (lambda c: {"cmd_id": 0x00FF}, "spec id"),
         (lambda c: {"status": Status.UNREACHABLE, "ops": ()}, "firmware routes it"),
-        (lambda c: {"response": (Field("nope", T.UINT),)}, "appears in no handler"),
+        (lambda c: {"response": (Field("nope", T.UINT),)}, "does not appear in"),
         (lambda c: {"name": "ghost"}, "not declared by the firmware"),
     ],
 )
