@@ -404,7 +404,8 @@ COMMANDS: tuple[Command, ...] = (
             Field("sha", T.BSTR, "SHA-256 of the image"),
             Field("sig", T.BSTR, "ECDSA-P256 r||s", optional=True),
         ),
-        response=(Field("off", T.UINT, "resume offset"),),
+        # No reply payload: begin always restarts the upload, so there is no
+        # resume offset to report (hpi_m4fw.c returns a bare EOK).
         errors=(256, 269, 270),
     ),
     Command(

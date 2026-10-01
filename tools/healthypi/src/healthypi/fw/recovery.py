@@ -25,7 +25,11 @@ import logging
 import time
 
 from .bundle import Bundle
-from .update import Log, Target, UpdateError, _stdout
+from .update import Log, Target, UpdateError, _fw_versions, _stdout, same_version
+
+#: How long the recovered application gets to boot and enumerate. MCUboot
+#: validates the new image first; the M4's IPC bind takes ~7-10 s after that.
+_APP_RETURN_S = 45.0
 
 
 async def enter_recovery(target: Target, *, log: Log = _stdout) -> None:
@@ -63,7 +67,7 @@ async def enter_recovery(target: Target, *, log: Log = _stdout) -> None:
     log("Recovery armed; the device is rebooting into MCUboot serial recovery.")
     log('It will re-enumerate as a SINGLE CDC port named "HealthyPi 6 Recovery"')
     log("— NOT the port you just used. Find it, then:")
-    log("    hpi fw recover --port <recovery-port> --bundle <file>")
+    log("    healthypi fw recover --port <recovery-port> --bundle <file>")
     log("If you pick the wrong port, recover says so rather than failing")
     log("obscurely; it identifies the mode from the protocol, not the USB IDs.")
 
@@ -112,8 +116,8 @@ async def recover(bundle: Bundle, target: Target, *, pubkey=None, log: Log = _st
             if not is_error(probe):
                 raise UpdateError(
                     f"{conn.port} is the APPLICATION, not the bootloader.\n"
-                    "  Run `hpi fw update` to update normally, or "
-                    "`hpi fw enter-recovery` first if that is what you meant."
+                    "  Run `healthypi fw update` to update normally, or "
+                    "`healthypi fw enter-recovery` first if that is what you meant."
                 )
         except asyncio.TimeoutError:
             pass  # no group 64 -> bootloader, which is what we want
@@ -134,6 +138,85 @@ async def recover(bundle: Bundle, target: Target, *, pubkey=None, log: Log = _st
         except Exception:  # noqa: BLE001
             pass
 
-    log("Reset sent. The device should now boot the application and enumerate")
-    log("as the two-port composite again. If the M4 also needs updating, run")
-    log("`hpi fw update` against the application's CDC 1 port.")
+    log("  reset sent; waiting for the application to come back…")
+    await _confirm(bundle, target, log)
+
+
+async def _confirm(bundle: Bundle, target: Target, log: Log) -> None:
+    """Find the recovered application and check it runs the bundle's M7.
+
+    The recovery port disappears with the reset and the application comes back
+    on different ports, so this looks for whichever port answers group 64.
+    Without it, recover ended at "the device should now boot" -- the one step
+    of a rescue that most needs confirming was the one left unchecked.
+    """
+    # Probing ports that are not up yet (or are CDC 0, which never answers)
+    # times out by design; smpclient logs each of those as an ERROR. They are
+    # expected misses here, not failures, so keep them off the user's screen.
+    smp_log = logging.getLogger("smpclient")
+    saved_level = smp_log.level
+    smp_log.setLevel(logging.CRITICAL)
+    try:
+        await _find_and_check(bundle, target, log)
+    finally:
+        smp_log.setLevel(saved_level)
+
+
+async def _find_and_check(bundle: Bundle, target: Target, log: Log) -> None:
+    from ..smp.group64 import fmt_error, g, is_error
+    from ..transport import serial_smp
+
+    images = bundle.images()
+    want_m7 = images["m7"]["version"]
+    deadline = time.monotonic() + _APP_RETURN_S
+    while time.monotonic() < deadline:
+        await asyncio.sleep(2.0)
+        for port in serial_smp.candidates():
+            try:
+                conn = await serial_smp.connect(
+                    port, baud=target.baud, frame_size=target.frame_size, timeout_s=2.0
+                )
+            except Exception:  # noqa: BLE001 -- not this port, or not yet
+                continue
+            try:
+                try:
+                    probe = await asyncio.wait_for(conn.request(g.device_info()), timeout=3)
+                except Exception:  # noqa: BLE001
+                    continue
+                if is_error(probe):
+                    continue
+                versions = await _fw_versions(conn, g, is_error, fmt_error)
+                # The M7 learns the M4's version over IPC, which binds ~7-10 s
+                # after boot. Judge the M4 only once it has had that long.
+                m4_deadline = time.monotonic() + 15.0
+                while not versions.get("m4") and time.monotonic() < m4_deadline:
+                    await asyncio.sleep(2.0)
+                    versions = await _fw_versions(conn, g, is_error, fmt_error)
+            finally:
+                try:
+                    await conn.client.__aexit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+            m7 = versions.get("m7", "")
+            log(f"  application is back on {port}: m7 {m7 or '?'}, m4 {versions.get('m4') or '?'}")
+            if not same_version(m7, want_m7):
+                raise UpdateError(
+                    f"recovery wrote the bundle's M7 {want_m7}, but the application "
+                    f"reports {m7 or 'no version'}. The image may not have been "
+                    "accepted; enter recovery again and retry."
+                )
+            log(f"  m7 {m7} OK — recovered.")
+            want_m4 = (images.get("m4") or {}).get("version")
+            if want_m4 and not same_version(versions.get("m4", ""), want_m4):
+                log(
+                    f"\nThe M4 is not at the bundle's {want_m4} — recovery writes the "
+                    "M7 only. Bring it into line from the application:\n"
+                    f"  healthypi fw update --port {port} --bundle <file> --only m4"
+                )
+            return
+    raise UpdateError(
+        f"the image was written, but no application answered within "
+        f"{_APP_RETURN_S:.0f} s. If the unit came back up as \"HealthyPi 6 "
+        "Recovery\", MCUboot did not accept the image; retry the recovery. "
+        "Otherwise check `healthypi device versions` once it has finished booting."
+    )

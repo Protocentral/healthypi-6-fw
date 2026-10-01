@@ -460,7 +460,7 @@ of these. The M7 firmware itself updates through the stock `img` group.
 
 | ID | Command | Op | 🔒 | Request | Response |
 |---|---|---|---|---|---|
-| `0x00A0` | m4fw_begin | write | 🔒 | `len` uint, `sha` bstr, `sig` bstr (optional) | `off` uint |
+| `0x00A0` | m4fw_begin | write | 🔒 | `len` uint, `sha` bstr, `sig` bstr (optional) | `{}` |
 | `0x00A1` | m4fw_chunk | write | 🔒 | `off` uint, `data` bstr | `off` uint |
 | `0x00A2` | m4fw_commit | write | 🔒 | `{}` | `rst` bool |
 | `0x00A3` | m4fw_status | read | | `{}` | `st`, `len`, `rx` uint, `err` int, `rst`, `sig` bool |
@@ -468,8 +468,9 @@ of these. The M7 firmware itself updates through the stock `img` group.
 
 **Call `m4fw_status` first.** Its `sig` field tells you whether this firmware
 requires a signature before you spend minutes uploading an image it will reject.
-`off` in the `begin` reply is a resume offset, so an interrupted upload can
-continue rather than restart.
+`begin` replies with an empty map and always starts the upload from offset 0;
+an interrupted upload cannot be resumed and must be restarted with `begin`.
+Each `chunk` reply's `off` is the next offset the device expects.
 
 The target flash is written only after the whole image has arrived *and* its
 SHA-256 matches *and*, when required, its signature verifies — so an interrupted

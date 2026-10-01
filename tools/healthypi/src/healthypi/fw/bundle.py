@@ -23,7 +23,7 @@ gigabytes. The M7 image additionally carries its own MCUboot signature -- that i
 the one the device enforces; the manifest signature is for the host, so a tool
 can refuse a tampered bundle before it starts writing flash.
 
-Used by ``scripts/release.sh`` (``hpi fw bundle create``) and
+Used by ``scripts/release.sh`` (``healthypi fw bundle create``) and
 :mod:`healthypi.fw.update` (apply).
 """
 

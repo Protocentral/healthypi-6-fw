@@ -46,8 +46,12 @@ welcome if you can show the reasoning is wrong, but they are not news:
 - **Physical access is game over.** The device is a USB-tethered research
   instrument. There is no RDP level 2, no JTAG lockout and no tamper detection.
   Anyone who can open the case can read the flash.
-- **Anti-rollback is version-based only.** MCUboot refuses a lower version; there
-  is no hardware security counter.
+- **Anti-rollback is a guard against accidents, not a security boundary.**
+  MCUboot refuses a lower M7 version on a normal update, but serial recovery
+  writes the M7 directly and accepts any image signed with the release key,
+  older ones included; the M4 path compares no versions at all. There is no
+  hardware security counter. Details: [`docs/DEVICE_LOCK.md`](../docs/DEVICE_LOCK.md)
+  and [`docs/ARCHITECTURE.md` §9](../docs/ARCHITECTURE.md#9-firmware-update-and-recovery).
 
 ## What this product is
 

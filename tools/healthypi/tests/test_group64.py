@@ -158,16 +158,17 @@ def test_m4fw_begin_signature_is_optional():
     assert set(signed) == {"len", "sha", "sig"}
 
 
-def test_unknown_reply_key_is_rejected():
-    """A device field the catalog does not declare must fail loudly."""
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        _reply(
-            g.stream_status.Response,
-            {"active": True, "ch": 3, "ann": 0, "sent": 1, "dropped": 0, "new": 1},
-            0x0022,
-        )
+def test_newer_firmware_reply_still_parses():
+    """A field the catalog does not know yet is dropped, not fatal. Found on
+    hardware 2026-09-30: firmware that added `usb_att` to the telemetry reply
+    made this tool fail every telemetry read. The drift test, not the runtime,
+    is what keeps the catalog complete."""
+    r = _reply(
+        g.stream_status.Response,
+        {"active": True, "ch": 3, "ann": 0, "sent": 1, "dropped": 0, "new": 1},
+        0x0022,
+    )
+    assert (r.active, r.sent) == (True, 1)
 
 
 def test_error_formatting_uses_the_group_table():
@@ -258,3 +259,38 @@ def test_generated_requests_are_byte_identical_to_the_legacy_classes(
     assert new.header.group_id == old.header.group_id == 64
     assert new.header.command_id == old.header.command_id
     assert new.header.op == old.header.op
+
+
+def test_unparseable_reply_names_the_command_not_a_TypeError():
+    """smpclient mishandles a reply that fits no schema and raises
+    `TypeError: ValidationError.__new__() missing ... 'line_errors'`, naming
+    neither the command nor the cause. Seen on hardware 2026-09-30 and
+    2026-10-01."""
+    import asyncio
+
+    from healthypi.transport.serial_smp import Connection, UnparseableReplyError
+
+    class Client:
+        async def request(self, req, timeout_s=None):
+            raise TypeError("ValidationError.__new__() missing 1 required positional argument: 'line_errors'")
+
+    conn = Connection(client=Client(), port="/dev/null")
+    with pytest.raises(UnparseableReplyError) as exc:
+        asyncio.run(conn.request(g.m4fw_begin(len=1, sha=b"\x00" * 32)))
+    msg = str(exc.value)
+    assert "M4FwBegin" in msg and "command 160" in msg
+    assert "healthypi device versions" in msg and "smp_add_cmd_err" in msg
+
+
+def test_an_unrelated_TypeError_is_not_relabelled():
+    import asyncio
+
+    from healthypi.transport.serial_smp import Connection
+
+    class Client:
+        async def request(self, req, timeout_s=None):
+            raise TypeError("a genuine programming error")
+
+    conn = Connection(client=Client(), port="/dev/null")
+    with pytest.raises(TypeError, match="genuine"):
+        asyncio.run(conn.request(g.device_info()))

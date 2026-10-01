@@ -33,7 +33,7 @@ build a trust decision on the contents of this EEPROM.
 
 Writing an image to real hardware is out of scope for this module: it needs an
 FT232H, a Raspberry Pi's I2C bus, a CH341A or a Bus Pirate, and the vendor tool
-that comes with whichever you have. ``hpi hl eeprom generate`` produces the
+that comes with whichever you have. ``healthypi hl eeprom generate`` produces the
 256-byte file; program it with e.g. ``ch341eeprom -w eeprom.bin`` or
 ``i2ctransfer`` on a Pi. (The predecessor script documented a ``program``
 subcommand with five wiring diagrams; it was never implemented.)

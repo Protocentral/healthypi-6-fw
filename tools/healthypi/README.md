@@ -10,8 +10,8 @@ console scripts stay `healthypi` (and the short alias `hpi`).
 pip install protocentral-healthypi            # library only, stdlib deps
 pip install "protocentral-healthypi[device]"  # + smpclient/pyserial/cryptography
 
-pip install -e tools/healthypi                # from a checkout
-pip install -e "tools/healthypi[device]"
+# from a checkout: install smpgroup from the same checkout, not from PyPI
+pip install -e tools/smpgroup -e "tools/healthypi[device]"
 ```
 
 ## What works today
@@ -58,7 +58,7 @@ hp6.wrap_capture(cdc0_bytes, "capture.HP6")   # a raw stream is not a file
 
 The same `DBLK` frame carries the live CDC0 stream and the recorded file; only
 the container differs (the file adds the 256-byte header, sync markers and
-sidecars). Layout: [`docs/HP6_DATA_FORMAT.md`](../../docs/HP6_DATA_FORMAT.md).
+sidecars). Layout: [`docs/HP6_DATA_FORMAT.md`](https://github.com/Protocentral/healthypi-6-fw/blob/main/docs/HP6_DATA_FORMAT.md).
 
 The reader **never aborts on bad data** — a corrupt block resyncs to the next
 `DBLK` and the loss is counted in `ReadStats`. That is required, not defensive:
@@ -78,9 +78,9 @@ catalog.err_hint(267)                      # 'no SD card present'
 
 Transcribed from `hpi_mgmt_group.h`, the dispatch table in `hpi_mgmt_group.c`,
 and the handler sources. `tests/test_catalog_drift.py` re-parses all three via
-[`smpgroup.drift`](../smpgroup/) and fails on any disagreement — command ids,
+[`smpgroup.drift`](https://pypi.org/project/smpgroup/) and fails on any disagreement — command ids,
 dispatch status, error codes, and every request/response key. Prose version with
-reference: [`docs/MCUMGR_COMMANDS.md`](../../docs/MCUMGR_COMMANDS.md).
+reference: [`docs/MCUMGR_COMMANDS.md`](https://github.com/Protocentral/healthypi-6-fw/blob/main/docs/MCUMGR_COMMANDS.md).
 
 ## `smp.group64` — the wire
 
@@ -93,7 +93,7 @@ async with SMPClient(SMPSerialTransport(), port) as client:
     await client.request(g.transfer_mode_write(on=True))
 ```
 
-**Generated** from the catalog by [`smpgroup`](../smpgroup/) — there are no
+**Generated** from the catalog by [`smpgroup`](https://pypi.org/project/smpgroup/) — there are no
 hand-written request/response classes, and there must never be. The generated
 requests are asserted byte-identical to the hand-written set they replaced,
 frozen in `tests/legacy_g64_reference.py` as it stood when the update path was
@@ -102,33 +102,34 @@ validated on v5 hardware.
 ## CLI
 
 ```bash
-hpi catalog                     # every group-64 command, and its real status
-hpi hp6 verify REC0001.HP6      # CRCs, gaps, counters
-hpi hp6 to-csv REC0001.HP6 out/
-hpi device info                 # port autodetected
+healthypi catalog                     # every group-64 command, and its real status
+healthypi hp6 verify REC0001.HP6      # CRCs, gaps, counters
+healthypi hp6 to-csv REC0001.HP6 out/
+healthypi device info                 # port autodetected
+healthypi device reset                # reboot (e.g. after an M4 commit)
 hpi telemetry --json
-hpi stream start --ch 0x03      # ECG + PPG
-hpi record start --name walk
-hpi transfer arm                # SD card as a USB disk (drops the connection)
-hpi wifi-stream monitor --udp   # Wi-Fi packet rate and loss
+healthypi stream start --ch 0x03      # ECG + PPG
+healthypi record start --name walk
+healthypi transfer arm                # SD card as a USB disk (drops the connection)
+healthypi wifi-stream monitor --udp   # Wi-Fi packet rate and loss
 
 # firmware
-hpi fw info --bundle hpi6-1.0.0.hpifw --pubkey release.pem   # offline
-hpi fw update --bundle hpi6-1.0.0.hpifw                      # all processors
-hpi fw update --bundle hpi6-1.0.0.hpifw --only m4 --force
-hpi fw enter-recovery                                        # into MCUboot
-hpi fw recover --port <recovery-port> --bundle hpi6-1.0.0.hpifw
+healthypi fw info --bundle hpi6-1.0.0.hpifw --pubkey release.pem   # offline
+healthypi fw update --bundle hpi6-1.0.0.hpifw                      # all processors
+healthypi fw update --bundle hpi6-1.0.0.hpifw --only m4 --force
+healthypi fw enter-recovery                                        # into MCUboot
+healthypi fw recover --port <recovery-port> --bundle hpi6-1.0.0.hpifw
 
 # acceptance suite (the bench gate)
-hpi test list                        # the cases and what each needs
-hpi test run                         # read-only by default
-hpi test run --destructive --group fw
-hpi test soak --iterations 60000     # 0 errors, p99 < 50 ms
+healthypi test list                        # the cases and what each needs
+healthypi test run                         # read-only by default
+healthypi test run --destructive --group fw
+healthypi test soak --iterations 60000     # 0 errors, p99 < 50 ms
 
 # HealthyLink module EEPROMs
-hpi hl eeprom generate -m EEG-8CH -n "EEG-8CH" -s 10001 -o eeprom.bin
-hpi hl eeprom read eeprom.bin        # non-zero exit on a bad CRC
-hpi hl eeprom stack --modules EEG-8CH TRIGGER-IO AI-ACCELERATOR
+healthypi hl eeprom generate -m EEG-8CH -n "EEG-8CH" -s 10001 -o eeprom.bin
+healthypi hl eeprom read eeprom.bin        # non-zero exit on a bad CRC
+healthypi hl eeprom stack --modules EEG-8CH TRIGGER-IO AI-ACCELERATOR
 ```
 
 Update order is `esp32c6 → m4 → m7`; the M7 goes last because it is what applies

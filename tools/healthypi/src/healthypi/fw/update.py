@@ -33,6 +33,12 @@ from .bundle import APPLY_ORDER, Bundle
 # guessing low fails at runtime with "Data size N exceeds maximum".
 _CHUNK_OVERHEAD = 48
 
+# enum hpi_m4fw_state (app_m7/src/services/m4_update_service.h). m4fw_abort
+# clears exactly RECEIVING and FAILED; COMMITTED waits for a reset.
+_M4FW_RECEIVING = 1
+_M4FW_COMMITTED = 3
+_M4FW_FAILED = 4
+
 _RESET_SETTLE_S = 12.0  # M4 rebinds IPC at ~7-10 s; wait past that
 _RECONNECT_TRIES = 30
 
@@ -167,6 +173,66 @@ def mcuboot_image_hash(image: bytes) -> bytes | None:
             return None
 
 
+def unsupported(support: dict[str, bool], wanted: list[str]) -> str | None:
+    """Why this unit cannot take the wanted images over USB, or None.
+
+    A development build (``scripts/build.sh m7``) has no bootloader, no MCUmgr
+    img group and no M4-update service. Comparing version strings against such a
+    unit used to report "nothing to do" or "already at" -- true, and useless:
+    the unit cannot be updated over USB at all, whatever the versions say.
+    """
+    missing = [n for n in wanted if n in support and not support[n]]
+    if not missing:
+        return None
+    what = {
+        "m7": "no MCUboot image group (no bootloader)",
+        "m4": "no M4-update service",
+    }
+    lines = "\n".join(f"  {n}: {what[n]}" for n in missing)
+    return (
+        "this unit cannot be updated over USB -- its firmware has\n"
+        f"{lines}\n"
+        "It is running a development build. Program a signed factory image over "
+        "SWD (scripts/flash.sh factory); after that, updates work over USB."
+    )
+
+
+def m7_downgrade(installed: str, bundle: str) -> str | None:
+    """Refusal text if the bundle's M7 is older than the running one, else None.
+
+    MCUboot refuses an older M7 at boot (downgrade prevention), but only after
+    the whole image has been uploaded -- about 40 s -- and the updater then
+    reports a hash mismatch it can only guess at. Refusing up front is honest.
+    """
+    if not installed or _ver_tuple(bundle) >= _ver_tuple(installed):
+        return None
+    return (
+        f"m7: the bundle's M7 {bundle} is older than the installed {installed}.\n"
+        "  MCUboot refuses older M7 images (downgrade prevention), so uploading "
+        "it would change nothing.\n"
+        "  To install an older M7 deliberately, use recovery, which writes the "
+        "image directly:\n"
+        "    healthypi fw enter-recovery --port <CDC1>\n"
+        "    healthypi fw recover --port <recovery-port> --bundle <file>"
+    )
+
+
+async def _update_support(conn, g, is_error) -> dict[str, bool]:
+    """Which processors this unit can update over USB, asked of the device."""
+    from smpclient.requests.image_management import ImageStatesRead
+
+    support: dict[str, bool] = {}
+    try:
+        support["m7"] = not is_error(await conn.request(ImageStatesRead()))
+    except Exception:  # noqa: BLE001 -- no answer is "not supported"
+        support["m7"] = False
+    try:
+        support["m4"] = not is_error(await conn.request(g.m4fw_status()))
+    except Exception:  # noqa: BLE001
+        support["m4"] = False
+    return support
+
+
 async def _m7_slot_hashes(conn, is_error) -> dict[int, bytes]:
     """slot -> MCUboot image hash, as the device reports it."""
     from smpclient.requests.image_management import ImageStatesRead
@@ -259,6 +325,23 @@ async def _apply_m4(
             "  Rebuild the bundle with scripts/release.sh (which signs), or use "
             "a device built with CONFIG_HPI_M4_UPDATE_REQUIRE_SIGNATURE=n for "
             "bench work."
+        )
+    # An upload left behind by an interrupted run (host crash, cable pull)
+    # holds the service in RECEIVING or FAILED, and begin then answers BUSY
+    # forever -- with no CLI verb to clear it, only a power cycle. Nothing
+    # else writes the M4 staging area, so a stale upload is ours to discard.
+    if status.st in (_M4FW_RECEIVING, _M4FW_FAILED):
+        log(
+            f"M4 : discarding a stale upload (state {status.st}, "
+            f"{status.rx}/{status.len} B, err {status.err})"
+        )
+        resp = await conn.request(g.m4fw_abort())
+        if is_error(resp):
+            raise UpdateError(f"M4 abort of the stale upload failed: {fmt_error(resp)}")
+    elif status.st == _M4FW_COMMITTED:
+        raise UpdateError(
+            "M4: a committed image is waiting for a reset. Run "
+            "`healthypi device reset`, then the update again."
         )
 
     log(
@@ -391,13 +474,20 @@ async def apply_bundle(
                 cur = installed.get(name) or "?"
                 log(f"  {name:<8} installed {cur:<14} bundle {entry['version']}")
 
+        wanted = [
+            n for n in APPLY_ORDER if bundle.images().get(n) and (not only or n == only)
+        ]
+        why = unsupported(await _update_support(conn, g, is_error), wanted)
+        if why:
+            raise UpdateError(why)
+
         plan: list[str] = []
-        for name in APPLY_ORDER:
-            entry = bundle.images().get(name)
-            if not entry:
-                continue
-            if only and name != only:
-                continue
+        for name in wanted:
+            entry = bundle.images()[name]
+            if name == "m7":
+                refusal = m7_downgrade(installed.get("m7", ""), entry["version"])
+                if refusal:
+                    raise UpdateError(refusal)
             if not force and same_version(installed.get(name, ""), entry["version"]):
                 log(f"  {name}: already at {entry['version']} — skipping (force to reapply)")
                 result.skipped.append(name)
@@ -418,9 +508,8 @@ async def apply_bundle(
         for name in plan:
             if name == "esp32c6":
                 log(
-                    "esp32c6: skipped — the C6 updates itself over WiFi "
-                    "(POST /api/ota/upload); it has no wired path through the "
-                    "M7. See docs/ARCHITECTURE.md §1."
+                    "esp32c6: skipped — this tool cannot update the C6 yet. "
+                    "Program it over its own USB port: scripts/flash.sh esp32."
                 )
                 result.skipped.append(name)
                 continue
@@ -447,8 +536,8 @@ async def apply_bundle(
         conn = await _reset_and_reconnect(conn, target, log)
         after = await _fw_versions(conn, g, is_error, fmt_error)
 
-        # Updating BOTH cores in one cycle costs the M4 its IPC bind, and it takes
-        # a second reset to get it back.
+        # Installing a new M7 costs the M4 its IPC bind, and it takes a second
+        # reset to get it back -- whether or not the M4 was updated too.
         #
         # Why: the M4 has no bootloader. It self-delays ~7 s after a chip reset and
         # binds RPMSG exactly once, because static vrings cannot re-bind against an
@@ -461,12 +550,23 @@ async def apply_bundle(
         #
         # The second reset has no image to copy (slot 1 is already consumed, swap
         # type none), so the cores boot together and bind normally. Reproduced and
-        # verified on v5, F8 2026-07-25. An M4-only update never hits this.
-        if "m4" in plan and "m7" in plan:
-            m4_want = (bundle.images().get("m4") or {}).get("version", "")
-            if not same_version(after.get("m4") or "", m4_want):
+        # verified on v5, F8 2026-07-25 (both cores) and 2026-10-01 (M7 only --
+        # the cause is the M7 install, so the M4 being in the plan is irrelevant).
+        # An M4-only update has no MCUboot copy and never hits this.
+        if "m7" in plan:
+            m4_want = (
+                (bundle.images().get("m4") or {}).get("version", "")
+                if "m4" in plan
+                else installed.get("m4") or ""
+            )
+            m4_now = after.get("m4") or ""
+            # An empty m4 version is the unbound case itself: the M7 learns it
+            # from the M4 over IPC. A device with no M4 version before the
+            # update either had no M4 image or was already unbound -- reset
+            # anyway; a second reset is harmless.
+            if not m4_now or (m4_want and not same_version(m4_now, m4_want)):
                 log(
-                    "\nM4 did not bind after the combined update (expected — "
+                    "\nM4 did not bind after the M7 install (expected — "
                     "MCUboot's image copy delayed the M7 past the M4's one-shot "
                     "RPMSG bind). Resetting once more to re-pair the cores…"
                 )

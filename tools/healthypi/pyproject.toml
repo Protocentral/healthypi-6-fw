@@ -5,8 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "protocentral-healthypi"
 version = "0.1.0"
-# Distribution name is protocentral-healthypi; the import package is
-# `healthypi` and the console scripts are `healthypi` / `hpi`.
+# Distribution name is protocentral-healthypi; the import package and the
+# single console script are both `healthypi`.
+#
+# There is deliberately NO `hpi` alias. The firmware's own Zephyr shell
+# registers a root command called `hpi` (app_m7/src/control/shell_hpi), which
+# runs ON the device and is a different program with different verbs. One name
+# for two of them made written instructions ambiguous about which machine was
+# meant to run the command.
 description = "Host library and CLI for HealthyPi 6 — .HP6 decoding, MCUmgr group 64, firmware update"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +20,13 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "ProtoCentral Electronics" }]
 keywords = ["healthypi", "ecg", "ppg", "mcumgr", "smp", "zephyr"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Programming Language :: Python :: 3",
+]
 
 # Deliberately empty. healthypi.hp6 and healthypi.smp.catalog are stdlib-only so
 # that offline decoding and the firmware drift check never need a device stack
@@ -25,9 +38,14 @@ device = ["smpgroup[smp]>=0.1", "smpclient>=2.0", "pyserial>=3.5", "cryptography
 analysis = ["pyarrow>=15"]
 dev = ["pytest>=8"]
 
+[project.urls]
+Homepage = "https://github.com/Protocentral/healthypi-6-fw"
+Source = "https://github.com/Protocentral/healthypi-6-fw/tree/main/tools/healthypi"
+Documentation = "https://github.com/Protocentral/healthypi-6-fw/tree/main/docs"
+Issues = "https://github.com/Protocentral/healthypi-6-fw/issues"
+
 [project.scripts]
 healthypi = "healthypi.cli.main:main"
-hpi = "healthypi.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

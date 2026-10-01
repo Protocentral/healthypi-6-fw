@@ -44,6 +44,42 @@ class NoDeviceError(RuntimeError):
     """No port answered SMP."""
 
 
+class UnparseableReplyError(RuntimeError):
+    """The device answered something that fits none of the command's schemas.
+
+    Two causes produce it in practice:
+
+    * the catalog declares a reply field this firmware does not send -- a
+      firmware/host version mismatch, or a catalog error (seen 2026-10-01: the
+      catalog gave m4fw_begin's empty reply an `off` field). Extra keys no longer
+      cause it; replies tolerate fields the catalog does not know.
+    * a handler returned a group-64 error code (>= 256) as its return value
+      instead of encoding it with ``smp_add_cmd_err()``, which puts the number
+      in the protocol-wide ``rc`` field where it does not exist.
+
+    It exists because the failure is otherwise close to undiagnosable: smpclient
+    raises ``pydantic.ValidationError`` incorrectly while handling it and the
+    user sees ``TypeError: ValidationError.__new__() missing 1 required
+    positional argument`` -- which names neither the device, nor the command,
+    nor the reply.
+    """
+
+
+def _reply_error(req, exc: Exception) -> "UnparseableReplyError":
+    cmd = getattr(type(req), "_COMMAND_ID", "?")
+    grp = getattr(type(req), "_GROUP_ID", "?")
+    name = type(req).__name__.removesuffix("Request")
+    return UnparseableReplyError(
+        f"the device's reply to {name} (group {grp}, command {cmd}) matches "
+        f"neither its success nor its error schema ({type(exc).__name__}).\n"
+        "  Most likely the host tool and the firmware disagree about this reply: "
+        "check that healthypi matches the firmware version (healthypi device "
+        "versions).\n"
+        "  If they match, it is a firmware bug -- usually a handler that returned "
+        "a group error code directly instead of via smp_add_cmd_err()."
+    )
+
+
 @dataclass(slots=True)
 class Connection:
     """A live CDC 1 session."""
@@ -56,13 +92,47 @@ class Connection:
     transport: SMPSerialTransport | None = None
 
     async def request(self, req, timeout_s: float | None = None):
-        if timeout_s is None:
-            return await self.client.request(req)
-        return await asyncio.wait_for(self.client.request(req), timeout=timeout_s)
+        # Pass the budget to SMPClient itself. Wrapping the call in
+        # asyncio.wait_for() instead left the client's own 2.5 s default in
+        # charge, so every longer budget (the M4 commit's, above all) was
+        # silently cut to 2.5 s.
+        try:
+            return await self.client.request(req, timeout_s=timeout_s)
+        except (TypeError, ValueError) as exc:
+            # smpclient raises these out of its own error handling when a reply
+            # matches none of a request's models. Re-raise as something that
+            # says which command, and where to look.
+            if isinstance(exc, TypeError) and "ValidationError" not in str(exc):
+                raise
+            raise _reply_error(req, exc) from exc
+
+
+#: USB vendor ids a HealthyPi 6 enumerates with: the pid.codes VID of a
+#: release build, and Zephyr's development VID of a dev build.
+_HEALTHYPI_VIDS = (0x1209, 0x2FE3)
+
+
+def _healthypi_usb_ports() -> list[str]:
+    """Ports whose USB vendor id is a HealthyPi's, CDC 1 first.
+
+    Matching on the VID alone, not the PID: the application and the bootloader
+    share one PID, and a tool that must know which it reached asks the protocol.
+    Empty when pyserial cannot report USB ids on this platform.
+    """
+    try:
+        from serial.tools import list_ports
+    except ImportError:  # pragma: no cover - pyserial ships with smpclient
+        return []
+    ports = [p.device for p in list_ports.comports() if p.vid in _HEALTHYPI_VIDS]
+    return sorted(ports, reverse=True)
 
 
 def candidates() -> list[str]:
-    """Serial ports that could be a HealthyPi, most likely first."""
+    """Serial ports that could be a HealthyPi, most likely first.
+
+    HealthyPi USB devices come first, so autodetection does not start by sending
+    SMP to whatever else is plugged in (a debug probe's virtual COM port, say).
+    The rest follow, for platforms where USB ids are not available."""
     if sys.platform == "win32":  # pragma: no cover - platform specific
         try:
             from serial.tools import list_ports
@@ -75,7 +145,8 @@ def candidates() -> list[str]:
         found.extend(sorted(glob.glob(pattern)))
     # CDC 1 is the higher-numbered interface on the same device, so probing the
     # highest first usually hits on the first try.
-    return sorted(set(found), reverse=True)
+    preferred = _healthypi_usb_ports()
+    return preferred + [p for p in sorted(set(found), reverse=True) if p not in preferred]
 
 
 def make_transport(

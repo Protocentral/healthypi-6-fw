@@ -286,3 +286,63 @@ def test_device_verb_without_the_device_stack(capsys, monkeypatch):
     err = capsys.readouterr().err
     assert "healthypi[device]" in err
     assert "Traceback" not in err
+
+
+def test_there_is_exactly_one_console_script():
+    """`healthypi`, and nothing else.
+
+    The `hpi` alias was removed because the firmware's own Zephyr shell
+    registers a root command by that name (app_m7/src/control/shell_hpi). One
+    name for a host tool and an on-device shell made written instructions
+    ambiguous about which machine was supposed to run the command.
+    """
+    import re
+    from pathlib import Path
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    block = pyproject.split("[project.scripts]", 1)[1].split("[", 1)[0]
+    scripts = re.findall(r"^\s*([A-Za-z0-9_-]+)\s*=", block, re.M)
+    assert scripts == ["healthypi"], scripts
+
+
+def test_no_docs_or_source_invoke_the_removed_alias():
+    """Nothing in this package should tell anyone to run `hpi <verb>`.
+
+    The verbs come from the parser itself, so a new command group is covered
+    without anyone remembering to extend a list here.
+    """
+    import re
+    from pathlib import Path
+
+    from healthypi.cli.main import build_parser
+
+    ap = build_parser()
+    groups = sorted(
+        ap._subparsers._group_actions[0].choices  # type: ignore[union-attr]
+    )
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_.\-])hpi (?=(?:" + "|".join(map(re.escape, groups)) + r")\b)"
+    )
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix not in (".py", ".md", ".toml") or "__pycache__" in path.parts:
+            continue
+        if path.name == Path(__file__).name:
+            continue   # this file has to spell the thing it forbids
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.relative_to(root)}:{n}: {line.strip()}")
+    assert not offenders, (
+        "the CLI is invoked as `healthypi`; `hpi` is the device's own shell:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_device_reset_is_a_verb():
+    """The updater's hints say `healthypi device reset`; it must exist."""
+    from healthypi.cli.main import build_parser, cmd_device_reset
+
+    args = build_parser().parse_args(["device", "reset", "--port", "/dev/null"])
+    assert args.func is cmd_device_reset

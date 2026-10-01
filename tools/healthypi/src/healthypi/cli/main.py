@@ -80,6 +80,8 @@ def _run_device(args, coro_factory) -> int:
                     return _fail(fmt_error(resp), 2)
                 _emit(args, _model_dict(resp))
                 return 0
+        except serial_smp.UnparseableReplyError as exc:
+            return _fail(str(exc), 2)
         except serial_smp.NoDeviceError as exc:
             return _fail(str(exc), 3)
         except (TimeoutError, asyncio.TimeoutError):
@@ -144,6 +146,43 @@ def _conn_enable(args) -> int:
     return _run_device(args, lambda conn, g: conn.request(g["conn_enable"](radios=mask)))
 
 
+def cmd_device_reset(args) -> int:
+    """Reboot the device (stock MCUmgr os reset).
+
+    Needed in the field more often than it looks: a committed M4 image waits
+    for a reset, and an M7 install that leaves the M4 unbound is fixed by one.
+    Without this verb the only instruction available was "power-cycle it".
+    """
+    import asyncio
+
+    try:
+        from smpclient.requests.os_management import ResetWrite
+    except ImportError:
+        return _fail(
+            "this command needs the device stack, which is not installed.\n"
+            "  Run: pip install 'healthypi[device]'",
+            4,
+        )
+
+    async def reset(conn, g):
+        from ..smp.group64 import is_error
+
+        try:
+            resp = await conn.request(ResetWrite(), timeout_s=3.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            resp = None  # rebooted before the reply got out: that is success
+        if resp is not None and is_error(resp):
+            return resp  # a refusal: _run_device names it and exits non-zero
+        print(
+            "reset sent; the device re-enumerates in a few seconds "
+            "(its M4 reports a version again ~10 s after boot).",
+            file=sys.stderr,
+        )
+        return None
+
+    return _run_device(args, reset)
+
+
 def cmd_device_datetime(args) -> int:
     """Read, or set, the on-device RTC.
 
@@ -203,6 +242,8 @@ def cmd_device_datetime(args) -> int:
                 dt = getattr(resp, "datetime", None)
                 _emit(args, {"datetime": dt}, f"RTC: {dt}")
                 return 0
+        except serial_smp.UnparseableReplyError as exc:
+            return _fail(str(exc), 2)
         except serial_smp.NoDeviceError as exc:
             return _fail(str(exc), 3)
         except (TimeoutError, asyncio.TimeoutError):
@@ -425,7 +466,7 @@ def cmd_stream_capture(args) -> int:
     if not raw:
         return _fail(
             f"no data on {args.stream_port}. Is streaming enabled "
-            "(hpi stream start) and is this CDC 0?"
+            "(healthypi stream start) and is this CDC 0?"
         )
     hp6.wrap_capture(raw, args.out, hp6.new_header(session_name=args.name or "capture"))
     rep = hp6.verify(args.out)
@@ -578,6 +619,8 @@ def _fw_device(args, coro_factory) -> int:
     try:
         return asyncio.run(coro_factory(target))
     except UpdateError as exc:
+        return _fail(str(exc), 2)
+    except serial_smp.UnparseableReplyError as exc:
         return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
@@ -801,6 +844,8 @@ def cmd_test_run(args) -> int:
 
     try:
         return asyncio.run(_main())
+    except serial_smp.UnparseableReplyError as exc:
+        return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
     except KeyboardInterrupt:
@@ -852,6 +897,8 @@ def cmd_test_soak(args) -> int:
 
     try:
         return asyncio.run(_main())
+    except serial_smp.UnparseableReplyError as exc:
+        return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
     except KeyboardInterrupt:
@@ -954,6 +1001,10 @@ def build_parser() -> argparse.ArgumentParser:
         _add_device_opts(p)
         p.set_defaults(func=_simple(cmd))
 
+    p = devs.add_parser("reset", help="reboot the device")
+    _add_device_opts(p)
+    p.set_defaults(func=cmd_device_reset)
+
     p = devs.add_parser("datetime", help="read or set the on-device clock")
     _add_device_opts(p)
     p.add_argument(
@@ -1013,8 +1064,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_simple("sd_status"))
 
     rec.epilog = (
-        "Recordings are retrieved over USB mass storage: `hpi transfer arm`, "
-        "copy from the mounted disk, then `hpi transfer disarm`. Firmware 1.0.0 "
+        "Recordings are retrieved over USB mass storage: `healthypi transfer arm`, "
+        "copy from the mounted disk, then `healthypi transfer disarm`. Firmware 1.0.0 "
         "has no file-download command."
     )
 
@@ -1278,7 +1329,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = build_parser()
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):
-        # `hpi`, or `hpi hp6` with no verb: show the relevant help.
+        # `healthypi`, or `healthypi hp6` with no verb: show the relevant help.
         if getattr(args, "group", None):
             for action in ap._subparsers._group_actions[0].choices.items():  # type: ignore[union-attr]
                 if action[0] == args.group:
