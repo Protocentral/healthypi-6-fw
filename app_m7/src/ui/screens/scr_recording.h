@@ -19,5 +19,7 @@ void hpi_scr_recording_reload(void);
  * Cheap no-op until a pending reload has finished; rebuilds the row list at
  * most once per completed reload. */
 void hpi_scr_recording_refresh(void);
+/* Frees the row widgets when the user leaves the Browse screen. */
+void hpi_scr_recording_release(void);
 
 #endif /* HPI_SCREENS_SCR_RECORDING_H_ */

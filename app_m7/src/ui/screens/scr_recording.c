@@ -95,6 +95,7 @@ static void update_pager_ui(void);
 static void pager_prev_cb(lv_event_t *e);
 static void pager_next_cb(lv_event_t *e);
 static void rebuild_list(void);
+static void detail_close(void);
 
 static void request_page(uint32_t page)
 {
@@ -134,10 +135,28 @@ void hpi_scr_recording_reload(void)
 		s_awaiting_index = false;
 		s_loading = false;
 	}
-	if (s_rb.list) {
-		rebuild_list();
+		if (s_rb.list) {
+		lv_obj_clean(s_rb.list);                 /* free old rows now */
+		if (s_loading) {
+			lv_label_set_text(s_rb.empty_label, "Loading recordings...");
+			lv_obj_clear_flag(s_rb.empty_label, LV_OBJ_FLAG_HIDDEN);
+		} else {
+			rebuild_list();                      /* async start failed */
+		}
 		update_pager_ui();
 	}
+}
+
+void hpi_scr_recording_release(void)
+{
+	detail_close();
+	if (s_rb.list) {
+		lv_obj_clean(s_rb.list);
+	}
+	s_awaiting_index = false;
+	s_awaiting_page = false;
+	s_loading = false;
+	s_detail_pending = false;
 }
 
 /* ---- formatting helpers ---- */

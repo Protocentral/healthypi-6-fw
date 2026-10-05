@@ -439,16 +439,13 @@ static void rec_mark_cb(lv_event_t *e)
 		s_rec.mark_long_active = false;
 		return;
 	}
-	if (s_rec.paused) {
-		/* show transient paused hint */
-		/* keep simple: flash the meta label */
-		lv_obj_set_style_text_color(s_rec.meta, HPI_M3_ON_SURFACE_MUTED, 0);
-		return;
-	}
+	/* Marking while paused is intentionally supported by the service --
+	 * recording_thread() always accepts EVENT/SYNC frames even while
+	 * g_paused, so the UI must not block it here. */
 	int seq = hpi_recording_mark();
 
 	if (seq < 0) {
-		return;   /* not recording: nothing to mark */
+		return;   /* not recording at all: nothing to mark */
 	}
 	s_rec.events = (uint32_t)seq;
 	hpi_events_publish(HPI_EVT_USER_MARK, seq);   /* in-process notification */
@@ -854,8 +851,8 @@ void hpi_scr_record_refresh(void)
 			 s / 3600U, (s / 60U) % 60U, s % 60U);
 		lv_label_set_text(s_rec.elapsed, buf);
 		snprintf(buf, sizeof(buf), "%u.%u MB  \xC2\xB7  %u events",
-			 st.bytes_written / 1000000U,
-			 (st.bytes_written / 100000U) % 10U, s_rec.events);
+         st.bytes_written / 1000000U,
+         (st.bytes_written / 100000U) % 10U, (unsigned)st.events);
 		lv_label_set_text(s_rec.meta, buf);
 		lv_label_set_text(s_rec.fname, st.path);
 

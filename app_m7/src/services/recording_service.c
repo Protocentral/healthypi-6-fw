@@ -1248,6 +1248,7 @@ void hpi_recording_get_status(struct hpi_recording_status *out)
     out->ecg_samples = g_hdr.sample_count[HP6_HDR_SLOT(HPI_CH_ECG)];
     out->ppg_samples = g_hdr.sample_count[HP6_HDR_SLOT(HPI_CH_PPG)];
     out->vitals_samples = g_hdr.sample_count[HP6_HDR_SLOT(HPI_CH_VITALS)];
+    out->events = g_hdr.event_count;
     strncpy(out->path, g_path, sizeof(out->path) - 1);
     out->path[sizeof(out->path) - 1] = '\0';
 }
@@ -1273,6 +1274,17 @@ int hpi_recording_pause(bool pause)
         g_paused = false;
     }
     k_mutex_unlock(&g_lock);
+
+    /* SRS §3.3 / §10 T4: pause and resume must each leave a SYSTEM
+     * event in .HP6 (in-band DBLK) and .IDX (sidecar). Must be called
+     * AFTER releasing g_lock -- emit_event()/idx_append_event() take
+     * the lock themselves. */
+    int rc = emit_event(pause ? HP6_EVENT_SYSTEM_PAUSE : HP6_EVENT_SYSTEM_RESUME,
+                     HP6_IDX_EVT_SYSTEM,
+                     pause ? "PAUSE" : "RESUME");
+    if (rc > 0) {
+        LOG_INF("%s %d recorded", pause ? "pause" : "resume", rc);
+    }
     return 0;
 }
 

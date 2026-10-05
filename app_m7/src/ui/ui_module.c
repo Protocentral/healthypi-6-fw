@@ -139,7 +139,13 @@ void hpi_ui_show_screen(enum hpi_ui_screen scr)
 	if (scr >= HPI_UI_SCREEN_COUNT) {
 		return;
 	}
+	//s_active = scr;
+	enum hpi_ui_screen prev = s_active;
 	s_active = scr;
+	if (prev == HPI_UI_SCREEN_RECORDINGS && scr != HPI_UI_SCREEN_RECORDINGS) {
+		hpi_scr_recording_release();
+	}
+
 	for (int i = 0; i < HPI_UI_SCREEN_COUNT; i++) {
 		if (s_screen[i] == NULL) {
 			continue;

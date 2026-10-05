@@ -31,6 +31,7 @@ struct hpi_recording_status {
     uint32_t ecg_samples;
     uint32_t ppg_samples;
     uint32_t vitals_samples;
+    uint32_t events;        /* number of events recorded (from .IDX header) */
     char     path[64];
 };
 
