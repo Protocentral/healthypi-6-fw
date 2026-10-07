@@ -615,14 +615,17 @@ void hpi_ui_waveform_create(struct hpi_ui_waveform *w, lv_obj_t *parent,
 	w->floor    = half / 64 > 0 ? half / 64 : 1;
 	w->peak     = 0;
 	w->baseline = 0;
+	w->bl_q     = 0;
 	w->recount  = 0;
 	w->user_q   = 256;   /* x1 -- the auto-scaled amplitude, unmodified */
+	w->target   = WF_TARGET;
 	w->bl_shift = bl_shift ? bl_shift : 9;
 	w->primed   = false;
 
 	int32_t init_peak = half / 2 > w->floor ? half / 2 : w->floor;
 
-	w->gain_q = (int32_t)(((int64_t)WF_TARGET << WF_GAIN_Q) / init_peak);
+	//w->gain_q = (int32_t)(((int64_t)WF_TARGET << WF_GAIN_Q) / init_peak);
+	w->gain_q = (int32_t)(((int64_t)w->target << WF_GAIN_Q) / init_peak);
 	lv_chart_set_range(w->chart, LV_CHART_AXIS_PRIMARY_Y, -WF_CHART_HALF, WF_CHART_HALF);
 }
 
@@ -638,25 +641,41 @@ void hpi_ui_waveform_set_points(struct hpi_ui_waveform *w, uint16_t points)
 	}
 	lv_chart_set_point_count(w->chart, points);
 }
-
+void hpi_ui_waveform_set_target(struct hpi_ui_waveform *w, int32_t target)
+{
+	if (target < 50) {
+		target = 50;
+	} else if (target > WF_CHART_HALF) {
+		target = WF_CHART_HALF;
+	}
+	w->target = target;
+}
 void hpi_ui_waveform_push(struct hpi_ui_waveform *w, int32_t v)
 {
 	if (!w->chart || !w->series) {
 		return;
 	}
 
-	/* Seed the baseline on the first sample so it converges immediately
-	 * instead of sweeping up from zero. */
-	if (!w->primed) {
-		w->baseline = v;
+	// /* Seed the baseline on the first sample so it converges immediately
+	//  * instead of sweeping up from zero. */
+	// if (!w->primed) {
+	// 	w->baseline = v;
+	// 	w->primed = true;
+	// }
+
+	// /* DC-block: EMA baseline subtracted -> high-pass. The per-waveform shift
+	//  * sets the cutoff: small (PPG) tracks heavy baseline wander, large (ECG)
+	//  * preserves the slow components of a steadier trace. */
+	// w->baseline += (v - w->baseline) >> w->bl_shift;
+	// int32_t ac = v - w->baseline;
+		if (!w->primed) {
+		w->bl_q = (int64_t)v << 8;
 		w->primed = true;
 	}
 
-	/* DC-block: EMA baseline subtracted -> high-pass. The per-waveform shift
-	 * sets the cutoff: small (PPG) tracks heavy baseline wander, large (ECG)
-	 * preserves the slow components of a steadier trace. */
-	w->baseline += (v - w->baseline) >> w->bl_shift;
-	int32_t ac = v - w->baseline;
+	w->bl_q += (((int64_t)v << 8) - w->bl_q) >> w->bl_shift;
+	w->baseline = (int32_t)(w->bl_q >> 8);
+	int32_t ac = (int32_t)((((int64_t)v << 8) - w->bl_q) >> 8);
 
 	int32_t a = ac < 0 ? -ac : ac;
 	if (a > w->peak) {
@@ -684,8 +703,8 @@ void hpi_ui_waveform_push(struct hpi_ui_waveform *w, int32_t v)
 	if (++w->recount >= 128) {
 		w->recount = 0;
 		int32_t p = w->peak > w->floor ? w->peak : w->floor;
-		int32_t target_gain = (int32_t)(((int64_t)WF_TARGET << WF_GAIN_Q) / p);
-
+		//int32_t target_gain = (int32_t)(((int64_t)WF_TARGET << WF_GAIN_Q) / p);
+        int32_t target_gain = (int32_t)(((int64_t)w->target << WF_GAIN_Q) / p);
 		w->gain_q += (target_gain - w->gain_q) >> 2;
 		if (w->gain_q < 1) {
 			w->gain_q = 1;

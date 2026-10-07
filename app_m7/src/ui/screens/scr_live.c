@@ -232,6 +232,20 @@ static void lane_create(struct live_lane *ln, lv_obj_t *parent, const char *labe
 	}
 }
 
+static int64_t s_resp_lp_q8;
+static bool    s_resp_lp_init;
+
+static int32_t resp_lowpass_x16(int32_t x)
+{
+	int64_t xq = (int64_t)x << 8;
+
+	if (!s_resp_lp_init) {
+		s_resp_lp_q8 = xq;
+		s_resp_lp_init = true;
+	}
+	s_resp_lp_q8 += (xq - s_resp_lp_q8) >> 3;
+	return (int32_t)(s_resp_lp_q8 >> 4);
+}
 /* ---- screen ---- */
 
 lv_obj_t *hpi_scr_live_create(lv_obj_t *parent)
@@ -272,7 +286,9 @@ lv_obj_t *hpi_scr_live_create(lv_obj_t *parent)
 	/* ECG steadier baseline -> slow DC-block (9); PPG/Resp wander -> fast (5/6). */
 	lane_create(&s_l.ecg,  lanes, "ECG \xC2\xB7 LEAD II", "BPM",   HPI_M3_SIG_ECG,  9, 2000,   true);
 	lane_create(&s_l.ppg,  lanes, "PPG \xC2\xB7 IR",      "% SPO2", HPI_M3_SIG_PPG,  5, 200000, true);
-	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, 6, 50000,  false);
+	//lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, 6, 50000,  false);
+	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, 9, 1024,   false);
+    hpi_ui_waveform_set_target(&s_l.resp.wf, 230);
 
 #if HPI_UI_TEST_VALUES
 	lv_label_set_text(s_l.ecg.value,  "72");
@@ -289,7 +305,8 @@ void hpi_scr_live_push_ecg(int32_t lead_ii_uv, int32_t resp_uv, uint8_t lead_off
 		return;
 	}
 	hpi_ui_waveform_push(&s_l.ecg.wf, lead_ii_uv);
-	hpi_ui_waveform_push(&s_l.resp.wf, resp_uv);
+//	hpi_ui_waveform_push(&s_l.resp.wf, resp_uv);
+		hpi_ui_waveform_push(&s_l.resp.wf, resp_lowpass_x16(resp_uv));
 
 	/* Touch LVGL only on a real transition. This runs once per ECG *sample*
 	 * (~125/s after decimation); an unconditional set_text/style call per

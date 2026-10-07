@@ -117,13 +117,15 @@ struct hpi_ui_waveform {
 	int32_t            user_q;     /* user zoom on top of gain_q, Q8 (256=x1) */
 	uint8_t            bl_shift;   /* DC-block EMA shift: larger = slower     */
 	bool               primed;
+	int64_t bl_q;
+	int32_t target;
 };
 
 /* Display zoom applied ON TOP of the automatic scaling, Q8 (256 = x1).
  * A multiplier, never a mV/division gain: nothing here maps pixels to
  * millivolts, so an absolute unit would be a fabricated number. */
 void hpi_ui_waveform_set_zoom(struct hpi_ui_waveform *w, int32_t mult_q8);
-
+void hpi_ui_waveform_set_target(struct hpi_ui_waveform *w, int32_t target);
 /* Resize the sweep window, in chart points; fewer points is a faster sweep.
  * Label it in seconds (points / push rate), never mm/s — the firmware does not
  * know the panel's physical width. Reallocates the series, so call it on a
