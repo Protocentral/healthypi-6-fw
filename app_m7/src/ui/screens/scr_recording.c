@@ -4,12 +4,13 @@
  *
  * Recordings browse/delete screen — a recording_service client.
  *
- * recording_list_async() runs the directory walk on the system workqueue
- * thread, so its callback (reclist_cb) must never touch LVGL. It copies each
- * recording_summary into a staging array and, on the NULL-entry sentinel,
- * flips an atomic "ready" flag. hpi_scr_recording_refresh() is polled from
- * the UI thread and is the only place that ever rebuilds the LVGL list --
- * the same deferred-update split ui_module.c uses for the sample bus.
+ * The index build, page fetch and delete all run on the recording service's
+ * work queue, so their callbacks must never touch LVGL. They stage results
+ * and flip an atomic "ready" flag; hpi_scr_recording_refresh(), polled from
+ * the UI thread, is the only place that rebuilds the list -- the same
+ * deferred-update split ui_module.c uses for the sample bus. While a fetch is
+ * in flight the staged rows are being rewritten, so every tap that reads them
+ * is ignored until it lands.
  */
 #include "scr_recording.h"
 #include "../components/hpi_ui_components.h"
@@ -49,6 +50,10 @@ static uint32_t   s_cur_page;
 static bool       s_detail_pending;
 static uint32_t   s_detail_pending_local;
 
+static atomic_t   s_delete_done = ATOMIC_INIT(0);
+static volatile int s_delete_rc;
+static bool       s_deleting;
+
 /* ---- UI state ---- */
 static struct {
 	lv_obj_t *root;
@@ -61,9 +66,10 @@ static struct {
 	lv_obj_t *empty_label; /* "No recordings yet" placeholder            */
 	lv_obj_t *detail;      /* modal overlay, or NULL when closed         */
 	struct recording_summary sel;   /* copy of the row that's open in detail */
-	uint32_t  sel_idx;     /* index of `sel` into s_stage[], for paging */
+	uint32_t  sel_idx;     /* global index of `sel`, for paging */
 	bool      del_armed;
 	lv_timer_t *del_timer;
+	lv_obj_t *del_btn;     /* the detail's DELETE button, while it exists */
 } s_rb;
 
 static void index_cb(const struct recording_index_entry *entries, size_t n_entries,
@@ -135,7 +141,7 @@ void hpi_scr_recording_reload(void)
 		s_awaiting_index = false;
 		s_loading = false;
 	}
-		if (s_rb.list) {
+	if (s_rb.list) {
 		lv_obj_clean(s_rb.list);                 /* free old rows now */
 		if (s_loading) {
 			lv_label_set_text(s_rb.empty_label, "Loading recordings...");
@@ -269,6 +275,7 @@ static void detail_close(void)
 		lv_obj_del(s_rb.detail);
 		s_rb.detail = NULL;
 	}
+	s_rb.del_btn = NULL;
 	s_rb.del_armed = false;
 }
 
@@ -280,7 +287,9 @@ static void detail_close_cb(lv_event_t *e)
 
 static void detail_goto_global(uint32_t global_idx)
 {
-	if (s_total_count == 0) return;
+	if (s_total_count == 0 || s_loading) {
+		return;
+	}
 	global_idx %= s_total_count;
 
 	uint32_t page  = global_idx / REC_PAGE_SIZE;
@@ -331,10 +340,20 @@ static void del_confirm_timeout(lv_timer_t *t)
 	lv_timer_del(t);
 }
 
+static void delete_cb(int rc, void *user_data)
+{
+	ARG_UNUSED(user_data);
+	s_delete_rc = rc;
+	atomic_set(&s_delete_done, 1);
+}
+
 static void del_btn_cb(lv_event_t *e)
 {
 	lv_obj_t *btn = lv_event_get_target(e);
 
+	if (s_deleting) {
+		return;
+	}
 	if (!s_rb.del_armed) {
 		/* First tap: just arm it. Nothing is deleted here. */
 		s_rb.del_armed = true;
@@ -348,14 +367,33 @@ static void del_btn_cb(lv_event_t *e)
 		lv_timer_del(s_rb.del_timer);
 		s_rb.del_timer = NULL;
 	}
-	int rc = recording_delete(s_rb.sel.path);
-	if (rc == 0) {
+	s_rb.del_armed = false;
+	atomic_set(&s_delete_done, 0);
+	if (recording_delete_async(s_rb.sel.path, delete_cb, NULL) != 0) {
+		lv_label_set_text(lv_obj_get_child(btn, 1), "DELETE FAILED");
+		return;
+	}
+	/* The card work happens off this thread; refresh picks up the result. */
+	s_deleting = true;
+	s_rb.del_btn = btn;
+	lv_label_set_text(lv_obj_get_child(btn, 1), "DELETING...");
+}
+
+/* UI thread: finish a delete once the work queue has reported back. */
+static void delete_poll(void)
+{
+	if (!s_deleting || !atomic_get(&s_delete_done)) {
+		return;
+	}
+	s_deleting = false;
+	atomic_set(&s_delete_done, 0);
+	if (s_delete_rc == 0) {
 		detail_close();
 		hpi_scr_recording_reload();   /* pull the deleted row out of the list */
-	} else {
-		lv_label_set_text(lv_obj_get_child(btn, 1),
-				  rc == -EBUSY ? "IN USE - CAN'T DELETE" : "DELETE FAILED");
-		s_rb.del_armed = false;
+	} else if (s_rb.detail && s_rb.del_btn) {
+		lv_label_set_text(lv_obj_get_child(s_rb.del_btn, 1),
+				  s_delete_rc == -EBUSY ? "IN USE - CAN'T DELETE"
+							: "DELETE FAILED");
 	}
 }
 
@@ -391,12 +429,12 @@ static void open_detail(const struct recording_summary *e, uint32_t idx)
 	s_rb.sel_idx = idx;
 
 	lv_obj_t *ov = lv_obj_create(s_rb.root);
-	lv_obj_add_flag(ov, LV_OBJ_FLAG_IGNORE_LAYOUT);   /* NEW */
+	lv_obj_add_flag(ov, LV_OBJ_FLAG_IGNORE_LAYOUT);   /* overlay, not a flex child */
 	lv_obj_set_pos(ov, 0, 0);
 	lv_obj_set_size(ov, lv_pct(100), lv_pct(100));
 	hpi_m3_apply_card(ov, HPI_M3_SURFACE, 0);
 	lv_obj_set_style_pad_all(ov, HPI_M3_SPACE_4, 0);
-	lv_obj_set_style_pad_row(ov, HPI_M3_SPACE_2, 0);	
+	lv_obj_set_style_pad_row(ov, HPI_M3_SPACE_2, 0);
 	lv_obj_add_flag(ov, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_scroll_dir(ov, LV_DIR_VER);
 	lv_obj_set_flex_flow(ov, LV_FLEX_FLOW_COLUMN);
@@ -497,7 +535,6 @@ static void open_detail(const struct recording_summary *e, uint32_t idx)
 	lv_obj_set_style_border_width(spacer, 0, 0);
 	lv_obj_clear_flag(spacer, LV_OBJ_FLAG_SCROLLABLE);
 
-
 	lv_obj_t *del_btn = lv_button_create(ov);
 	lv_obj_set_size(del_btn, lv_pct(100), HPI_M3_TOUCH_MIN);
 	hpi_m3_apply_card(del_btn, HPI_M3_ERROR, HPI_M3_RADIUS_XL);
@@ -535,6 +572,11 @@ static void open_detail(const struct recording_summary *e, uint32_t idx)
 static void row_click_cb(lv_event_t *e)
 {
 	uint32_t local = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+
+	/* Mid-fetch, s_page_stage holds a mix of the old page and the new one. */
+	if (s_loading) {
+		return;
+	}
 	if (local < s_page_stage_n) {
 		open_detail(&s_page_stage[local], s_cur_page * REC_PAGE_SIZE + local);
 	}
@@ -661,6 +703,7 @@ lv_obj_t *hpi_scr_recording_create(lv_obj_t *parent)
 
 	lv_obj_t *right = lv_obj_create(s_rb.bar);
 	lv_obj_set_size(right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+	hpi_m3_apply_touch(right);   /* the glyph alone is a 14 px target */
 	lv_obj_set_style_bg_opa(right, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_border_width(right, 0, 0);
 	lv_obj_set_style_pad_all(right, 0, 0);
@@ -671,6 +714,7 @@ lv_obj_t *hpi_scr_recording_create(lv_obj_t *parent)
 	lv_label_set_text(ric, LV_SYMBOL_REFRESH);
 	lv_obj_set_style_text_font(ric, &lv_font_montserrat_14, 0);
 	lv_obj_set_style_text_color(ric, HPI_M3_ON_SURFACE_VARIANT, 0);
+	lv_obj_center(ric);
 
 	s_rb.list = lv_obj_create(root);
 	lv_obj_set_width(s_rb.list, lv_pct(100));
@@ -729,14 +773,19 @@ lv_obj_t *hpi_scr_recording_create(lv_obj_t *parent)
 static void pager_prev_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (s_cur_page > 0) request_page(s_cur_page - 1);
+	if (!s_loading && s_cur_page > 0) {
+		request_page(s_cur_page - 1);
+	}
 }
 
 static void pager_next_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	uint32_t total_pages = (s_total_count + REC_PAGE_SIZE - 1) / REC_PAGE_SIZE;
-	if (s_cur_page + 1 < total_pages) request_page(s_cur_page + 1);
+
+	if (!s_loading && s_cur_page + 1 < total_pages) {
+		request_page(s_cur_page + 1);
+	}
 }
 
 static void update_pager_ui(void)
@@ -765,6 +814,8 @@ void hpi_scr_recording_refresh(void)
 	if (s_rb.list == NULL) {
 		return;
 	}
+
+	delete_poll();
 
 	if (s_awaiting_index) {
 		if (!atomic_get(&s_index_ready)) return;
