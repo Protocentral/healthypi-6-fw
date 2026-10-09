@@ -40,7 +40,7 @@ M7_OVERLAYS="display-gc9503v.overlay;$HPI_BOARD_DIR/healthylink-compute.overlay"
 
 build_m7() {
     local flavor="${1:-dev}"
-    echo "▶ M7 ($flavor) + M3 UI + HealthyLink Compute → build/m7"
+    echo "▶ M7 ($flavor) + Material 3 UI + HealthyLink Compute → build/m7"
     west build -p always -b "$HPI_BOARD_M7" -d build/m7 app_m7 \
         -- -DEXTRA_CONF_FILE="prj.${flavor}.conf;$M7_CONF_BASE" \
            -DEXTRA_DTC_OVERLAY_FILE="$M7_OVERLAYS"
