@@ -140,13 +140,13 @@ void hpi_ui_show_screen(enum hpi_ui_screen scr)
 	if (scr >= HPI_UI_SCREEN_COUNT) {
 		return;
 	}
-	//s_active = scr;
 	enum hpi_ui_screen prev = s_active;
+
 	s_active = scr;
+	/* The browser's rows are rebuilt on every visit; free them on leaving. */
 	if (prev == HPI_UI_SCREEN_RECORDINGS && scr != HPI_UI_SCREEN_RECORDINGS) {
 		hpi_scr_recording_release();
 	}
-
 	for (int i = 0; i < HPI_UI_SCREEN_COUNT; i++) {
 		if (s_screen[i] == NULL) {
 			continue;
@@ -547,8 +547,11 @@ static void ui_thread(void *a, void *b, void *c)
 			next_refresh = now + UI_REFRESH_MS;
 
 			/* Hide nav + block swipe while actively recording on the
-			 * Record screen; restored on stop / leaving. */
-						bool lock = ((s_active == HPI_UI_SCREEN_REC) && hpi_recording_active()) ||
+			 * Record screen, and on the Recordings browser (a
+			 * sub-screen with its own back chevron); restored on
+			 * stop / leaving. */
+			bool lock = ((s_active == HPI_UI_SCREEN_REC) &&
+				     hpi_recording_active()) ||
 				    s_active == HPI_UI_SCREEN_RECORDINGS;
 			if (lock != s_nav_locked) {
 				s_nav_locked = lock;

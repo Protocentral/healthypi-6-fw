@@ -10,7 +10,7 @@
 /* Browse/delete screen for recordings on the SD card. */
 lv_obj_t *hpi_scr_recording_create(lv_obj_t *parent);
 
-/* Kicks off a fresh recording_list_async() listing. Call once on create and
+/* Kicks off a fresh index build and first-page fetch. Called on create and
  * again any time the list may be stale (e.g. right before switching in from
  * the Rec screen's BROWSE button). */
 void hpi_scr_recording_reload(void);
@@ -19,6 +19,7 @@ void hpi_scr_recording_reload(void);
  * Cheap no-op until a pending reload has finished; rebuilds the row list at
  * most once per completed reload. */
 void hpi_scr_recording_refresh(void);
+
 /* Frees the row widgets when the user leaves the Browse screen. */
 void hpi_scr_recording_release(void);
 

@@ -24,14 +24,27 @@
 #include "services/power_service.h"
 #include "core/channel_registry.h"
 #include "scr_recording.h"
+
 /* ============================ Record screen ============================
  *
  * One screen, two views toggled by the recording state: setup (channels,
- * duration, SD estimate, START CTA) and active (elapsed, size/events,
- * MARK EVENT, STOP). The recording_service records a fixed channel set with no
- * duration limit, so the channel/duration controls are visual design chrome;
- * START/STOP/elapsed/size + the SD free readout are live. MARK EVENT publishes
- * HPI_EVT_USER_MARK (the hardware short-press mirrors it). */
+ * duration, SD free space, START, BROWSE) and active (elapsed, size/events,
+ * PAUSE, MARK EVENT, STOP). Every control drives the recording service; the
+ * screen keeps no recording state of its own beyond what the controls show.
+ * MARK EVENT publishes HPI_EVT_USER_MARK (the hardware short-press mirrors
+ * it). */
+
+/* Selectable channels, in display order. Respiration is part of the ECG
+ * sample, so it shares the ECG switch. */
+#define REC_CHAN_COUNT 3
+static const uint8_t s_rec_chan_id[REC_CHAN_COUNT] = {
+	HPI_CH_ECG, HPI_CH_PPG, HPI_CH_VITALS,
+};
+
+/* Duration choices; 0 = continuous (no auto-stop). */
+#define REC_DUR_COUNT 4
+static const uint32_t s_rec_dur_s[REC_DUR_COUNT] = { 30U, 300U, 3600U, 0U };
+#define REC_DUR_DEFAULT 3   /* continuous */
 
 static struct {
 	lv_obj_t   *setup;       /* idle view container   */
@@ -44,33 +57,18 @@ static struct {
 	lv_obj_t   *elapsed;     /* active: HH:MM:SS */
 	lv_obj_t   *meta;        /* active: "N MB · K events" */
 	lv_obj_t   *fname;       /* active: filename */
-	uint32_t    events;      /* marks this session */
-	bool        paused;      /* UI pause state */
-	lv_timer_t *timer;       /* periodic refresh ≤4Hz */
 	lv_obj_t   *batt_overlay; /* low-battery overlay */
 	lv_obj_t   *err_overlay;  /* recording-error banner (I/O fault / card eject) */
 	bool        stop_armed;  /* stop confirm armed */
 	lv_timer_t *stop_timer;  /* one-shot confirm timer */
-	lv_obj_t   *chan_sw[4];  /* channel switch objects */
-	bool        chan_on[4];
-	lv_obj_t   *dur_seg[4];
+	lv_obj_t   *chan_sw[REC_CHAN_COUNT];  /* switch tracks, visual only */
+	bool        chan_on[REC_CHAN_COUNT];
+	lv_obj_t   *dur_seg[REC_DUR_COUNT];
 	int         dur_idx;
 	bool        mark_long_active; /* suppress click after long-press */
-	bool        stop_work_was_scheduled;   
-	k_ticks_t   stop_work_remaining_ticks; 
-	lv_obj_t   *pause_btn;   
-	lv_obj_t   *stop_btn;    
+	lv_obj_t   *pause_btn;
+	lv_obj_t   *stop_btn;
 } s_rec;
-
-
-/* delayed stop work — UI schedules this when START uses a non-continuous duration */
-static void stop_work_fn(struct k_work *w)
-{
-	ARG_UNUSED(w);
-	hpi_recording_stop();
-	//hpi_scr_record_refresh();
-}
-K_WORK_DELAYABLE_DEFINE(s_rec_stop_work, stop_work_fn);
 
 /* Modal note-entry overlay (long-press MARK EVENT). NULL when closed. */
 static lv_obj_t *s_note_overlay;
@@ -118,39 +116,15 @@ static void section_label(lv_obj_t *parent, const char *text)
 	lv_obj_set_style_text_letter_space(l, 2, 0);
 }
 
-static void record_timer_cb(lv_timer_t *t)
-{
-	ARG_UNUSED(t);
-	/* Refresh at up to 4 Hz */
-	hpi_scr_record_refresh();
-}
-
 static void pause_btn_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	s_rec.paused = !s_rec.paused;
-	/* Inform the recording service so paused time is excluded and writer
-	 * drops data frames while keeping the file open. */
-	(void)hpi_recording_pause(s_rec.paused);
+	struct hpi_recording_status st;
 
-	if (s_rec.dur_idx != 3) {
-		if (s_rec.paused) {
-			k_ticks_t rem = k_work_delayable_remaining_get(&s_rec_stop_work);
-			s_rec.stop_work_was_scheduled = (rem > 0);
-			s_rec.stop_work_remaining_ticks = rem;
-			(void)k_work_cancel_delayable(&s_rec_stop_work);
-		} else if (s_rec.stop_work_was_scheduled) {
-			k_work_reschedule(&s_rec_stop_work, K_TICKS(s_rec.stop_work_remaining_ticks));
-			s_rec.stop_work_was_scheduled = false;
-		}
-	}
-
-	lv_obj_t *btn = lv_event_get_target(e);
-	lv_obj_t *lbl = lv_obj_get_child(btn, 1);
-	if (lbl) {
-		lv_label_set_text(lbl, s_rec.paused ? "RESUME" : "PAUSE");
-	}
-	/* Refresh UI immediately so elapsed time updates when pausing/resuming. */
+	/* The service owns the pause state (and the auto-stop, which counts
+	 * recorded time only); the button label follows it in refresh. */
+	hpi_recording_get_status(&st);
+	(void)hpi_recording_pause(!st.paused);
 	hpi_scr_record_refresh();
 }
 
@@ -184,13 +158,20 @@ static void stop_btn_cb(lv_event_t *e)
 	rec_stop_cb(e);
 }
 
-/* Visual M3 switch (indicator only — the service records a fixed channel set). */
+static void channel_toggle_cb(lv_event_t *e);
+
+/* One channel row. The whole row is the touch target -- the switch track is
+ * only its indicator -- so it meets HPI_M3_TOUCH_MIN without a 64 px switch.
+ * Returns the switch track. */
 static lv_obj_t *channel_row(lv_obj_t *parent, const char *icon, lv_color_t icol,
-			const char *name, const char *rate, bool on, int idx)
+			     const char *name, const char *rate, int idx)
 {
 	lv_obj_t *row = lv_obj_create(parent);
 	lv_obj_set_width(row, lv_pct(100));
 	lv_obj_set_height(row, LV_SIZE_CONTENT);
+	hpi_m3_apply_touch(row);
+	lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_add_event_cb(row, channel_toggle_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
 	lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_border_width(row, 0, 0);
 	lv_obj_set_style_pad_ver(row, HPI_M3_SPACE_1, 0);
@@ -204,13 +185,12 @@ static lv_obj_t *channel_row(lv_obj_t *parent, const char *icon, lv_color_t icol
 	lv_obj_t *ic = lv_label_create(row);
 	lv_label_set_text(ic, icon);
 	lv_obj_set_style_text_font(ic, HPI_M3_FONT_ICON, 0);
-	lv_obj_set_style_text_color(ic, on ? icol : HPI_M3_ON_SURFACE_FAINT, 0);
+	lv_obj_set_style_text_color(ic, icol, 0);
 
 	lv_obj_t *nm = lv_label_create(row);
 	lv_label_set_text(nm, name);
 	lv_obj_set_style_text_font(nm, HPI_M3_FONT_BODY, 0);
-	lv_obj_set_style_text_color(nm, on ? HPI_M3_ON_SURFACE
-					   : HPI_M3_ON_SURFACE_VARIANT, 0);
+	lv_obj_set_style_text_color(nm, HPI_M3_ON_SURFACE, 0);
 
 	lv_obj_t *rt = lv_label_create(row);
 	lv_label_set_text(rt, rate);
@@ -222,23 +202,29 @@ static lv_obj_t *channel_row(lv_obj_t *parent, const char *icon, lv_color_t icol
 	lv_obj_t *sw = lv_obj_create(row);      /* switch track */
 	lv_obj_set_size(sw, 44, 24);
 	lv_obj_set_style_radius(sw, 12, 0);
-	lv_obj_set_style_bg_color(sw, on ? HPI_M3_PRIMARY : HPI_M3_OUTLINE, 0);
 	lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(sw, 0, 0);
 	lv_obj_clear_flag(sw, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(sw, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_t *knob = lv_obj_create(sw);     /* knob */
 	lv_obj_set_size(knob, 20, 20);
-	lv_obj_align(knob, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -2 : 2, 0);
 	lv_obj_set_style_radius(knob, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_bg_color(knob, on ? HPI_M3_SURFACE : HPI_M3_ON_SURFACE_MUTED, 0);
 	lv_obj_set_style_bg_opa(knob, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(knob, 0, 0);
 	lv_obj_clear_flag(knob, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_clear_flag(knob, LV_OBJ_FLAG_CLICKABLE);
-    
-    
-	(void)knob;
 	return sw;
+}
+
+/* Paint a switch track for its on/off state. */
+static void channel_switch_paint(lv_obj_t *sw, bool on)
+{
+	lv_obj_set_style_bg_color(sw, on ? HPI_M3_PRIMARY : HPI_M3_OUTLINE, 0);
+	lv_obj_t *knob = lv_obj_get_child(sw, 0);
+	if (knob) {
+		lv_obj_align(knob, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -2 : 2, 0);
+		lv_obj_set_style_bg_color(knob, on ? HPI_M3_SURFACE : HPI_M3_ON_SURFACE_MUTED, 0);
+	}
 }
 
 /* Filled M3 CTA/button with an icon + caps label. */
@@ -292,7 +278,7 @@ static lv_obj_t *seg_item(lv_obj_t *bar, const char *text, bool on, bool last, i
 	lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
 	lv_obj_set_style_text_color(l, on ? HPI_M3_PRIMARY_LIGHT
 					  : HPI_M3_ON_SURFACE_VARIANT, 0);
-	if (idx >= 0 && idx < 4) {
+	if (idx >= 0 && idx < REC_DUR_COUNT) {
 		s_rec.dur_seg[idx] = s;
 	}
 	return s;
@@ -300,40 +286,40 @@ static lv_obj_t *seg_item(lv_obj_t *bar, const char *text, bool on, bool last, i
 
 static void channel_toggle_cb(lv_event_t *e)
 {
-	lv_obj_t *sw = lv_event_get_target(e);
 	int idx = (int)(intptr_t)lv_event_get_user_data(e);
-	if (idx < 0 || idx >= 4) return;
+
+	if (idx < 0 || idx >= REC_CHAN_COUNT) {
+		return;
+	}
 	bool on = !s_rec.chan_on[idx];
+
+	/* Refused while recording (the setup view is hidden then anyway). */
+	if (hpi_recording_set_channel_enabled(s_rec_chan_id[idx], on) != 0) {
+		return;
+	}
 	s_rec.chan_on[idx] = on;
-	lv_obj_set_style_bg_color(sw, on ? HPI_M3_PRIMARY : HPI_M3_OUTLINE, 0);
-	lv_obj_t *knob = lv_obj_get_child(sw, 0);
-	if (knob) {
-		lv_obj_align(knob, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -2 : 2, 0);
-		lv_obj_set_style_bg_color(knob, on ? HPI_M3_SURFACE : HPI_M3_ON_SURFACE_MUTED, 0);
-	}
-	/* Map UI toggles to recorder channel ids and inform the recording service.
-	 * idx: 0=ECG, 1=PPG, 2=RESP, 3=TEMP (mapped to VITALS). */
-	uint8_t ch = HPI_CH_ECG;
-	switch (idx) {
-	case 0: ch = HPI_CH_ECG; break;
-	case 1: ch = HPI_CH_PPG; break;
-	case 2: ch = HPI_CH_RESP; break;
-	case 3: ch = HPI_CH_VITALS; break;
-	}
-	(void)hpi_recording_set_channel_enabled(ch, on);
+	channel_switch_paint(s_rec.chan_sw[idx], on);
 }
 
 static void duration_select_cb(lv_event_t *e)
 {
 	int idx = (int)(intptr_t)lv_event_get_user_data(e);
-	if (idx < 0 || idx >= 4) return;
+
+	if (idx < 0 || idx >= REC_DUR_COUNT) {
+		return;
+	}
 	s_rec.dur_idx = idx;
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < REC_DUR_COUNT; i++) {
 		lv_obj_t *s = s_rec.dur_seg[i];
-		if (!s) continue;
+		if (!s) {
+			continue;
+		}
 		lv_obj_set_style_bg_opa(s, i == idx ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
 		lv_obj_t *l = lv_obj_get_child(s, 0);
-		if (l) lv_obj_set_style_text_color(l, i == idx ? HPI_M3_PRIMARY_LIGHT : HPI_M3_ON_SURFACE_VARIANT, 0);
+		if (l) {
+			lv_obj_set_style_text_color(l, i == idx ? HPI_M3_PRIMARY_LIGHT
+							 : HPI_M3_ON_SURFACE_VARIANT, 0);
+		}
 	}
 }
 
@@ -348,7 +334,7 @@ static void rec_start_cb(lv_event_t *e)
 	 * own toggle state rather than hpi_recording_get_channel_mask(),
 	 * since that's what the person actually sees checked/unchecked. */
 	bool any_channel_on = false;
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < REC_CHAN_COUNT; i++) {
 		if (s_rec.chan_on[i]) {
 			any_channel_on = true;
 			break;
@@ -362,7 +348,7 @@ static void rec_start_cb(lv_event_t *e)
 		return;   /* don't call hpi_recording_start() at all */
 	}
 
-		int ret = hpi_recording_start(NULL);
+	int ret = hpi_recording_start_ex(NULL, s_rec_dur_s[s_rec.dur_idx]);
 	const char *msg = NULL;
 
 	if (ret == -ENODEV) {
@@ -373,36 +359,22 @@ static void rec_start_cb(lv_event_t *e)
 		msg = "Storage full - delete old recordings";
 	} else if (ret < 0) {
 		msg = "Start failed";
-	} else {
-		s_rec.events = 0;
 	}
 	if (s_rec.err) {
 		lv_label_set_text(s_rec.err, msg ? msg : "");
 		lv_obj_set_flag(s_rec.err, LV_OBJ_FLAG_HIDDEN, msg == NULL);
 	}
 	if (ret >= 0) {
-		s_rec.stop_work_was_scheduled = false;
-		s_rec.paused = false;
 		s_rec.stop_armed = false;
 		if (s_rec.stop_timer) {
 			lv_timer_del(s_rec.stop_timer);
 			s_rec.stop_timer = NULL;
 		}
-		if (s_rec.pause_btn) {
-			lv_obj_t *lbl = lv_obj_get_child(s_rec.pause_btn, 1);
-			if (lbl) lv_label_set_text(lbl, "PAUSE");
-		}
 		if (s_rec.stop_btn) {
 			lv_obj_t *lbl = lv_obj_get_child(s_rec.stop_btn, 1);
-			if (lbl) lv_label_set_text(lbl, "STOP & SAVE");
-		}
-		
-		/* schedule auto-stop for non-continuous durations */
-		if (s_rec.dur_idx != 3) {
-			uint32_t secs = (s_rec.dur_idx == 0) ? 30U : ((s_rec.dur_idx == 1) ? 300U : 3600U);
-			k_work_reschedule(&s_rec_stop_work, K_SECONDS(secs));
-		} else {
-			(void)k_work_cancel_delayable(&s_rec_stop_work);
+			if (lbl) {
+				lv_label_set_text(lbl, "STOP & SAVE");
+			}
 		}
 	}
 	hpi_scr_record_refresh();
@@ -420,8 +392,7 @@ static void rec_browse_cb(lv_event_t *e)
 static void rec_stop_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	(void)k_work_cancel_delayable(&s_rec_stop_work);
-	hpi_recording_stop();
+	(void)hpi_recording_stop();
 	hpi_scr_record_refresh();
 }
 
@@ -439,15 +410,13 @@ static void rec_mark_cb(lv_event_t *e)
 		s_rec.mark_long_active = false;
 		return;
 	}
-	/* Marking while paused is intentionally supported by the service --
-	 * recording_thread() always accepts EVENT/SYNC frames even while
-	 * g_paused, so the UI must not block it here. */
+	/* Marking while paused is supported: the service records events even
+	 * while data is paused. */
 	int seq = hpi_recording_mark();
 
 	if (seq < 0) {
 		return;   /* not recording at all: nothing to mark */
 	}
-	s_rec.events = (uint32_t)seq;
 	hpi_events_publish(HPI_EVT_USER_MARK, seq);   /* in-process notification */
 	hpi_scr_record_refresh();
 }
@@ -475,14 +444,14 @@ static void rec_mark_long_cb(lv_event_t *e)
 	s_note_overlay = ov;
 
 	lv_obj_t *ta = lv_textarea_create(ov);
-	lv_obj_set_size(ta, lv_pct(64), 48);
+	lv_obj_set_size(ta, lv_pct(64), HPI_M3_TOUCH_MIN);
 	lv_obj_align(ta, LV_ALIGN_TOP_LEFT, 8, 8);
 	lv_textarea_set_one_line(ta, true);
-	lv_textarea_set_max_length(ta, 63);   /* .IDX event description is 64 bytes */
+	lv_textarea_set_max_length(ta, 63);   /* the service keeps 63 bytes + NUL */
 	lv_textarea_set_placeholder_text(ta, "Event note (optional)");
 
 	lv_obj_t *cancel = lv_button_create(ov);
-	lv_obj_set_size(cancel, lv_pct(30), 48);
+	lv_obj_set_size(cancel, lv_pct(30), HPI_M3_TOUCH_MIN);
 	lv_obj_align(cancel, LV_ALIGN_TOP_RIGHT, -8, 8);
 	lv_obj_add_event_cb(cancel, note_cancel_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_t *cl = lv_label_create(cancel);
@@ -505,11 +474,8 @@ static void note_kb_cb(lv_event_t *ev)
 		const char *txt = ta ? lv_textarea_get_text(ta) : NULL;
 		int seq = recording_add_event_text(txt ? txt : "");
 		if (seq > 0) {
-			s_rec.events = (uint32_t)seq;
 			hpi_events_publish(HPI_EVT_USER_MARK, seq);
 			hpi_scr_record_refresh();
-		} else {
-			hpi_events_publish(HPI_EVT_USER_MARK, 0);
 		}
 	}
 	note_close();
@@ -531,33 +497,21 @@ static void build_setup(lv_obj_t *parent)
 	/* Channels. */
 	lv_obj_t *ch = rec_card(s_rec.setup);
 	section_label(ch, "CHANNELS");
-	s_rec.chan_sw[0] = channel_row(ch, HPI_SYM_LIVE, HPI_M3_SIG_ECG,  "ECG",              "500 Hz", true, 0);
-	s_rec.chan_sw[1] = channel_row(ch, HPI_SYM_SPO2, HPI_M3_SIG_SPO2, "PPG Red + IR",     "250 Hz", true, 1);
-	s_rec.chan_sw[2] = channel_row(ch, HPI_SYM_RESP, HPI_M3_SIG_RESP, "Respiration (BioZ)", "500 Hz", true, 2);
-	//s_rec.chan_sw[3] = channel_row(ch, HPI_SYM_TEMP, HPI_M3_SIG_TEMP, "Vitals",      "1 Hz",   false, 3);
-	s_rec.chan_sw[3] = channel_row(ch, HPI_SYM_HRV, HPI_M3_SIG_HRV, "Vitals", "1 Hz", true, 3);
-	/* initialize channel on/off state from the recorder's channel mask and
-	 * attach callbacks. Map idx -> channel id: 0=ECG,1=PPG,2=RESP,3=VITALS. */
+	s_rec.chan_sw[0] = channel_row(ch, HPI_SYM_LIVE, HPI_M3_SIG_ECG,  "ECG + Respiration", "500 Hz", 0);
+	s_rec.chan_sw[1] = channel_row(ch, HPI_SYM_SPO2, HPI_M3_SIG_SPO2, "PPG Red + IR",      "250 Hz", 1);
+	s_rec.chan_sw[2] = channel_row(ch, HPI_SYM_HRV,  HPI_M3_SIG_HRV,  "Vitals",            "1 Hz",   2);
+	/* Show the service's selection, which outlives this screen. */
 	uint32_t mask = hpi_recording_get_channel_mask();
-	for (int i = 0; i < 4; i++) {
-		if (!s_rec.chan_sw[i]) continue;
-		uint8_t ch = (i == 0) ? HPI_CH_ECG : (i == 1) ? HPI_CH_PPG : (i == 2) ? HPI_CH_RESP : HPI_CH_VITALS;
-		bool on = (mask & HPI_CH_BIT(ch)) != 0;
-		s_rec.chan_on[i] = on;
-		lv_obj_set_style_bg_color(s_rec.chan_sw[i], on ? HPI_M3_PRIMARY : HPI_M3_OUTLINE, 0);
-		lv_obj_t *knob = lv_obj_get_child(s_rec.chan_sw[i], 0);
-		if (knob) {
-			lv_obj_align(knob, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -2 : 2, 0);
-			lv_obj_set_style_bg_color(knob, on ? HPI_M3_SURFACE : HPI_M3_ON_SURFACE_MUTED, 0);
-		}
-		lv_obj_add_event_cb(s_rec.chan_sw[i], channel_toggle_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+	for (int i = 0; i < REC_CHAN_COUNT; i++) {
+		s_rec.chan_on[i] = (mask & HPI_CH_BIT(s_rec_chan_id[i])) != 0;
+		channel_switch_paint(s_rec.chan_sw[i], s_rec.chan_on[i]);
 	}
 
-	/* Duration (visual). */
+	/* Duration: auto-stop after this much recorded time. */
 	lv_obj_t *du = rec_card(s_rec.setup);
 	section_label(du, "DURATION");
 	lv_obj_t *seg = lv_obj_create(du);
-	lv_obj_set_size(seg, lv_pct(100), 44);
+	lv_obj_set_size(seg, lv_pct(100), HPI_M3_TOUCH_MIN);
 	lv_obj_set_style_bg_opa(seg, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_radius(seg, HPI_M3_RADIUS_PILL, 0);
 	lv_obj_set_style_border_width(seg, 1, 0);
@@ -566,15 +520,12 @@ static void build_setup(lv_obj_t *parent)
 	lv_obj_set_style_clip_corner(seg, true, 0);
 	lv_obj_clear_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
-	s_rec.dur_seg[0] = seg_item(seg, "30 s",  false, false, 0);
-
-	s_rec.dur_seg[1] = seg_item(seg, "5 min", true,  false, 1);
-	s_rec.dur_seg[2] = seg_item(seg, "1 h",   false, false, 2);
-	s_rec.dur_seg[3] = seg_item(seg, "CONT",  false, true, 3);
-	s_rec.dur_idx = 1; /* default to 5 min */
-	for (int i = 0; i < 4; i++) {
-		if (s_rec.dur_seg[i])
-			lv_obj_add_event_cb(s_rec.dur_seg[i], duration_select_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+	static const char *const dur_label[REC_DUR_COUNT] = { "30 s", "5 min", "1 h", "CONT" };
+	s_rec.dur_idx = REC_DUR_DEFAULT;
+	for (int i = 0; i < REC_DUR_COUNT; i++) {
+		seg_item(seg, dur_label[i], i == REC_DUR_DEFAULT, i == REC_DUR_COUNT - 1, i);
+		lv_obj_add_event_cb(s_rec.dur_seg[i], duration_select_cb, LV_EVENT_CLICKED,
+				    (void *)(intptr_t)i);
 	}
 
 	/* SD card (live free space). */
@@ -617,7 +568,7 @@ static void build_setup(lv_obj_t *parent)
 	lv_obj_set_style_bg_opa(s_rec.sd_bar, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(s_rec.sd_bar, 0, 0);
 
-		/* START CTA + error line, pinned to the bottom. */
+	/* START CTA + error line, pinned to the bottom. */
 	lv_obj_t *cta = rec_button(s_rec.setup, HPI_SYM_REC, "START RECORDING",
 				   HPI_M3_CTA, HPI_M3_ON_CTA, rec_start_cb);
 	lv_obj_set_style_margin_top(cta, HPI_M3_SPACE_2, 0);
@@ -686,21 +637,20 @@ static void build_active(lv_obj_t *parent)
 	lv_obj_set_style_margin_top(btns, HPI_M3_SPACE_6, 0);
 	lv_obj_clear_flag(btns, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_COLUMN);
-	    /* Pause / Resume */
-	lv_obj_t *pause_btn = rec_button(btns, LV_SYMBOL_PAUSE, "PAUSE", HPI_M3_CTA,
-				 HPI_M3_ON_CTA, pause_btn_cb);
 
-	s_rec.pause_btn = pause_btn;
-	    /* Mark button: short press = mark, long press = keyboard */
-	lv_obj_t *mark_btn = rec_button(btns, HPI_SYM_HRV, "MARK EVENT", HPI_M3_SURFACE_CONTAINER,
-		    HPI_M3_SIG_RESP, rec_mark_cb);
+	/* Pause / Resume; the label follows the service in refresh. */
+	s_rec.pause_btn = rec_button(btns, LV_SYMBOL_PAUSE, "PAUSE", HPI_M3_CTA,
+				     HPI_M3_ON_CTA, pause_btn_cb);
+
+	/* Mark button: short press = mark, long press = note keyboard. */
+	lv_obj_t *mark_btn = rec_button(btns, HPI_SYM_HRV, "MARK EVENT",
+					HPI_M3_SURFACE_CONTAINER, HPI_M3_SIG_RESP,
+					rec_mark_cb);
 	lv_obj_add_event_cb(mark_btn, rec_mark_long_cb, LV_EVENT_LONG_PRESSED, NULL);
 
-	    /* Stop with two-tap confirm: first tap arms, second tap confirms */
-	lv_obj_t *stop_btn = rec_button(btns, HPI_SYM_REC, "STOP & SAVE", HPI_M3_ERROR,
-		    HPI_M3_ON_SURFACE, stop_btn_cb);
-
-	s_rec.stop_btn = stop_btn;
+	/* Stop with two-tap confirm: first tap arms, second tap confirms. */
+	s_rec.stop_btn = rec_button(btns, HPI_SYM_REC, "STOP & SAVE", HPI_M3_ERROR,
+				    HPI_M3_ON_SURFACE, stop_btn_cb);
 
 	lv_obj_t *hint = lv_label_create(s_rec.active);
 	lv_label_set_text(hint, "Hardware button: short press = mark event");
@@ -751,12 +701,12 @@ lv_obj_t *hpi_scr_record_create(lv_obj_t *parent)
 	build_setup(body);
 	build_active(body);
 
-	/* Initialize runtime UI state */
-	s_rec.paused = false;
+	/* Refreshed by the UI loop while this screen is up -- no timer of its
+	 * own, so nothing here runs on other screens. */
 	s_rec.stop_armed = false;
 	s_rec.stop_timer = NULL;
-	s_rec.timer = lv_timer_create(record_timer_cb, 250, NULL); /* 4 Hz */
-		/* Battery overlay (hidden by default) */
+
+	/* Battery overlay (hidden by default) */
 	s_rec.batt_overlay = lv_label_create(root);
 	lv_label_set_text(s_rec.batt_overlay, "");
 	lv_obj_set_style_text_color(s_rec.batt_overlay, HPI_M3_ERROR, 0);
@@ -850,11 +800,16 @@ void hpi_scr_record_refresh(void)
 		snprintf(buf, sizeof(buf), "%02u:%02u:%02u",
 			 s / 3600U, (s / 60U) % 60U, s % 60U);
 		lv_label_set_text(s_rec.elapsed, buf);
-		snprintf(buf, sizeof(buf), "%u.%u MB  \xC2\xB7  %u events",
-         st.bytes_written / 1000000U,
-         (st.bytes_written / 100000U) % 10U, (unsigned)st.events);
+		snprintf(buf, sizeof(buf), "%u.%u MB  \xC2\xB7  %u events%s",
+			 st.bytes_written / 1000000U,
+			 (st.bytes_written / 100000U) % 10U, st.events,
+			 st.paused ? "  \xC2\xB7  PAUSED" : "");
 		lv_label_set_text(s_rec.meta, buf);
 		lv_label_set_text(s_rec.fname, st.path);
+		lv_obj_t *plbl = lv_obj_get_child(s_rec.pause_btn, 1);
+		if (plbl) {
+			lv_label_set_text(plbl, st.paused ? "RESUME" : "PAUSE");
+		}
 
 		/* Low-battery overlay: show a warning but do not stop recording */
 		struct hpi_power_status ps = {0};

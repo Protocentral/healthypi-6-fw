@@ -2,7 +2,8 @@
  * Copyright (c) 2024-2026 Protocentral Electronics
  * SPDX-License-Identifier: MIT
  *
- * Recording service (L4) -- .HP6 writer. See recording_service.h + the SRS.
+ * Recording service (L4) -- .HP6 writer. See recording_service.h and
+ * docs/HP6_DATA_FORMAT.md, which this file must match byte for byte.
  */
 
 #include "recording_service.h"
@@ -14,9 +15,12 @@
 #include "platform/fs_mount.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/init.h>
+#include <zephyr/spinlock.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/drivers/rtc.h>
 #include <zephyr/drivers/hwinfo.h>
+#include <zephyr/linker/devicetree_regions.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/crc.h>
@@ -27,13 +31,11 @@
 #include <stdio.h>
 #include <time.h>
 #include <strings.h>
-#include <stdlib.h>   /* qsort */
 
 LOG_MODULE_REGISTER(hpi_rec, CONFIG_HPI_APP_LOG_LEVEL);
 
 #define REC_ROOT       "/SD:/HPI6/REC"
 #define REC_WRITE_BUF  4096
-#define REC_LIST_MAX_ENTRIES  64   /* must match scr_recording.c's REC_LIST_MAX */
 #define REC_INDEX_MAX_ENTRIES  256
 #define REC_PAGE_SIZE_MAX      RECORDING_PAGE_SIZE_MAX
 #define REC_PAGE_CACHE_SLOTS   3
@@ -54,36 +56,33 @@ LOG_MODULE_REGISTER(hpi_rec, CONFIG_HPI_APP_LOG_LEVEL);
 #error "Unknown board: add its board_variant string for the .HP6 header"
 #endif
 #define REC_RING       32
-#define REC_ECG_SCRATCH  640   /* >= 16 samples x sizeof(struct hp6_ecg_sample) */
 #define REC_SYNC_PERIOD_MS 5000u
-#define REC_ROLLOVER_MS    (24ULL * 3600ULL * 1000ULL)   /* SRS §3.1/§5 */
+#define REC_ROLLOVER_MS    (24ULL * 3600ULL * 1000ULL)
 #define HP6_SYNC_MAGIC 0xDEADBEEFu
-/* v0x0300: magic4 + version2 + event_count2 + sync_count4 = 12 B.
- * v0x0301 (this change) appends duration_ms4 + channels4 = 20 B, so
- * page_work_fn() can list without ever opening the .HP6 (SRS §3.4/§4.2).
- * Readers MUST gate on the version field, not on read length -- an old
- * 12-byte-header file still fills a 20-byte read buffer, because its event
- * table starts immediately at the old offset 12. */
-#define HP6_IDX_HDR_SIZE        20
-#define HP6_IDX_EVENT_REC_SIZE  69U   /* ts_ms(4) + type(1) + desc[64] */
-#define HP6_IDX_SYNC_REC_SIZE   20U   /* ts_ms(4) + file_off(8) + seq(4) + crc(4) */
-#define HP6_IDX_MAX_EVENTS      64    /* reserved slots -- see idx_append_event() */
-#define HP6_IDX_EVENTS_OFFSET   HP6_IDX_HDR_SIZE
-#define HP6_IDX_SYNCS_OFFSET    (HP6_IDX_EVENTS_OFFSET + \
-                                  (HP6_IDX_MAX_EVENTS * HP6_IDX_EVENT_REC_SIZE))
-BUILD_ASSERT(HP6_IDX_EVENT_REC_SIZE == 4 + 1 + 64, "idx event record must be 69 B");
 
-/* .IDX event category (SRS §3.3: USER/AUTO/ARTIFACT/SYSTEM). This is the
- * on-disk classification byte only -- independent of hp6_event.type, which
- * today only ever carries HP6_EVENT_USER_MARK on the wire. */
-enum hp6_idx_event_type {
-    HP6_IDX_EVT_USER     = 0,
-    HP6_IDX_EVT_AUTO     = 1,
-    HP6_IDX_EVT_ARTIFACT = 2,
-    HP6_IDX_EVT_SYSTEM   = 3,
-};
-/* In-band sync marker payload (SRS §4.1) -- written as an HPI_CH_SYNC frame
- * every 5 s; the .IDX mirrors it. Enables crash recovery + fast listing. */
+/* .IDX sidecar, exactly as docs/HP6_DATA_FORMAT.md §6 publishes it:
+ *   12 B header : "HP6I" | u16 version | u16 event_count | u32 sync_count
+ *   N x 20 B    : u32 ts_ms | u64 file_offset | u32 seq | u32 crc
+ *    4 B footer : u32 CRC-32 of every preceding byte (written on clean close)
+ * Advisory only: event_count is always 0 (events live in-band on channel 6)
+ * and the in-band sync markers are authoritative. */
+#define HP6_IDX_HDR_SIZE        12
+#define HP6_IDX_SYNC_REC_SIZE   20U
+
+/* Channels the operator can switch off on the Record screen. RESP is not one
+ * of them: respiration travels inside the ECG sample (spec §4), so it is
+ * recorded exactly when ECG is. EEG and INFER come from expansion modules and
+ * are always recorded when present. */
+#define REC_SELECTABLE_MASK  (HPI_CH_BIT(HPI_CH_ECG) | HPI_CH_BIT(HPI_CH_PPG) | \
+                              HPI_CH_BIT(HPI_CH_VITALS))
+
+/* Event text for the .TXT sidecar is handed to the writer thread rather than
+ * written by the caller, so marking from the UI never touches the card. */
+#define REC_NOTE_QUEUE_DEPTH  4
+#define REC_NOTE_MAX          64
+
+/* In-band sync marker payload -- written as an HPI_CH_SYNC frame every 5 s;
+ * the .IDX mirrors it. Enables crash recovery + fast listing. */
 struct hp6_sync_payload {
     uint32_t magic;        /* HP6_SYNC_MAGIC */
     uint32_t seq;
@@ -135,55 +134,83 @@ struct recording_header {
 
 BUILD_ASSERT(sizeof(struct recording_header) == 256, "HP6 header must be 256 B");
 
-/* Dedicated workqueue for recording_list_async(). Listing does synchronous
- * SD I/O (fs_open/fs_read/fs_close per entry) that can run long with many
- * recordings on the card. Running that on the SYSTEM workqueue was starving
- * the input subsystem's own work items on the same queue, so a Browse
- * Recordings listing could make touch/button input unresponsive for the
- * whole scan ("Event dropped, queue full, not blocking in syswq"). */
-#define REC_WQ_STACK_SIZE  4096
+/* Dedicated workqueue for listing and delete. Both do synchronous SD I/O that
+ * can run long with many recordings on the card. Running that on the SYSTEM
+ * workqueue starved the input subsystem's own work items on the same queue,
+ * so a Browse Recordings listing could make touch/button input unresponsive
+ * for the whole scan ("Event dropped, queue full, not blocking in syswq").
+ *
+ * Started from SYS_INIT, not from hpi_recording_service_init(): main() builds
+ * the UI long before it reaches the service init, and the Recordings screen
+ * submits work as soon as it is created. */
+/* Sized for 8.3 FAT names (no LFN buffers) and a 256 B header read. */
+#define REC_WQ_STACK_SIZE  3072
 #define REC_WQ_PRIORITY    K_PRIO_PREEMPT(10)
 
 K_THREAD_STACK_DEFINE(s_rec_wq_stack, REC_WQ_STACK_SIZE);
 static struct k_work_q s_rec_wq;
 
+/* The listing index and page cache are ~24 KB together, which internal RAM
+ * does not have to spare. They are only touched from s_rec_wq, so external
+ * SDRAM is fine. The region is NOLOAD -- not zeroed at boot -- so
+ * rec_wq_init() clears them. */
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(sdram1), okay)
+#define REC_EXT_RAM  Z_GENERIC_SECTION(LINKER_DT_NODE_REGION_NAME(DT_NODELABEL(sdram1)))
+#else
+#define REC_EXT_RAM
+#endif
+
 /* ---- state ---- */
 static struct hpi_bus_sub *g_sub;
 static volatile bool       g_active;
-static volatile bool       g_paused;
 static volatile bool       g_file_open;   /* true only while g_file has a valid, open handle */
 static volatile bool       g_error;       /* true once an unrecoverable error has stopped recording */
 static volatile int        g_error_code;  /* -errno reason; valid only when g_error == true */
-static uint64_t            g_pause_start_ms;
-static uint64_t            g_paused_accum_ms;
 static struct fs_file_t    g_file;
 static struct recording_header g_hdr;
 static uint8_t  g_wbuf[REC_WRITE_BUF];
 static uint32_t g_wlen;
 static uint32_t g_bytes;
-static uint64_t g_start_ms;          /* device-monotonic ms at start */
 static char     g_path[64];
-static struct k_mutex g_lock;
+/* Held by the writer thread across card I/O. Callers on the UI thread must not
+ * need it for anything quick -- the session clock below has its own lock. */
+K_MUTEX_DEFINE(g_lock);
+/* Serialises pause/resume, so the PAUSE/RESUME events land in the same order
+ * as the state changes they describe. Not g_lock: pausing never touches the
+ * card. */
+K_MUTEX_DEFINE(g_pause_lock);
 static uint32_t g_undated_seq;       /* fallback filename counter */
 static atomic_t g_mark_seq = ATOMIC_INIT(0);
 static char     g_session_base_path[64];  /* g_path minus ".HP6", for _NNN naming */
 static char     g_session_name[64];       /* reused across rollover continuations */
 static uint32_t g_rollover_seq;           /* 0 = original file; increments per continuation */
-/* Channels the recorder should persist (bitset of HPI_CH_BIT(id)).
- * Default: record ECG, PPG, RESP and VITALS to match the UI toggles. */
-static uint32_t g_channel_mask = (HPI_CH_BIT(HPI_CH_ECG) | HPI_CH_BIT(HPI_CH_PPG) |
-                                  HPI_CH_BIT(HPI_CH_RESP) | HPI_CH_BIT(HPI_CH_VITALS));
-struct list_work_ctx {
-	struct k_work work;
-	recording_list_cb_t cb;
-	void *user_data;
-	struct recording_summary *entries;
-	size_t n_entries;
-	size_t max_entries;
-};
+/* Operator-selected channels, a subset of REC_SELECTABLE_MASK. */
+static uint32_t g_channel_mask = REC_SELECTABLE_MASK;
+/* Channels actually written to the current file; becomes the header's
+ * `channels` at close, so the header never claims a channel it lacks. */
+static uint32_t g_seen_channels;
+/* Auto-stop after this much recorded (pause-excluded) time; 0 = never. */
+static uint64_t g_max_active_ms;
 
-/* 5b: sidecars + sync markers */
-static struct fs_file_t g_idx;       /* .IDX sync/event TOC */
+/* Session clock. Real time and recorded time differ only by pauses: every
+ * timestamp written to the file (event ts_ms, sync wall_ms, timestamp_end) is
+ * real time since start, and only duration_ms excludes paused time. A
+ * spinlock, not g_lock, so a status poll never waits on a card flush. */
+static struct k_spinlock g_clock_lock;
+static uint64_t g_start_ms;          /* device-monotonic ms at start of this file */
+static bool     g_paused;
+static uint64_t g_pause_start_ms;
+static uint64_t g_paused_accum_ms;
+
+struct rec_note {
+    uint32_t ts_ms;
+    uint32_t seq;
+    char     text[REC_NOTE_MAX];
+};
+K_MSGQ_DEFINE(g_note_q, sizeof(struct rec_note), REC_NOTE_QUEUE_DEPTH, 4);
+
+/* sidecars + sync markers */
+static struct fs_file_t g_idx;       /* .IDX sync TOC */
 static bool     g_idx_open;
 static char     g_idx_path[64];
 static uint32_t g_sync_seq;
@@ -192,9 +219,55 @@ static int64_t  g_last_sync_ms;      /* device-monotonic ms of last sync */
 static uint32_t g_running_crc;       /* CRC of frame bytes since last sync */
 static uint32_t g_seq;               /* DBLK sequence, per file (gap = loss) */
 static uint64_t g_wall_start_ms;     /* unix ms at start (0 if RTC unset) */
-static uint32_t g_idx_event_count;      /* events written into the reserved table */
-static uint64_t g_idx_sync_write_off;   /* explicit tail; event writes seek elsewhere */
-static bool     g_idx_events_full_warned;
+
+/* ---- session clock ---- */
+
+/* Real ms since this file started. */
+static uint32_t clock_elapsed_ms(void)
+{
+    k_spinlock_key_t key = k_spin_lock(&g_clock_lock);
+    uint64_t start = g_start_ms;
+
+    k_spin_unlock(&g_clock_lock, key);
+    return (uint32_t)(k_uptime_get() - start);
+}
+
+/* Recorded ms since this file started: real time minus every pause. */
+static uint64_t clock_active_ms(void)
+{
+    k_spinlock_key_t key = k_spin_lock(&g_clock_lock);
+    uint64_t now = k_uptime_get();
+    uint64_t paused = g_paused_accum_ms + (g_paused ? now - g_pause_start_ms : 0);
+    uint64_t real = now - g_start_ms;
+
+    k_spin_unlock(&g_clock_lock, key);
+    return real > paused ? real - paused : 0;
+}
+
+static bool clock_paused(void)
+{
+    k_spinlock_key_t key = k_spin_lock(&g_clock_lock);
+    bool p = g_paused;
+
+    k_spin_unlock(&g_clock_lock, key);
+    return p;
+}
+
+/* Start a file's clock. A pause in progress carries over into the new file,
+ * so a rollover while paused cannot over-count pause time on resume. */
+static void clock_restart(void)
+{
+    k_spinlock_key_t key = k_spin_lock(&g_clock_lock);
+    uint64_t now = k_uptime_get();
+
+    g_start_ms = now;
+    g_paused_accum_ms = 0;
+    if (g_paused) {
+        g_pause_start_ms = now;
+    }
+    k_spin_unlock(&g_clock_lock, key);
+}
+
 /* ---- helpers ---- */
 
 static void hex16(char out[17], const uint8_t *id, size_t n)
@@ -280,7 +353,7 @@ static void log_path_status(const char *path)
 
 /* Build the dated path + create dirs. Uses the RTC if available.
  * Returns 0 on success, or -EAGAIN if 26 dated recordings already exist for
- * this exact second (SRS §5: same-second collisions get an HHMMSS_A..Z.HP6
+ * this exact second (same-second collisions get an HHMMSS_A..Z.HP6
  * suffix; running out means refuse rather than silently overwrite). */
 static int build_path(void)
 {
@@ -346,13 +419,13 @@ static void header_init(const char *session_name)
     g_hdr.timestamp_start = sys_cpu_to_le64(g_wall_start_ms);  /* unix ms, 0 if RTC unset */
     g_hdr.timestamp_end = 0xFFFFFFFFFFFFFFFFULL;
     /* Host-endian while open; byte-swapped once in finalize, like sample_count.
-     * Channels actually seen are OR'd in as frames arrive. */
-    /* Record which channels are intended to be written. Keep header in host
-     * endianness while open; finalize() will byte-swap. */
+     * The header written at start carries the selected set, which is the best
+     * a cut-short file can say; finalize replaces it with what was written. */
     g_hdr.channels = g_channel_mask;
+    g_seen_channels = 0;
+    /* No RESP rate: respiration has no blocks of its own (spec §4). */
     g_hdr.rate_hz[HP6_HDR_SLOT(HPI_CH_ECG)]    = sys_cpu_to_le16(HPI_ECG_RATE_HZ);
     g_hdr.rate_hz[HP6_HDR_SLOT(HPI_CH_PPG)]    = sys_cpu_to_le16(HPI_PPG_RATE_HZ);
-    g_hdr.rate_hz[HP6_HDR_SLOT(HPI_CH_RESP)]   = sys_cpu_to_le16(HPI_ECG_RATE_HZ);
     g_hdr.rate_hz[HP6_HDR_SLOT(HPI_CH_VITALS)] = sys_cpu_to_le16(1);
     g_hdr.rate_hz[HP6_HDR_SLOT(HPI_CH_EEG)]    = sys_cpu_to_le16(HPI_EEG_RATE_HZ);
     /* HPI_CH_INFER is event-rate: its slot stays 0, like EVENT and SYNC. */
@@ -383,7 +456,7 @@ static void header_init(const char *session_name)
 
 /* Move to an unrecoverable-error state: stop accepting frames and close
  * whatever is open, without touching header finalize math (the file may be
- * mid-block) -- SRS §3.1: unrecoverable errors -> ERROR, attempt close,
+ * mid-block): unrecoverable errors -> ERROR, attempt close,
  * notify. Surfaced to callers via hpi_recording_get_status()/_has_error(),
  * matching the polling pattern the UI already uses for everything else in
  * this module. Caller must hold g_lock. */
@@ -421,7 +494,16 @@ static int flush_buf(void)
         enter_error_state((int)w);
         return (int)w;
     }
-    g_bytes += g_wlen;
+    /* A short write is a full card. Counting the whole buffer as written
+     * would drop data silently and point every later .IDX offset past the
+     * end of the file. */
+    g_bytes += (uint32_t)w;
+    if ((uint32_t)w != g_wlen) {
+        LOG_ERR("fs_write short (%d of %u): card full", (int)w, g_wlen);
+        g_wlen = 0;
+        enter_error_state(-ENOSPC);
+        return -ENOSPC;
+    }
     g_wlen = 0;
     return 0;
 }
@@ -508,58 +590,17 @@ static void append_frame(const struct hpi_sample_frame *f)
     /* Captured BEFORE the append because it can flush mid-call. */
     uint64_t rec_off = g_bytes + g_wlen;
 
-    const bool ecg_sel  = (g_channel_mask & HPI_CH_BIT(HPI_CH_ECG))  != 0;
-    const bool resp_sel = (g_channel_mask & HPI_CH_BIT(HPI_CH_RESP)) != 0;
-    const void *payload = f->payload;
-
-    /* RESP (ADS1294R CH1) travels inside the ECG frame. Keep the wire layout,
-     * but zero whichever half was not selected so the file only holds what
-     * the user chose. */
-    static uint8_t ecg_scratch[REC_ECG_SCRATCH] __aligned(4);
-
-    if (f->channel == HPI_CH_ECG && (!ecg_sel || !resp_sel) &&
-        f->len <= sizeof(ecg_scratch) &&
-        (f->len % sizeof(struct hp6_ecg_sample)) == 0) {
-        struct hp6_ecg_sample *s = (struct hp6_ecg_sample *)ecg_scratch;
-        size_t n = f->len / sizeof(*s);
-
-        memcpy(ecg_scratch, f->payload, f->len);
-        for (size_t i = 0; i < n; i++) {
-            if (!resp_sel) {
-                s[i].resp = 0;
-            }
-            if (!ecg_sel) {
-                s[i].lead_i = 0;
-                s[i].lead_ii = 0;
-                s[i].v1 = 0;
-                s[i].lead_off = 0;
-            }
-        }
-        payload = ecg_scratch;
-    }
-
     append_dblk((uint8_t)f->channel, (uint8_t)f->flags, t_ms,
-                f->sample_count, payload, f->len);
+                f->sample_count, f->payload, f->len);
 
     switch (f->channel) {
     case HPI_CH_ECG:
-        /* One frame feeds two logical channels; count each only if selected. */
-        if (ecg_sel) {
-            g_hdr.sample_count[HP6_HDR_SLOT(HPI_CH_ECG)] += f->sample_count;
-            g_hdr.channels |= HPI_CH_BIT(HPI_CH_ECG);
-        }
-        if (resp_sel) {
-            g_hdr.sample_count[HP6_HDR_SLOT(HPI_CH_RESP)] += f->sample_count;
-            g_hdr.channels |= HPI_CH_BIT(HPI_CH_RESP);
-        }
-        break;
     case HPI_CH_PPG:
-    case HPI_CH_RESP:      /* only if a separate RESP frame is ever published */
     case HPI_CH_VITALS:
     case HPI_CH_EEG:
     case HPI_CH_INFER:
         g_hdr.sample_count[HP6_HDR_SLOT(f->channel)] += f->sample_count;
-        g_hdr.channels |= HPI_CH_BIT(f->channel);
+        g_seen_channels |= HPI_CH_BIT(f->channel);
         break;
     case HPI_CH_EVENT:
         if (g_hdr.event_count == 0) {
@@ -571,14 +612,12 @@ static void append_frame(const struct hpi_sample_frame *f)
     }
 }
 
-/* ---- .IDX sidecar (sync/event TOC, SRS §4.2) ---- */
+/* ---- .IDX sidecar (sync TOC, docs/HP6_DATA_FORMAT.md §6) ---- */
 
 static void idx_open(void)
 {
     g_idx_open = false;
     g_sync_count = 0;
-    g_idx_event_count = 0;
-    g_idx_events_full_warned = false;
     strncpy(g_idx_path, g_path, sizeof(g_idx_path) - 1);
     g_idx_path[sizeof(g_idx_path) - 1] = '\0';
     char *dot = strrchr(g_idx_path, '.');
@@ -590,35 +629,16 @@ static void idx_open(void)
         LOG_WRN("idx open failed: %s", g_idx_path);
         return;
     }
-    uint8_t h[HP6_IDX_HDR_SIZE] = {0};
+    uint8_t h[HP6_IDX_HDR_SIZE];
     memcpy(h, "HP6I", 4);
-    /* IDX header format revision, independent of the .HP6 container version
-     * (still 0x0300) -- 0x0301 adds duration_ms/channels below. */
-    sys_put_le16(0x0301, &h[4]);
-    sys_put_le16(0, &h[6]);        /* event_count -- patched as events land + at finalize */
+    sys_put_le16(0x0300, &h[4]);   /* version -- tracks the .HP6 container */
+    sys_put_le16(0, &h[6]);        /* event_count -- always 0, events are in-band */
     sys_put_le32(0, &h[8]);        /* sync_count -- patched at finalize */
-    sys_put_le32(0, &h[12]);       /* duration_ms -- patched at finalize */
-    sys_put_le32(0, &h[16]);       /* channels    -- patched at finalize */
     if (fs_write(&g_idx, h, sizeof(h)) != (ssize_t)sizeof(h)) {
         LOG_WRN("idx header write failed: %s", g_idx_path);
         fs_close(&g_idx);
         return;
     }
-
-    /* Reserve the events table, zero-filled, so a later event write lands
-     * in-place and never disturbs the syncs tail below it. */
-    uint8_t zero[64] = {0};
-    size_t remaining = (size_t)HP6_IDX_MAX_EVENTS * HP6_IDX_EVENT_REC_SIZE;
-    while (remaining > 0) {
-        size_t chunk = MIN(remaining, sizeof(zero));
-        if (fs_write(&g_idx, zero, chunk) != (ssize_t)chunk) {
-            LOG_WRN("idx event-table reserve failed: %s", g_idx_path);
-            break;
-        }
-        remaining -= chunk;
-    }
-
-    g_idx_sync_write_off = HP6_IDX_SYNCS_OFFSET;
     g_idx_open = true;
 }
 
@@ -632,88 +652,21 @@ static void idx_append_sync(uint32_t ts_ms, uint64_t file_off, uint32_t seq, uin
     sys_put_le64(file_off, &e[4]);
     sys_put_le32(seq, &e[12]);
     sys_put_le32(crc, &e[16]);
-
-    /* Event writes seek elsewhere in the file between sync calls, so the
-     * sync tail must be re-seeked explicitly rather than assumed current. */
-    if (fs_seek(&g_idx, g_idx_sync_write_off, FS_SEEK_SET) != 0) {
-        return;
-    }
-    if (fs_write(&g_idx, e, sizeof(e)) == (ssize_t)sizeof(e)) {
-        g_idx_sync_write_off += sizeof(e);
-    }
+    (void)fs_write(&g_idx, e, sizeof(e));
 }
 
-/* Write one event into its reserved .IDX slot (SRS §3.3: ts_ms u32, type u8,
- * desc[64]). Takes g_lock itself -- called from multiple contexts (UI
- * thread via hpi_recording_mark, recording_add_event_text/_event). */
-static void idx_append_event(uint32_t ts_ms, enum hp6_idx_event_type type,
-                             const char *desc)
-{
-    k_mutex_lock(&g_lock, K_FOREVER);
-    if (!g_idx_open) {
-        k_mutex_unlock(&g_lock);
-        return;
-    }
-    if (g_idx_event_count >= HP6_IDX_MAX_EVENTS) {
-        k_mutex_unlock(&g_lock);
-        if (!g_idx_events_full_warned) {
-            LOG_WRN("idx: event table full (%d) -- further events still land "
-                    "in .HP6/.TXT, just omitted from .IDX", HP6_IDX_MAX_EVENTS);
-            g_idx_events_full_warned = true;
-        }
-        return;
-    }
-    uint8_t rec[HP6_IDX_EVENT_REC_SIZE] = {0};
-    sys_put_le32(ts_ms, &rec[0]);
-    rec[4] = (uint8_t)type;
-    if (desc && desc[0]) {
-        strncpy((char *)&rec[5], desc, HP6_IDX_EVENT_REC_SIZE - 5 - 1);
-    }
-
-    uint64_t off = HP6_IDX_EVENTS_OFFSET +
-                  (uint64_t)g_idx_event_count * HP6_IDX_EVENT_REC_SIZE;
-    
-        if (fs_seek(&g_idx, off, FS_SEEK_SET) == 0 &&
-        fs_write(&g_idx, rec, sizeof(rec)) == (ssize_t)sizeof(rec)) {
-        g_idx_event_count++;
-        uint8_t c[2];
-        sys_put_le16((uint16_t)g_idx_event_count, c);
-        if (fs_seek(&g_idx, 6, FS_SEEK_SET) == 0) {
-            (void)fs_write(&g_idx, c, sizeof(c));
-        }
-    }
-    k_mutex_unlock(&g_lock);
-}
-static void idx_finalize(uint32_t duration_ms, uint32_t channels)
+static void idx_finalize(void)
 {
     if (!g_idx_open) {
         return;
     }
-    /* Patch event_count at offset 6 and sync_count at offset 8, then append
-     * a whole-file CRC footer. */
-    if (fs_seek(&g_idx, 6, FS_SEEK_SET) == 0) {
-        uint8_t c[2];
-        sys_put_le16((uint16_t)MIN(g_idx_event_count, 0xFFFFu), c);
-        (void)fs_write(&g_idx, c, sizeof(c));
-    }
+    /* Patch sync_count at offset 8, then append a whole-file CRC footer. */
     if (fs_seek(&g_idx, 8, FS_SEEK_SET) == 0) {
         uint8_t c[4];
         sys_put_le32(g_sync_count, c);
         (void)fs_write(&g_idx, c, 4);
     }
-    /* duration_ms/channels -- lets listing show both without ever opening
-     * the .HP6 (SRS §3.4/§4.2, IDX header v0x0301). */
-    if (fs_seek(&g_idx, 12, FS_SEEK_SET) == 0) {
-        uint8_t c[4];
-        sys_put_le32(duration_ms, c);
-        (void)fs_write(&g_idx, c, 4);
-    }
-    if (fs_seek(&g_idx, 16, FS_SEEK_SET) == 0) {
-        uint8_t c[4];
-        sys_put_le32(channels, c);
-        (void)fs_write(&g_idx, c, 4);
-    }
-        uint32_t footer_crc = 0;
+    uint32_t footer_crc = 0;
     if (fs_seek(&g_idx, 0, FS_SEEK_SET) == 0) {
         uint8_t buf[128];
         ssize_t r;
@@ -732,9 +685,11 @@ static void idx_finalize(uint32_t duration_ms, uint32_t channels)
     g_idx_open = false;
 }
 
-/* ---- .TXT sidecar (human-readable, SRS §4.3) ---- */
+/* ---- .TXT sidecar (human-readable, not for parsing) ---- */
 
-static void txt_write(bool final)
+/* Rewrites the fixed-size summary block at the top of the .TXT. Event lines
+ * appended after it are left in place. dur_ms is only shown when final. */
+static void txt_write(bool final, uint32_t dur_ms)
 {
     char path[64];
     strncpy(path, g_path, sizeof(path) - 1);
@@ -748,28 +703,19 @@ static void txt_write(bool final)
     if (fs_open(&f, path, FS_O_CREATE | FS_O_WRITE) != 0) {
         return;
     }
-    char buf[TXT_HDR_SIZE];  
-    /* compute duration excluding paused time when finalizing */
-    uint32_t dur_ms = 0;
-    if (final) {
-        uint64_t now = k_uptime_get();
-        uint64_t paused_total = g_paused_accum_ms + (g_paused ? (now - g_pause_start_ms) : 0);
-        uint64_t dur = now - g_start_ms;
-        if (dur > paused_total) dur -= paused_total; else dur = 0;
-        dur_ms = (uint32_t)dur;
-    }
+    char buf[TXT_HDR_SIZE];
 
     /* Channels + sample counts for the recorded set (g_hdr.channels). Add a
-     * row to list a new channel. */
+     * row to list a new channel. Respiration is part of the ECG sample. */
     static const struct {
         uint8_t     id;
         const char *name;
         unsigned    rate_hz;
     } chans[] = {
-        { HPI_CH_ECG,    "ECG",    HPI_ECG_RATE_HZ  },
-        { HPI_CH_PPG,    "PPG",    HPI_PPG_RATE_HZ  },
-        { HPI_CH_RESP,   "RESP",   HPI_ECG_RATE_HZ },
-        { HPI_CH_VITALS, "Vitals", 1                },
+        { HPI_CH_ECG,    "ECG+Resp", HPI_ECG_RATE_HZ },
+        { HPI_CH_PPG,    "PPG",      HPI_PPG_RATE_HZ },
+        { HPI_CH_VITALS, "Vitals",   1               },
+        { HPI_CH_EEG,    "EEG",      HPI_EEG_RATE_HZ },
     };
     char chl[96] = "";
     char smp[96] = "";
@@ -802,7 +748,7 @@ static void txt_write(bool final)
         "Session:   %s\r\n"
         "Channels:  %s\r\n"
         "Status:    %s\r\n"
-        "Duration:  %u ms\r\n"
+        "Duration:  %u ms (excluding pauses)\r\n"
         "Samples:   %s\r\n"
         "Bytes:     %u\r\n",
         g_path, g_hdr.firmware_version, g_hdr.board_variant, g_hdr.serial_number,
@@ -811,9 +757,13 @@ static void txt_write(bool final)
         final ? "complete" : "recording...",
         final ? dur_ms : 0u,
         smp, g_bytes);
-    
-    if (n < 0) n = 0;
-    if (n > (int)sizeof(buf) - 2) n = (int)sizeof(buf) - 2;
+
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > (int)sizeof(buf) - 2) {
+        n = (int)sizeof(buf) - 2;
+    }
     memset(buf + n, ' ', sizeof(buf) - 2 - n);   /* pad with spaces to 512 bytes */
     buf[sizeof(buf) - 2] = '\r';
     buf[sizeof(buf) - 1] = '\n';
@@ -823,8 +773,8 @@ static void txt_write(bool final)
     fs_close(&f);
 }
 
-/* Append a single textual event line to the .TXT sidecar. Format: ts_ms\tseq\ttext\r\n
- * Best-effort: failure to write is ignored. Caller must hold no locks. */
+/* Append one event line to the .TXT sidecar: ts_ms<TAB>seq<TAB>text.
+ * Best-effort. Writer thread only, under g_lock (it reads g_path). */
 static void txt_append_event_text(uint32_t ts_ms, uint32_t seq, const char *text)
 {
     char path[64];
@@ -836,39 +786,44 @@ static void txt_append_event_text(uint32_t ts_ms, uint32_t seq, const char *text
     }
     struct fs_file_t f;
     fs_file_t_init(&f);
-    int flags = FS_O_CREATE | FS_O_WRITE | FS_O_APPEND;
-    if (fs_open(&f, path, flags) != 0) return;
-    char buf[512];
-    int n = snprintf(buf, sizeof(buf), "%u\t%u\t%s\r\n", ts_ms, seq, text ? text : "");
+    if (fs_open(&f, path, FS_O_CREATE | FS_O_WRITE | FS_O_APPEND) != 0) {
+        return;
+    }
+    char buf[16 + 16 + REC_NOTE_MAX];
+    int n = snprintf(buf, sizeof(buf), "%u\t%u\t%s\r\n", ts_ms, seq, text);
     if (n > 0) {
-        (void)fs_write(&f, buf, (size_t)MIN(n, (int)sizeof(buf)));
+        (void)fs_write(&f, buf, (size_t)MIN(n, (int)sizeof(buf) - 1));
         fs_sync(&f);
     }
     fs_close(&f);
 }
 
-/* Single path for all recorded events: computes the pause-adjusted
- * timestamp and shared sequence number, publishes the in-band frame
- * (unchanged .HP6/hp6_event wire shape), and mirrors it into .IDX with the
- * SRS §3.3 category + description, and into .TXT when there's text to show.
- * Returns the 1-based sequence number, or a negative errno. */
-static int emit_event(uint16_t wire_type, enum hp6_idx_event_type idx_type,
-                      const char *desc)
+/* Write the notes queued by emit_event(). Writer thread, under g_lock. */
+static void drain_notes(void)
+{
+    struct rec_note n;
+
+    while (k_msgq_get(&g_note_q, &n, K_NO_WAIT) == 0) {
+        txt_append_event_text(n.ts_ms, n.seq, n.text);
+    }
+}
+
+/* Single path for every recorded event. Publishes the in-band hp6_event on
+ * HPI_CH_EVENT -- so it lands in the file, the live stream and the ESP32 link,
+ * ordered against the samples around it -- and queues any note for the .TXT.
+ * Never touches the card and never waits on g_lock, so it is safe from the UI
+ * thread. Returns the 1-based sequence number, or a negative errno. */
+static int emit_event(uint16_t type, const char *note)
 {
     if (!g_active) {
         return -EACCES;
     }
-    uint64_t now = k_uptime_get();
-    uint64_t paused_total;
-    k_mutex_lock(&g_lock, K_FOREVER);
-    paused_total = g_paused_accum_ms + (g_paused ? (now - g_pause_start_ms) : 0);
-    k_mutex_unlock(&g_lock);
-    uint32_t ts_ms = (uint32_t)((now - g_start_ms) - paused_total);
+    uint32_t ts_ms = clock_elapsed_ms();
     uint16_t seq = (uint16_t)atomic_inc(&g_mark_seq) + 1;
 
     struct hp6_event ev = {
         .ts_ms = ts_ms,
-        .type  = wire_type,
+        .type  = type,
         .seq   = seq,
     };
     struct hpi_sample_frame f = {
@@ -884,35 +839,28 @@ static int emit_event(uint16_t wire_type, enum hp6_idx_event_type idx_type,
         return rc ? rc : -ENOSPC;
     }
 
-    idx_append_event(ts_ms, idx_type, desc);
-    if (desc && desc[0]) {
-        txt_append_event_text(ts_ms, seq, desc);
+    if (note && note[0]) {
+        struct rec_note n = { .ts_ms = ts_ms, .seq = seq };
+
+        strncpy(n.text, note, sizeof(n.text) - 1);
+        if (k_msgq_put(&g_note_q, &n, K_NO_WAIT) != 0) {
+            LOG_WRN("note for event %u dropped: queue full", seq);
+        }
     }
     return (int)seq;
 }
 
 int recording_add_event_text(const char *text)
 {
-    return emit_event(HP6_EVENT_USER_MARK, HP6_IDX_EVT_USER, text);
+    return emit_event(HP6_EVENT_USER_MARK, text);
 }
-
-int recording_add_event(uint16_t type)
-{
-    enum hp6_idx_event_type idx_type =
-        (type == HP6_EVENT_USER_MARK) ? HP6_IDX_EVT_USER : HP6_IDX_EVT_SYSTEM;
-    int rc = emit_event(type, idx_type, NULL);
-    return rc >= 0 ? 0 : rc;   /* preserve the header's documented 0/-errno contract */
-}
-
 
 /* Write a sync marker into the .HP6 and mirror it in the .IDX. */
 static void emit_sync(void)
 {
     (void)flush_buf();                 /* so file_off points at the sync frame */
     uint64_t file_off = g_bytes;
-    uint64_t now = k_uptime_get();
-    uint64_t paused_total = g_paused_accum_ms + (g_paused ? (now - g_pause_start_ms) : 0);
-    uint32_t ts_ms = (uint32_t)((now - g_start_ms) - paused_total);
+    uint32_t ts_ms = clock_elapsed_ms();
 
     struct hp6_sync_payload s = {
         .magic        = HP6_SYNC_MAGIC,
@@ -925,9 +873,8 @@ static void emit_sync(void)
         .events_since_last_sync = 0,
         .running_crc32 = g_running_crc,   /* CRC of the window just ended */
     };
-    /* One sample of the 40-byte sync payload, on its own channel. ts_ms stays
-     * session-relative INSIDE the payload (wall_ms is derived from it); the
-     * block's own t_ms is uptime like every other block. */
+    /* One sample of the 40-byte sync payload, on its own channel. The block's
+     * own t_ms is uptime like every other block. */
     append_dblk(HPI_CH_SYNC, 0, (uint64_t)k_uptime_get(), 1, &s, sizeof(s));
     idx_append_sync(ts_ms, file_off, g_sync_seq, g_running_crc);
 
@@ -946,48 +893,65 @@ static void emit_sync(void)
     }
 }
 
-/* Auto-close the current file at REC_ROLLOVER_MS and continue the same
- * session into "<base>_NNN.HP6" in the same day dir (SRS §3.1, §5).
- * Runs on the recording thread, under g_lock. Mirrors hpi_recording_stop()'s
- * finalize sequence but leaves g_active/g_paused/g_mark_seq alone -- this is
- * a file boundary, not a session boundary. */
-static void rollover_file(void)
+/* Close the current file cleanly: a final sync marker, the sidecars, and the
+ * header rewritten with end time, duration, counters and the channels that
+ * were actually written. Caller holds g_lock. Returns 0, or the error that
+ * stopped it (in which case enter_error_state() has already closed up). */
+static int finalize_file(void)
 {
     emit_sync();
     if (flush_buf() != 0 || g_error) {
-        return;             /* error state already entered; don't open a new file */
+        return g_error_code;
     }
-    txt_write(true);
 
-    uint64_t now = k_uptime_get();
-    uint64_t paused_total = g_paused_accum_ms + (g_paused ? (now - g_pause_start_ms) : 0);
-    uint64_t dur = now - g_start_ms;
-    dur = (dur > paused_total) ? dur - paused_total : 0;
-    uint32_t dur_ms = (uint32_t)dur;
-    uint32_t channels_host = g_hdr.channels;
+    const uint32_t elapsed_ms = clock_elapsed_ms();
+    const uint32_t dur_ms = (uint32_t)clock_active_ms();
+    const uint32_t channels = g_seen_channels;
 
-    idx_finalize(dur_ms, channels_host);
+    g_hdr.channels = channels;
+    txt_write(true, dur_ms);        /* reads the host-order counters below */
+    idx_finalize();
 
     g_hdr.duration_ms = sys_cpu_to_le32(dur_ms);
+    /* Real time, not start + duration: a pause does not move the clock. */
     g_hdr.timestamp_end = sys_cpu_to_le64(
-        g_wall_start_ms ? (g_wall_start_ms + dur_ms) : 0);
+        g_wall_start_ms ? (g_wall_start_ms + elapsed_ms) : 0);
     for (int i = 0; i < HP6_HDR_CHANNEL_SLOTS; i++) {
         g_hdr.sample_count[i] = sys_cpu_to_le32(g_hdr.sample_count[i]);
     }
-    g_hdr.channels = sys_cpu_to_le32(channels_host);
+    g_hdr.channels = sys_cpu_to_le32(channels);
     g_hdr.event_count = sys_cpu_to_le32(g_hdr.event_count);
     g_hdr.events_offset = sys_cpu_to_le64(g_hdr.events_offset);
     g_hdr.header_crc32 = sys_cpu_to_le32(crc32_ieee((const uint8_t *)&g_hdr, 248));
-    if (fs_seek(&g_file, 0, FS_SEEK_SET) == 0) {
-        (void)fs_write(&g_file, &g_hdr, sizeof(g_hdr));
+
+    int rc = 0;
+
+    if (fs_seek(&g_file, 0, FS_SEEK_SET) != 0 ||
+        fs_write(&g_file, &g_hdr, sizeof(g_hdr)) != (ssize_t)sizeof(g_hdr)) {
+        LOG_ERR("header rewrite failed: %s", g_path);
+        rc = -EIO;
     }
     fs_sync(&g_file);
     fs_close(&g_file);
     g_file_open = false;
+    return rc;
+}
+
+/* Auto-close the current file at REC_ROLLOVER_MS and continue the same
+ * session into "<base>_NNN.HP6" in the same day dir. Runs on the writer
+ * thread, under g_lock. A file boundary, not a session boundary: g_active,
+ * the pause state and the event sequence carry over. */
+static void rollover_file(void)
+{
+    if (finalize_file() != 0 || g_error) {
+        return;             /* don't open a new file after an error */
+    }
     LOG_INF("rollover: closed %s (%u bytes, %u syncs)", g_path, g_bytes, g_sync_count);
 
-    snprintf(g_path, sizeof(g_path), "%s_%03u.HP6", g_session_base_path,
-             (unsigned)(++g_rollover_seq));
+    /* Real base paths are ~31 chars ("/SD:/HPI6/REC/YYYYMMDD/HHMMSS_A"); the
+     * bounds only let the compiler prove the result fits in g_path. */
+    snprintf(g_path, sizeof(g_path), "%.55s_%03u.HP6", g_session_base_path,
+             (unsigned)(++g_rollover_seq % 1000U));
     g_wall_start_ms = rtc_unix_ms();
     header_init(g_session_name);
 
@@ -1002,31 +966,62 @@ static void rollover_file(void)
     if (w != (ssize_t)sizeof(g_hdr)) {
         LOG_ERR("rollover: header write failed (%d) -- stopping", (int)w);
         fs_close(&g_file);
-        enter_error_state((int)w);
+        enter_error_state(w < 0 ? (int)w : -ENOSPC);
         return;
     }
     g_file_open = true;
     g_bytes = sizeof(g_hdr);
     g_wlen = 0;
-    g_start_ms = (uint64_t)k_uptime_get();
-    g_paused_accum_ms = 0;   /* pre-rollover pause time belongs to the old file */
+    clock_restart();
     g_seq = 0;
     g_sync_seq = 0;
     g_sync_count = 0;
     g_running_crc = 0;
     g_last_sync_ms = k_uptime_get();
     idx_open();
-    txt_write(false);
+    txt_write(false, 0);
 
     LOG_INF("rollover: continuation started: %s (wall=%llu ms)", g_path,
             (unsigned long long)g_wall_start_ms);
 }
 
-/* Periodic tick from the recording thread: sync marker, or rollover if the
- * current file has hit REC_ROLLOVER_MS. Do-nothing if called before
- * REC_SYNC_PERIOD_MS has elapsed, so callers can invoke it unconditionally. */
+/* Stop + finalize. Caller holds g_lock. */
+static int stop_locked(void)
+{
+    if (!g_active) {
+        return -EALREADY;
+    }
+    g_active = false;
+    g_max_active_ms = 0;
+    drain_notes();
+
+    int rc = finalize_file();
+
+    k_spinlock_key_t key = k_spin_lock(&g_clock_lock);
+    g_paused = false;
+    k_spin_unlock(&g_clock_lock, key);
+
+    if (rc == 0) {
+        LOG_INF("recording stopped: %s (%u bytes, %u syncs)", g_path, g_bytes,
+                g_sync_count);
+    }
+    return rc;
+}
+
+/* Periodic work from the writer thread, called on every loop -- including
+ * while paused or when no frame arrived: auto-stop, then every
+ * REC_SYNC_PERIOD_MS a card check and a sync marker or rollover. */
 static void check_periodic(void)
 {
+    /* The auto-stop lives here, on the writer thread, rather than in a timer
+     * the UI owns: every way of stopping a recording ends it, so it can never
+     * fire into a later, unrelated recording. */
+    if (g_max_active_ms != 0 && clock_active_ms() >= g_max_active_ms) {
+        LOG_INF("auto-stop after %llu ms recorded",
+                (unsigned long long)g_max_active_ms);
+        (void)stop_locked();
+        return;
+    }
     if (k_uptime_get() - g_last_sync_ms < (int64_t)REC_SYNC_PERIOD_MS) {
         return;
     }
@@ -1037,25 +1032,24 @@ static void check_periodic(void)
         enter_error_state(-ENODEV);
         return;
     }
-    uint64_t now = k_uptime_get();
-    uint64_t paused_total = g_paused_accum_ms + (g_paused ? (now - g_pause_start_ms) : 0);
-    uint64_t elapsed = now - g_start_ms;
-    elapsed = (elapsed > paused_total) ? elapsed - paused_total : 0;
-
-    if (elapsed >= REC_ROLLOVER_MS) {
+    if (clock_elapsed_ms() >= REC_ROLLOVER_MS) {
         rollover_file();
     } else {
         emit_sync();
     }
 }
+
 /* ---- public API ---- */
 
-int hpi_recording_start(const char *session_name)
+int hpi_recording_start_ex(const char *session_name, uint32_t max_duration_s)
 {
     k_mutex_lock(&g_lock, K_FOREVER);
     int rc = 0;
 
-    if (g_active) { rc = -EBUSY; goto out; }
+    if (g_active) {
+        rc = -EBUSY;
+        goto out;
+    }
 
     g_error = false;
     g_error_code = 0;
@@ -1064,11 +1058,15 @@ int hpi_recording_start(const char *session_name)
      * header and capture nothing (e.g. if the ring alloc failed at boot). */
     if (g_sub == NULL) {
         LOG_ERR("recording: no bus subscription (writer not ready); aborting start");
-        rc = -ENODEV; goto out;
+        rc = -ENODEV;
+        goto out;
     }
 
-    /* recording while the host owns the SD. */
-    if (!platform_fs_is_ready()) { rc = -ENODEV; goto out; }
+    /* No card, or the host owns it (Transfer Mode). */
+    if (!platform_fs_is_ready()) {
+        rc = -ENODEV;
+        goto out;
+    }
 
     {
         uint64_t free_bytes = 0, total_bytes = 0;
@@ -1132,90 +1130,52 @@ int hpi_recording_start(const char *session_name)
     }
     g_bytes = sizeof(g_hdr);
     g_wlen = 0;
-    g_start_ms = (uint64_t)k_uptime_get();
+    {
+        k_spinlock_key_t key = k_spin_lock(&g_clock_lock);
+        g_paused = false;
+        k_spin_unlock(&g_clock_lock, key);
+    }
+    clock_restart();
     g_sync_seq = 0;
     g_sync_count = 0;
     g_seq = 0;
     (void)atomic_set(&g_mark_seq, 0);
+    k_msgq_purge(&g_note_q);
     g_running_crc = 0;
     g_last_sync_ms = k_uptime_get();
-    g_paused = false;           
-    g_pause_start_ms = 0;       
-    g_paused_accum_ms = 0;        
+    g_max_active_ms = (uint64_t)max_duration_s * 1000ULL;
     idx_open();
-    txt_write(false);
+    txt_write(false, 0);
     g_file_open = true;
     g_active = true;
-    LOG_INF("recording started: %s (wall=%llu ms)", g_path,
-            (unsigned long long)g_wall_start_ms);
+    LOG_INF("recording started: %s (wall=%llu ms, auto-stop %u s)", g_path,
+            (unsigned long long)g_wall_start_ms, max_duration_s);
 
 out:
     k_mutex_unlock(&g_lock);
     return rc;
 }
 
+int hpi_recording_start(const char *session_name)
+{
+    return hpi_recording_start_ex(session_name, 0);
+}
+
 int hpi_recording_stop(void)
 {
     k_mutex_lock(&g_lock, K_FOREVER);
-    int rc = 0;
-
-        if (!g_active) { rc = -EALREADY; goto out; }
-    g_active = false;
-
-    emit_sync();            /* final sync marker (covers the last window) */
-    if (flush_buf() != 0 || g_error) {
-        rc = g_error_code;  /* files were already closed by enter_error_state() */
-        goto out;
-    }
-    txt_write(true);        /* uses live counters before they're byte-swapped */
-
-    /* Compute duration + channels (host-order) BEFORE idx_finalize() -- the
-     * .IDX and the .HP6 header both need them, and g_hdr.channels is about
-     * to be byte-swapped in place below, so capture it here first. */
-    uint64_t now = k_uptime_get();
-    uint64_t paused_total = g_paused_accum_ms + (g_paused ? (now - g_pause_start_ms) : 0);
-    uint64_t dur = now - g_start_ms;
-    if (dur > paused_total) dur -= paused_total; else dur = 0;
-    uint32_t dur_ms = (uint32_t)dur;
-    uint32_t channels_host = g_hdr.channels;
-
-    idx_finalize(dur_ms, channels_host);
-
-    /* Finalize header: end time, duration, counters, fresh CRC. */
-    g_hdr.duration_ms = sys_cpu_to_le32(dur_ms);
-    g_hdr.timestamp_end = sys_cpu_to_le64(
-        g_wall_start_ms ? (g_wall_start_ms + dur_ms) : 0);
-    for (int i = 0; i < HP6_HDR_CHANNEL_SLOTS; i++) {
-        g_hdr.sample_count[i] = sys_cpu_to_le32(g_hdr.sample_count[i]);
-    }
-    g_hdr.channels = sys_cpu_to_le32(channels_host);
-    g_hdr.event_count = sys_cpu_to_le32(g_hdr.event_count);
-    g_hdr.events_offset = sys_cpu_to_le64(g_hdr.events_offset);
-    g_hdr.header_crc32 = sys_cpu_to_le32(crc32_ieee((const uint8_t *)&g_hdr, 248));
-
-    if (fs_seek(&g_file, 0, FS_SEEK_SET) == 0) {
-        (void)fs_write(&g_file, &g_hdr, sizeof(g_hdr));
-    }
-    fs_sync(&g_file);
-    fs_close(&g_file);
-    g_file_open = false;
-    LOG_INF("recording stopped: %s (%u bytes, %u syncs)", g_path, g_bytes,
-            g_sync_count);
-
-out:
+    int rc = stop_locked();
     k_mutex_unlock(&g_lock);
     return rc;
 }
 
 int hpi_recording_mark(void)
 {
-    /* Previously published to the bus but never called idx_append_event() --
-     * plain marks (the MARK EVENT button, no note) never reached .IDX. */
-    int rc = emit_event(HP6_EVENT_USER_MARK, HP6_IDX_EVT_USER, NULL);
-    if (rc < 0) {
-        return rc;
+    int rc = emit_event(HP6_EVENT_USER_MARK, NULL);
+
+    if (rc > 0) {
+        LOG_DBG("mark %d recorded", rc);
     }
-    LOG_INF("mark %d recorded", rc);
     return rc;
 }
 
@@ -1230,21 +1190,11 @@ void hpi_recording_get_status(struct hpi_recording_status *out)
         return;
     }
     out->active = g_active;
+    out->paused = g_active && clock_paused();
     out->error = g_error;
     out->error_code = g_error_code;
     out->bytes_written = g_bytes;
-    if (g_active) {
-        uint64_t now = k_uptime_get();
-        uint64_t paused_total;
-        k_mutex_lock(&g_lock, K_FOREVER);
-        paused_total = g_paused_accum_ms + (g_paused ? (now - g_pause_start_ms) : 0);
-        k_mutex_unlock(&g_lock);
-        uint64_t dur = now - g_start_ms;
-        if (dur > paused_total) dur -= paused_total; else dur = 0;
-        out->duration_ms = (uint32_t)dur;
-    } else {
-        out->duration_ms = 0;
-    }
+    out->duration_ms = g_active ? (uint32_t)clock_active_ms() : 0;
     out->ecg_samples = g_hdr.sample_count[HP6_HDR_SLOT(HPI_CH_ECG)];
     out->ppg_samples = g_hdr.sample_count[HP6_HDR_SLOT(HPI_CH_PPG)];
     out->vitals_samples = g_hdr.sample_count[HP6_HDR_SLOT(HPI_CH_VITALS)];
@@ -1255,36 +1205,37 @@ void hpi_recording_get_status(struct hpi_recording_status *out)
 
 int hpi_recording_pause(bool pause)
 {
-    if (!g_active) return -EACCES;
-    k_mutex_lock(&g_lock, K_FOREVER);
-    if (pause == g_paused) {
-        k_mutex_unlock(&g_lock);
-        return 0;
+    if (!g_active) {
+        return -EACCES;
     }
-    if (pause) {
-        /* entering pause: record pause start */
-        g_pause_start_ms = k_uptime_get();
-        g_paused = true;
-    } else {
-        /* leaving pause: accumulate paused duration */
-        if (g_pause_start_ms) {
-            g_paused_accum_ms += (k_uptime_get() - g_pause_start_ms);
-            g_pause_start_ms = 0;
-        }
-        g_paused = false;
-    }
-    k_mutex_unlock(&g_lock);
+    k_mutex_lock(&g_pause_lock, K_FOREVER);
 
-    /* SRS §3.3 / §10 T4: pause and resume must each leave a SYSTEM
-     * event in .HP6 (in-band DBLK) and .IDX (sidecar). Must be called
-     * AFTER releasing g_lock -- emit_event()/idx_append_event() take
-     * the lock themselves. */
-    int rc = emit_event(pause ? HP6_EVENT_SYSTEM_PAUSE : HP6_EVENT_SYSTEM_RESUME,
-                     HP6_IDX_EVT_SYSTEM,
-                     pause ? "PAUSE" : "RESUME");
-    if (rc > 0) {
-        LOG_INF("%s %d recorded", pause ? "pause" : "resume", rc);
+    k_spinlock_key_t key = k_spin_lock(&g_clock_lock);
+    bool changed = (pause != g_paused);
+
+    if (changed) {
+        uint64_t now = k_uptime_get();
+
+        if (pause) {
+            g_pause_start_ms = now;
+        } else {
+            g_paused_accum_ms += now - g_pause_start_ms;
+        }
+        g_paused = pause;
     }
+    k_spin_unlock(&g_clock_lock, key);
+
+    if (changed) {
+        /* The marker is part of the record: a reader sees exactly where the
+         * gap in the data starts and ends. A publish failure leaves the pause
+         * in effect but unmarked; say so rather than fail the pause. */
+        int rc = emit_event(pause ? HP6_EVENT_SYSTEM_PAUSE : HP6_EVENT_SYSTEM_RESUME,
+                            NULL);
+        if (rc < 0) {
+            LOG_WRN("%s marker not recorded (%d)", pause ? "pause" : "resume", rc);
+        }
+    }
+    k_mutex_unlock(&g_pause_lock);
     return 0;
 }
 
@@ -1308,13 +1259,21 @@ void hpi_recording_clear_error(void)
 
 int hpi_recording_set_channel_enabled(uint8_t channel, bool enabled)
 {
-    if (channel == 0) return -EINVAL;
-    k_mutex_lock(&g_lock, K_FOREVER);
     uint32_t bit = HPI_CH_BIT(channel);
-    if (enabled) g_channel_mask |= bit;
-    else g_channel_mask &= ~bit;
-    /* Update header live so the finalized header reflects the chosen set. */
-   // g_hdr.channels = g_channel_mask;
+
+    if (!(bit & REC_SELECTABLE_MASK)) {
+        return -EINVAL;
+    }
+    /* Fixed for the life of a recording, so the header and the data agree. */
+    if (g_active) {
+        return -EBUSY;
+    }
+    k_mutex_lock(&g_lock, K_FOREVER);
+    if (enabled) {
+        g_channel_mask |= bit;
+    } else {
+        g_channel_mask &= ~bit;
+    }
     k_mutex_unlock(&g_lock);
     return 0;
 }
@@ -1344,568 +1303,453 @@ int recording_get_free_space(uint64_t *free_bytes, uint64_t *total_bytes)
 
 struct rec_datetime { uint16_t year; uint8_t month, day, hour, min, sec; };
 
-static void parse_path_datetime_dt(const char *hp6_path, struct rec_datetime *out)
+static void parse_path_datetime(const char *hp6_path, struct rec_datetime *out)
 {
-	out->year = 0;
-	out->month = out->day = out->hour = out->min = out->sec = 0;
+    out->year = 0;
+    out->month = out->day = out->hour = out->min = out->sec = 0;
 
-	const char *fname = strrchr(hp6_path, '/');
-	if (!fname) {
-		return;
-	}
-	fname++;
+    const char *fname = strrchr(hp6_path, '/');
+    if (!fname) {
+        return;
+    }
+    fname++;
 
-	const char *daydir_end = fname - 1;
-	const char *daydir_start = daydir_end;
-	while (daydir_start > hp6_path && *(daydir_start - 1) != '/') {
-		daydir_start--;
-	}
-	size_t daylen = (size_t)(daydir_end - daydir_start);
-	char daybuf[16] = {0};
-	if (daylen == 0 || daylen >= sizeof(daybuf)) {
-		return;
-	}
-	memcpy(daybuf, daydir_start, daylen);
+    const char *daydir_end = fname - 1;
+    const char *daydir_start = daydir_end;
+    while (daydir_start > hp6_path && *(daydir_start - 1) != '/') {
+        daydir_start--;
+    }
+    size_t daylen = (size_t)(daydir_end - daydir_start);
+    char daybuf[16] = {0};
+    if (daylen == 0 || daylen >= sizeof(daybuf)) {
+        return;
+    }
+    memcpy(daybuf, daydir_start, daylen);
 
-	unsigned y = 0, mo = 0, d = 0, hh = 0, mm = 0, ss = 0;
-	if (sscanf(daybuf, "%4u%2u%2u", &y, &mo, &d) == 3 &&
-	    sscanf(fname, "%2u%2u%2u", &hh, &mm, &ss) == 3) {
-		out->year = (uint16_t)y;
-		out->month = (uint8_t)mo;
-		out->day = (uint8_t)d;
-		out->hour = (uint8_t)hh;
-		out->min = (uint8_t)mm;
-		out->sec = (uint8_t)ss;
-	}
+    unsigned y = 0, mo = 0, d = 0, hh = 0, mm = 0, ss = 0;
+    if (sscanf(daybuf, "%4u%2u%2u", &y, &mo, &d) == 3 &&
+        sscanf(fname, "%2u%2u%2u", &hh, &mm, &ss) == 3) {
+        out->year = (uint16_t)y;
+        out->month = (uint8_t)mo;
+        out->day = (uint8_t)d;
+        out->hour = (uint8_t)hh;
+        out->min = (uint8_t)mm;
+        out->sec = (uint8_t)ss;
+    }
 }
 
-static void parse_path_datetime(const char *hp6_path, struct recording_summary *out)
+/* Recover the duration of a file that was never closed from the last sync
+ * record in its .IDX (spec §6: 12 B header, then 20 B records). Advisory, like
+ * the .IDX itself; 0 if there is nothing to go on. */
+static uint32_t idx_last_sync_ms(const char *hp6_path)
 {
-	struct rec_datetime dt;
-	parse_path_datetime_dt(hp6_path, &dt);
-	out->year = dt.year; out->month = dt.month; out->day = dt.day;
-	out->hour = dt.hour; out->min = dt.min; out->sec = dt.sec;
-}
-
-/* Best-effort peek at a finalized header for duration + channels. */
-static int read_header_summary(const char *hp6_path, uint32_t *duration_ms,
-				uint32_t *channels)
-{
-	struct fs_file_t f;
-	struct recording_header h;
-
-	*duration_ms = 0;
-	*channels = 0;
-
-	fs_file_t_init(&f);
-	if (fs_open(&f, hp6_path, FS_O_READ) != 0) {
-		return -ENOENT;
-	}
-	ssize_t r = fs_read(&f, &h, sizeof(h));
-	fs_close(&f);
-
-	if (r != (ssize_t)sizeof(h) || memcmp(h.magic, "HPI6", 4) != 0) {
-		return -EIO;
-	}
-	
-    *channels = sys_le32_to_cpu(h.channels);   /* intended mask is valid even if open */
-	if (h.timestamp_end == 0xFFFFFFFFFFFFFFFFULL) {
-		return -EAGAIN;   /* never finalized */
-	}
-	*duration_ms = sys_le32_to_cpu(h.duration_ms);
-	return 0;
-}
-
-/* Newest-first by the YYYYMMDDHHMMSS packed into each entry. */
-static uint64_t sort_key(const struct recording_summary *e)
-{
-	return (((uint64_t)e->year * 10000ULL + e->month * 100U + e->day) * 1000000ULL) +
-	       (e->hour * 10000U + e->min * 100U + e->sec);
-}
-
-static void sort_entries_desc(struct recording_summary *arr, size_t n)
-{
-	for (size_t i = 1; i < n; i++) {
-		struct recording_summary tmp = arr[i];
-		uint64_t key = sort_key(&tmp);
-		size_t j = i;
-		while (j > 0 && sort_key(&arr[j - 1]) < key) {
-			arr[j] = arr[j - 1];
-			j--;
-		}
-		arr[j] = tmp;
-	}
-}
-
-// /* Async listing work: enumerate /SD:/HPI6/REC/*/*.HP6 and call cb for each
-//  * entry found. Runs in a worker so it won't block the UI. */
-// */
-static int read_idx_counts(const char *idx_path, uint32_t *out_event_count,
-                            uint32_t *out_sync_count)
-{
+    char idx_path[64];
+    struct fs_dirent st;
     struct fs_file_t f;
+    uint8_t rec[HP6_IDX_SYNC_REC_SIZE];
+    uint32_t ms = 0;
+
+    strncpy(idx_path, hp6_path, sizeof(idx_path) - 1);
+    idx_path[sizeof(idx_path) - 1] = '\0';
+    char *dot = strrchr(idx_path, '.');
+    if (dot) {
+        strncpy(dot, ".IDX", 5);
+    }
+    if (fs_stat(idx_path, &st) != 0 ||
+        st.size < HP6_IDX_HDR_SIZE + HP6_IDX_SYNC_REC_SIZE) {
+        return 0;
+    }
+    /* A file that was never closed has no footer, so whole records only. */
+    uint32_t n = (uint32_t)(st.size - HP6_IDX_HDR_SIZE) / HP6_IDX_SYNC_REC_SIZE;
+    off_t off = HP6_IDX_HDR_SIZE + (off_t)(n - 1) * HP6_IDX_SYNC_REC_SIZE;
+
     fs_file_t_init(&f);
-    if (fs_open(&f, idx_path, FS_O_READ) != 0) return -ENOENT;
-    uint8_t h[HP6_IDX_HDR_SIZE];
-    if (fs_read(&f, h, sizeof(h)) != sizeof(h)) { fs_close(&f); return -EIO; }
-    if (out_event_count) *out_event_count = sys_get_le16(&h[6]);
-    if (out_sync_count)  *out_sync_count  = sys_get_le32(&h[8]);
-    fs_close(&f);
-    return 0;
-}
-
-/* Like read_idx_counts(), but also returns duration_ms/channels when the
- * .IDX was written with header v0x0301+ -- letting page_work_fn() list
- * without ever opening the .HP6 (SRS §3.4/§4.2).
- *
- * CRITICAL: gate on the version field, never on how many bytes fs_read()
- * returned. An older, pre-0x0301 .IDX still fills the full HP6_IDX_HDR_SIZE
- * read -- its reserved event table starts right where the old, shorter
- * header ended, so bytes [12..20) belong to that first event slot, not to
- * unused padding. Reading them as duration/channels would show garbage
- * instead of "unknown". */
-
-static int read_idx_summary(const char *idx_path, uint32_t *out_event_count,
-                            uint32_t *out_sync_count, uint32_t *out_duration_ms,
-                            uint32_t *out_channels)
-{
-    struct fs_file_t f;
-    fs_file_t_init(&f);
-    if (fs_open(&f, idx_path, FS_O_READ) != 0) return -ENOENT;
-
-    uint8_t h[HP6_IDX_HDR_SIZE];
-    ssize_t r = fs_read(&f, h, sizeof(h));
-    if (r < 12) { fs_close(&f); return -EIO; }
-
-    uint16_t version = sys_get_le16(&h[4]);
-    uint32_t ev = sys_get_le16(&h[6]);
-    uint32_t sc = sys_get_le32(&h[8]);
-    uint32_t dur = 0, ch = 0;
-
-    if (version >= 0x0301 && r >= (ssize_t)HP6_IDX_HDR_SIZE) {
-        dur = sys_get_le32(&h[12]);
-        ch  = sys_get_le32(&h[16]);
-
-        /* Never finalized (card pulled / power loss): recover the duration
-         * from the last complete sync record. */
-        if (dur == 0 && sc == 0) {
-            struct fs_dirent st;
-            if (fs_stat(idx_path, &st) == 0 && st.size > HP6_IDX_SYNCS_OFFSET) {
-                uint32_t n = (uint32_t)(st.size - HP6_IDX_SYNCS_OFFSET) /
-                             HP6_IDX_SYNC_REC_SIZE;
-                if (n > 0) {
-                    uint8_t rec[HP6_IDX_SYNC_REC_SIZE];
-                    off_t off = HP6_IDX_SYNCS_OFFSET +
-                                (off_t)(n - 1) * HP6_IDX_SYNC_REC_SIZE;
-                    if (fs_seek(&f, off, FS_SEEK_SET) == 0 &&
-                        fs_read(&f, rec, sizeof(rec)) == (ssize_t)sizeof(rec)) {
-                        dur = sys_get_le32(&rec[0]);
-                        sc  = n;
-                    }
-                }
-            }
-        }
+    if (fs_open(&f, idx_path, FS_O_READ) != 0) {
+        return 0;
+    }
+    if (fs_seek(&f, off, FS_SEEK_SET) == 0 &&
+        fs_read(&f, rec, sizeof(rec)) == (ssize_t)sizeof(rec)) {
+        ms = sys_get_le32(&rec[0]);
     }
     fs_close(&f);
-
-    if (out_event_count) *out_event_count = ev;
-    if (out_sync_count)  *out_sync_count  = sc;
-    if (out_duration_ms) *out_duration_ms = dur;
-    if (out_channels)    *out_channels    = ch;
-    return 0;
+    return ms;
 }
-static void listing_work_fn(struct k_work *work)
+
+/* Fill duration, channels and event count from the .HP6 header -- the
+ * authoritative source. A file that was never closed (card pulled, power
+ * lost) has no end time and stale counters, so its duration is recovered from
+ * the .IDX and its event count is unknown (0). */
+static void read_header_summary(struct recording_summary *sm)
 {
-	struct list_work_ctx *ctx = CONTAINER_OF(work, struct list_work_ctx, work);
-	struct fs_dir_t dayd;
-	struct fs_dirent ent;
-	const char *root = REC_ROOT;
+    struct fs_file_t f;
+    struct recording_header h;
 
-    fs_dir_t_init(&dayd);   
+    fs_file_t_init(&f);
+    if (fs_open(&f, sm->path, FS_O_READ) != 0) {
+        return;
+    }
+    ssize_t r = fs_read(&f, &h, sizeof(h));
+    fs_close(&f);
 
-    int drc = fs_opendir(&dayd, root);
-	LOG_INF("REC-LIST: opendir(%s)=%d fs_ready=%d", root, drc, (int)platform_fs_is_ready());
-	if (drc != 0) {
-		goto done;
-	}
-
-	while (fs_readdir(&dayd, &ent) == 0 && ent.name[0]) {
-		if (ent.type != FS_DIR_ENTRY_DIR) continue;
-		char daypath[128];
-		snprintf(daypath, sizeof(daypath), "%s/%s", root, ent.name);
-		struct fs_dir_t fd;
-        fs_dir_t_init(&fd);   
-		if (fs_opendir(&fd, daypath) != 0) continue;
-
-		while (fs_readdir(&fd, &ent) == 0 && ent.name[0]) {
-			if (ent.type != FS_DIR_ENTRY_FILE) continue;
-			const char *name = ent.name;
-			size_t ln = strlen(name);
-			if (ln < 5 || strcasecmp(name + ln - 4, ".HP6") != 0) continue;
-
-			char hp6_path[256];
-			snprintf(hp6_path, sizeof(hp6_path), "%s/%s", daypath, name);
-
-			char idx_path[256];
-			strncpy(idx_path, hp6_path, sizeof(idx_path) - 1);
-			idx_path[sizeof(idx_path) - 1] = '\0';
-			char *dot = strrchr(idx_path, '.');
-			if (dot) strncpy(dot, ".IDX", 5);
-
-			if (ctx->n_entries >= ctx->max_entries) continue;
-
-			struct recording_summary *e = &ctx->entries[ctx->n_entries];
-			memset(e, 0, sizeof(*e));
-			strncpy(e->path, hp6_path, sizeof(e->path) - 1);
-			e->size_bytes = (uint32_t)ent.size;
-
-			uint32_t event_count = 0, sync_count = 0;
-			(void)read_idx_counts(idx_path, &event_count, &sync_count);
-			e->event_count = event_count;
-
-			uint32_t dur = 0, chans = 0;
-			(void)read_header_summary(hp6_path, &dur, &chans);
-			e->duration_ms = dur;
-			e->channels = chans;
-
-			parse_path_datetime(hp6_path, e);
-			ctx->n_entries++;
-		}
-		fs_closedir(&fd);
-	}
-	fs_closedir(&dayd);
-
-	sort_entries_desc(ctx->entries, ctx->n_entries);
-
-	for (size_t i = 0; i < ctx->n_entries; i++) {
-		ctx->cb(&ctx->entries[i], ctx->user_data);
-	}
-	ctx->cb(NULL, ctx->user_data);   /* completion sentinel */
-
-	LOG_INF("REC-LIST: total entries found = %zu", ctx->n_entries);
-done:
-	k_free(ctx->entries);
-	k_free(ctx);
+    if (r != (ssize_t)sizeof(h) || memcmp(h.magic, "HPI6", 4) != 0) {
+        return;
+    }
+    sm->channels = sys_le32_to_cpu(h.channels);
+    if (h.timestamp_end == 0xFFFFFFFFFFFFFFFFULL) {
+        sm->duration_ms = idx_last_sync_ms(sm->path);
+        return;
+    }
+    sm->duration_ms = sys_le32_to_cpu(h.duration_ms);
+    sm->event_count = sys_le32_to_cpu(h.event_count);
 }
 
-int recording_list_async(recording_list_cb_t cb, void *user_data)
-{
-	if (!cb) return -EINVAL;
-	struct list_work_ctx *ctx = k_malloc(sizeof(*ctx));
-	if (!ctx) return -ENOMEM;
-	ctx->entries = k_malloc(sizeof(struct recording_summary) * REC_LIST_MAX_ENTRIES);
-	if (!ctx->entries) {
-		LOG_ERR("recording_list_async: k_malloc(%u entries, %u B) failed",
-			REC_LIST_MAX_ENTRIES,
-			(unsigned)(sizeof(struct recording_summary) * REC_LIST_MAX_ENTRIES));
-		k_free(ctx);
-		return -ENOMEM;
-	}
-	ctx->n_entries = 0;
-	ctx->max_entries = REC_LIST_MAX_ENTRIES;
-	ctx->cb = cb;
-	ctx->user_data = user_data;
-	k_work_init(&ctx->work, listing_work_fn);
-	//k_work_submit(&ctx->work);
-    k_work_submit_to_queue(&s_rec_wq, &ctx->work);
-	return 0;
-}
-static struct recording_index_entry *s_index;
+/* ---- paginated listing (index build + page fetch, both on s_rec_wq) ---- */
+
+static REC_EXT_RAM struct recording_index_entry s_index[REC_INDEX_MAX_ENTRIES];
 static uint32_t s_index_n;
-static uint32_t s_index_cap;
 static bool     s_index_cap_warned;
 static volatile int s_index_rc;
 
 struct rec_page_cache_slot {
-	bool     valid;
-	uint32_t start_idx;
-	uint32_t count;
-	uint32_t lru_stamp;
-	struct recording_summary entries[REC_PAGE_SIZE_MAX];
+    bool     valid;
+    uint32_t start_idx;
+    uint32_t count;
+    uint32_t lru_stamp;
+    struct recording_summary entries[REC_PAGE_SIZE_MAX];
 };
-static struct rec_page_cache_slot s_page_cache[REC_PAGE_CACHE_SLOTS];
+static REC_EXT_RAM struct rec_page_cache_slot s_page_cache[REC_PAGE_CACHE_SLOTS];
 static uint32_t s_page_cache_clock;
 
 struct index_work_ctx {
-	struct k_work work;
-	recording_index_cb_t cb;
-	void *user_data;
+    struct k_work work;
+    recording_index_cb_t cb;
+    void *user_data;
 };
 
 struct page_work_ctx {
-	struct k_work work;
-	uint32_t start_idx;
-	uint32_t count;
-	recording_page_cb_t cb;
-	void *user_data;
+    struct k_work work;
+    uint32_t start_idx;
+    uint32_t count;
+    recording_page_cb_t cb;
+    void *user_data;
+};
+
+struct delete_work_ctx {
+    struct k_work work;
+    char path[64];
+    recording_delete_cb_t cb;
+    void *user_data;
 };
 
 static uint64_t index_sort_key(const struct recording_index_entry *e)
 {
-	return (((uint64_t)e->year * 10000ULL + e->month * 100U + e->day) * 1000000ULL) +
-	       (e->hour * 10000U + e->min * 100U + e->sec);
+    return (((uint64_t)e->year * 10000ULL + e->month * 100U + e->day) * 1000000ULL) +
+           (e->hour * 10000U + e->min * 100U + e->sec);
 }
 
+/* Newest first. */
 static void index_sort_desc(struct recording_index_entry *arr, size_t n)
 {
-	for (size_t i = 1; i < n; i++) {
-		struct recording_index_entry tmp = arr[i];
-		uint64_t key = index_sort_key(&tmp);
-		size_t j = i;
-		while (j > 0 && index_sort_key(&arr[j - 1]) < key) {
-			arr[j] = arr[j - 1];
-			j--;
-		}
-		arr[j] = tmp;
-	}
+    for (size_t i = 1; i < n; i++) {
+        struct recording_index_entry tmp = arr[i];
+        uint64_t key = index_sort_key(&tmp);
+        size_t j = i;
+        while (j > 0 && index_sort_key(&arr[j - 1]) < key) {
+            arr[j] = arr[j - 1];
+            j--;
+        }
+        arr[j] = tmp;
+    }
 }
 
 static void rec_page_cache_invalidate_all(void)
 {
-	for (int i = 0; i < REC_PAGE_CACHE_SLOTS; i++) {
-		s_page_cache[i].valid = false;
-	}
+    for (int i = 0; i < REC_PAGE_CACHE_SLOTS; i++) {
+        s_page_cache[i].valid = false;
+    }
 }
 
 static void index_work_fn(struct k_work *work)
 {
-	struct index_work_ctx *ctx = CONTAINER_OF(work, struct index_work_ctx, work);
-	struct fs_dir_t dayd;
-	struct fs_dirent ent;
-	const char *root = REC_ROOT;
+    struct index_work_ctx *ctx = CONTAINER_OF(work, struct index_work_ctx, work);
+    struct fs_dir_t dayd;
+    struct fs_dirent ent;
+    const char *root = REC_ROOT;
 
-	s_index_n = 0;
-	s_index_cap_warned = false;
-	rec_page_cache_invalidate_all();
+    s_index_n = 0;
+    s_index_cap_warned = false;
+    rec_page_cache_invalidate_all();
 
-	fs_dir_t_init(&dayd);
-	int orc = fs_opendir(&dayd, root);
-	s_index_rc = orc;
-	if (orc != 0) {
-		goto done;
-	}
+    fs_dir_t_init(&dayd);
+    int orc = fs_opendir(&dayd, root);
+    s_index_rc = orc;
+    if (orc != 0) {
+        goto done;
+    }
 
-	while (fs_readdir(&dayd, &ent) == 0 && ent.name[0]) {
-		if (ent.type != FS_DIR_ENTRY_DIR) continue;
-		char daypath[128];
-		snprintf(daypath, sizeof(daypath), "%s/%s", root, ent.name);
-		struct fs_dir_t fd;
-		fs_dir_t_init(&fd);
-		if (fs_opendir(&fd, daypath) != 0) continue;
+    while (fs_readdir(&dayd, &ent) == 0 && ent.name[0]) {
+        if (ent.type != FS_DIR_ENTRY_DIR) {
+            continue;
+        }
+        /* 8.3 names (no LFN): REC_ROOT + "/" + 12 chars fits easily. */
+        char daypath[sizeof(REC_ROOT) + 1 + sizeof(ent.name)];
+        snprintf(daypath, sizeof(daypath), "%s/%s", root, ent.name);
+        struct fs_dir_t fd;
+        fs_dir_t_init(&fd);
+        if (fs_opendir(&fd, daypath) != 0) {
+            continue;
+        }
 
-		while (fs_readdir(&fd, &ent) == 0 && ent.name[0]) {
-			if (ent.type != FS_DIR_ENTRY_FILE) continue;
-			const char *name = ent.name;
-			size_t ln = strlen(name);
-			if (ln < 5 || strcasecmp(name + ln - 4, ".HP6") != 0) continue;
+        while (fs_readdir(&fd, &ent) == 0 && ent.name[0]) {
+            if (ent.type != FS_DIR_ENTRY_FILE) {
+                continue;
+            }
+            const char *name = ent.name;
+            size_t ln = strlen(name);
+            if (ln < 5 || strcasecmp(name + ln - 4, ".HP6") != 0) {
+                continue;
+            }
 
-			if (s_index_n >= s_index_cap) {
-				if (!s_index_cap_warned) {
-					LOG_WRN("recording index full at %u entries -- "
-						"recordings past this won't list",
-						s_index_cap);
-					s_index_cap_warned = true;
-				}
-				continue;
-			}
+            if (s_index_n >= REC_INDEX_MAX_ENTRIES) {
+                if (!s_index_cap_warned) {
+                    LOG_WRN("recording index full at %u entries -- "
+                        "recordings past this won't list",
+                        REC_INDEX_MAX_ENTRIES);
+                    s_index_cap_warned = true;
+                }
+                continue;
+            }
 
-			char hp6_path[256];
-			snprintf(hp6_path, sizeof(hp6_path), "%s/%s", daypath, name);
+            struct recording_index_entry *e = &s_index[s_index_n];
+            struct rec_datetime dt;
 
-			struct recording_index_entry *e = &s_index[s_index_n];
-			memset(e, 0, sizeof(*e));
-			strncpy(e->path, hp6_path, sizeof(e->path) - 1);
+            BUILD_ASSERT(sizeof(daypath) + sizeof(ent.name) <= sizeof(e->path),
+                         "index path must hold <day dir>/<8.3 name>");
+            memset(e, 0, sizeof(*e));
+            snprintf(e->path, sizeof(e->path), "%s/%s", daypath, name);
+            parse_path_datetime(e->path, &dt);
+            e->year = dt.year; e->month = dt.month; e->day = dt.day;
+            e->hour = dt.hour; e->min = dt.min; e->sec = dt.sec;
+            s_index_n++;
+        }
+        fs_closedir(&fd);
+    }
+    fs_closedir(&dayd);
 
-			struct rec_datetime dt;
-			parse_path_datetime_dt(hp6_path, &dt);
-			e->year = dt.year; e->month = dt.month; e->day = dt.day;
-			e->hour = dt.hour; e->min = dt.min; e->sec = dt.sec;
-			s_index_n++;
-		}
-		fs_closedir(&fd);
-	}
-	fs_closedir(&dayd);
-
-	index_sort_desc(s_index, s_index_n);
+    index_sort_desc(s_index, s_index_n);
 
 done:
-	if (ctx->cb) {
-		ctx->cb(s_index, s_index_n, ctx->user_data);
-	}
-	k_free(ctx);
+    if (ctx->cb) {
+        ctx->cb(s_index, s_index_n, ctx->user_data);
+    }
+    k_free(ctx);
 }
 
 int recording_index_last_error(void)
 {
-	return s_index_rc;
+    return s_index_rc;
 }
 
 int recording_index_build_async(recording_index_cb_t cb, void *user_data)
 {
-	if (!cb) return -EINVAL;
-	// if (!s_index) {
-	// 	s_index = k_malloc(sizeof(*s_index) * REC_INDEX_MAX_ENTRIES);
-	// 	if (!s_index) return -ENOMEM;
-	// 	s_index_cap = REC_INDEX_MAX_ENTRIES;
-	// }
-    static struct recording_index_entry s_index_storage[REC_INDEX_MAX_ENTRIES];
-	if (!s_index) {
-		s_index = s_index_storage;
-		s_index_cap = REC_INDEX_MAX_ENTRIES;
-	}
-	struct index_work_ctx *ctx = k_malloc(sizeof(*ctx));
-	if (!ctx) return -ENOMEM;
-	ctx->cb = cb;
-	ctx->user_data = user_data;
-	k_work_init(&ctx->work, index_work_fn);
-	k_work_submit_to_queue(&s_rec_wq, &ctx->work);
-	return 0;
+    if (!cb) {
+        return -EINVAL;
+    }
+    struct index_work_ctx *ctx = k_malloc(sizeof(*ctx));
+    if (!ctx) {
+        return -ENOMEM;
+    }
+    ctx->cb = cb;
+    ctx->user_data = user_data;
+    k_work_init(&ctx->work, index_work_fn);
+    int rc = k_work_submit_to_queue(&s_rec_wq, &ctx->work);
+    if (rc < 0) {
+        k_free(ctx);
+        return rc;
+    }
+    return 0;
 }
 
 static struct rec_page_cache_slot *page_cache_find(uint32_t start_idx, uint32_t count)
 {
-	for (int i = 0; i < REC_PAGE_CACHE_SLOTS; i++) {
-		if (s_page_cache[i].valid && s_page_cache[i].start_idx == start_idx &&
-		    s_page_cache[i].count == count) {
-			return &s_page_cache[i];
-		}
-	}
-	return NULL;
+    for (int i = 0; i < REC_PAGE_CACHE_SLOTS; i++) {
+        if (s_page_cache[i].valid && s_page_cache[i].start_idx == start_idx &&
+            s_page_cache[i].count == count) {
+            return &s_page_cache[i];
+        }
+    }
+    return NULL;
 }
 
 static struct rec_page_cache_slot *page_cache_slot_for_write(void)
 {
-	struct rec_page_cache_slot *victim = &s_page_cache[0];
-	for (int i = 0; i < REC_PAGE_CACHE_SLOTS; i++) {
-		if (!s_page_cache[i].valid) return &s_page_cache[i];
-		if (s_page_cache[i].lru_stamp < victim->lru_stamp) victim = &s_page_cache[i];
-	}
-	return victim;
+    struct rec_page_cache_slot *victim = &s_page_cache[0];
+    for (int i = 0; i < REC_PAGE_CACHE_SLOTS; i++) {
+        if (!s_page_cache[i].valid) {
+            return &s_page_cache[i];
+        }
+        if (s_page_cache[i].lru_stamp < victim->lru_stamp) {
+            victim = &s_page_cache[i];
+        }
+    }
+    return victim;
 }
 
 static void page_work_fn(struct k_work *work)
 {
-	struct page_work_ctx *ctx = CONTAINER_OF(work, struct page_work_ctx, work);
-	uint32_t start = ctx->start_idx;
-	uint32_t count = ctx->count;
+    struct page_work_ctx *ctx = CONTAINER_OF(work, struct page_work_ctx, work);
+    uint32_t start = ctx->start_idx;
+    uint32_t count = ctx->count;
 
-	if (start >= s_index_n) {
-		count = 0;
-	} else if (start + count > s_index_n) {
-		count = s_index_n - start;
-	}
+    if (start >= s_index_n) {
+        count = 0;
+    } else if (start + count > s_index_n) {
+        count = s_index_n - start;
+    }
 
-	struct rec_page_cache_slot *hit = page_cache_find(start, count);
-	if (hit) {
-		hit->lru_stamp = ++s_page_cache_clock;
-		for (uint32_t i = 0; i < hit->count; i++) {
-			ctx->cb(&hit->entries[i], ctx->user_data);
-		}
-		ctx->cb(NULL, ctx->user_data);
-		k_free(ctx);
-		return;
-	}
+    struct rec_page_cache_slot *slot = page_cache_find(start, count);
 
-	struct rec_page_cache_slot *slot = page_cache_slot_for_write();
-	slot->valid = false;
-	slot->start_idx = start;
-	slot->count = count;
+    if (slot == NULL) {
+        slot = page_cache_slot_for_write();
+        slot->valid = false;
+        slot->start_idx = start;
+        slot->count = count;
 
-	for (uint32_t i = 0; i < count; i++) {
-		const struct recording_index_entry *ie = &s_index[start + i];
-		struct recording_summary *sm = &slot->entries[i];
+        for (uint32_t i = 0; i < count; i++) {
+            const struct recording_index_entry *ie = &s_index[start + i];
+            struct recording_summary *sm = &slot->entries[i];
+            struct fs_dirent ent;
 
-		memset(sm, 0, sizeof(*sm));
-		strncpy(sm->path, ie->path, sizeof(sm->path) - 1);
-		sm->year = ie->year; sm->month = ie->month; sm->day = ie->day;
-		sm->hour = ie->hour; sm->min = ie->min; sm->sec = ie->sec;
+            memset(sm, 0, sizeof(*sm));
+            strncpy(sm->path, ie->path, sizeof(sm->path) - 1);
+            sm->year = ie->year; sm->month = ie->month; sm->day = ie->day;
+            sm->hour = ie->hour; sm->min = ie->min; sm->sec = ie->sec;
+            if (fs_stat(ie->path, &ent) == 0) {
+                sm->size_bytes = (uint32_t)ent.size;
+            }
+            read_header_summary(sm);
+        }
+        slot->valid = true;
+    }
+    slot->lru_stamp = ++s_page_cache_clock;
 
-		struct fs_dirent ent;
-		if (fs_stat(ie->path, &ent) == 0) {
-			sm->size_bytes = (uint32_t)ent.size;
-		}
-
-		char idx_path[256];
-		strncpy(idx_path, ie->path, sizeof(idx_path) - 1);
-		idx_path[sizeof(idx_path) - 1] = '\0';
-		char *dot = strrchr(idx_path, '.');
-		if (dot) strncpy(dot, ".IDX", 5);
-		uint32_t event_count = 0, sync_count = 0, dur = 0, chans = 0;
-		(void)read_idx_summary(idx_path, &event_count, &sync_count, &dur, &chans);
-        if (chans == 0) {
-			uint32_t d2 = 0, c2 = 0;
-			(void)read_header_summary(ie->path, &d2, &c2);
-			chans = c2;
-		}
-		sm->event_count = event_count;
-		sm->duration_ms = dur;
-		sm->channels = chans;
-	}
-
-	slot->valid = true;
-	slot->lru_stamp = ++s_page_cache_clock;
-
-	for (uint32_t i = 0; i < count; i++) {
-		ctx->cb(&slot->entries[i], ctx->user_data);
-	}
-	ctx->cb(NULL, ctx->user_data);
-	k_free(ctx);
+    for (uint32_t i = 0; i < slot->count; i++) {
+        ctx->cb(&slot->entries[i], ctx->user_data);
+    }
+    ctx->cb(NULL, ctx->user_data);
+    k_free(ctx);
 }
 
 int recording_page_fetch_async(uint32_t start_idx, uint32_t count,
-                               recording_page_cb_t cb, void *user_data)
+                   recording_page_cb_t cb, void *user_data)
 {
-	if (!cb || count == 0) return -EINVAL;
-	if (count > REC_PAGE_SIZE_MAX) count = REC_PAGE_SIZE_MAX;
+    if (!cb || count == 0) {
+        return -EINVAL;
+    }
+    if (count > REC_PAGE_SIZE_MAX) {
+        count = REC_PAGE_SIZE_MAX;
+    }
 
-	struct page_work_ctx *ctx = k_malloc(sizeof(*ctx));
-	if (!ctx) return -ENOMEM;
-	ctx->start_idx = start_idx;
-	ctx->count = count;
-	ctx->cb = cb;
-	ctx->user_data = user_data;
-	k_work_init(&ctx->work, page_work_fn);
-	k_work_submit_to_queue(&s_rec_wq, &ctx->work);
-	return 0;
+    struct page_work_ctx *ctx = k_malloc(sizeof(*ctx));
+    if (!ctx) {
+        return -ENOMEM;
+    }
+    ctx->start_idx = start_idx;
+    ctx->count = count;
+    ctx->cb = cb;
+    ctx->user_data = user_data;
+    k_work_init(&ctx->work, page_work_fn);
+    int rc = k_work_submit_to_queue(&s_rec_wq, &ctx->work);
+    if (rc < 0) {
+        k_free(ctx);
+        return rc;
+    }
+    return 0;
 }
 
-int recording_delete(const char *hp6_path)
+static void delete_work_fn(struct k_work *work)
 {
-	if (!hp6_path) return -EINVAL;
+    struct delete_work_ctx *ctx = CONTAINER_OF(work, struct delete_work_ctx, work);
+    char side[64];
+    int rc;
 
-	k_mutex_lock(&g_lock, K_FOREVER);
+    /* g_lock only for the comparison; the unlinks run without it so the
+     * writer thread is never held up by a delete. */
+    k_mutex_lock(&g_lock, K_FOREVER);
+    bool in_use = g_active && strcmp(ctx->path, g_path) == 0;
+    k_mutex_unlock(&g_lock);
+    if (in_use) {
+        rc = -EBUSY;
+        goto done;
+    }
 
-	if (g_active && strcmp(hp6_path, g_path) == 0) {
-		k_mutex_unlock(&g_lock);
-		return -EBUSY;
-	}
-
-	char idx_path[128], txt_path[128];
-	strncpy(idx_path, hp6_path, sizeof(idx_path) - 1);
-	idx_path[sizeof(idx_path) - 1] = '\0';
-	char *dot = strrchr(idx_path, '.');
-	if (dot) strncpy(dot, ".IDX", 5);
-
-	strncpy(txt_path, hp6_path, sizeof(txt_path) - 1);
-	txt_path[sizeof(txt_path) - 1] = '\0';
-	dot = strrchr(txt_path, '.');
-	if (dot) strncpy(dot, ".TXT", 5);
-
-	int rc = fs_unlink(hp6_path);
-	if (rc != 0 && rc != -ENOENT) goto out;
-	rc = fs_unlink(txt_path);
-	if (rc != 0 && rc != -ENOENT) goto out;
-	rc = fs_unlink(idx_path);
-	if (rc != 0 && rc != -ENOENT) goto out;
-	rc = 0;
+    rc = fs_unlink(ctx->path);
+    if (rc != 0 && rc != -ENOENT) {
+        goto done;
+    }
+    static const char *const exts[] = { ".TXT", ".IDX" };
+    for (size_t i = 0; i < ARRAY_SIZE(exts); i++) {
+        strncpy(side, ctx->path, sizeof(side) - 1);
+        side[sizeof(side) - 1] = '\0';
+        char *dot = strrchr(side, '.');
+        if (dot) {
+            strncpy(dot, exts[i], 5);
+        }
+        rc = fs_unlink(side);
+        if (rc != 0 && rc != -ENOENT) {
+            goto done;
+        }
+    }
+    rc = 0;
     rec_page_cache_invalidate_all();
 
-out:
-	k_mutex_unlock(&g_lock);
-	return rc;
+done:
+    ctx->cb(rc, ctx->user_data);
+    k_free(ctx);
+}
+
+int recording_delete_async(const char *hp6_path, recording_delete_cb_t cb, void *user_data)
+{
+    if (!hp6_path || !cb) {
+        return -EINVAL;
+    }
+    struct delete_work_ctx *ctx = k_malloc(sizeof(*ctx));
+    if (!ctx) {
+        return -ENOMEM;
+    }
+    strncpy(ctx->path, hp6_path, sizeof(ctx->path) - 1);
+    ctx->path[sizeof(ctx->path) - 1] = '\0';
+    ctx->cb = cb;
+    ctx->user_data = user_data;
+    k_work_init(&ctx->work, delete_work_fn);
+    int rc = k_work_submit_to_queue(&s_rec_wq, &ctx->work);
+    if (rc < 0) {
+        k_free(ctx);
+        return rc;
+    }
+    return 0;
 }
 
 /* ---- writer thread ---- */
+
+/* Whether the writer keeps this frame. Events are kept even while paused, so
+ * a mark made during a pause -- and the PAUSE/RESUME markers themselves --
+ * land in the file. */
+static bool frame_wanted(const struct hpi_sample_frame *f)
+{
+    if (f->channel == HPI_CH_EVENT) {
+        return true;
+    }
+    if (clock_paused()) {
+        return false;
+    }
+    uint32_t bit = HPI_CH_BIT(f->channel);
+
+    if (bit & REC_SELECTABLE_MASK) {
+        return (g_channel_mask & bit) != 0;
+    }
+    return true;   /* EEG, INFER: recorded whenever a module produces them */
+}
 
 static void recording_thread(void *a, void *b, void *c)
 {
@@ -1913,9 +1757,8 @@ static void recording_thread(void *a, void *b, void *c)
     struct hpi_bus_sub_cfg cfg = {
         .name = "rec",
         .channel_mask = HPI_CH_BIT(HPI_CH_ECG) | HPI_CH_BIT(HPI_CH_PPG) |
-                        HPI_CH_BIT(HPI_CH_RESP) | HPI_CH_BIT(HPI_CH_VITALS) |
-                        HPI_CH_BIT(HPI_CH_EEG) | HPI_CH_BIT(HPI_CH_EVENT) |
-                        HPI_CH_BIT(HPI_CH_INFER),
+                        HPI_CH_BIT(HPI_CH_VITALS) | HPI_CH_BIT(HPI_CH_EEG) |
+                        HPI_CH_BIT(HPI_CH_EVENT) | HPI_CH_BIT(HPI_CH_INFER),
         .ring_frames = REC_RING,
     };
     g_sub = hpi_bus_subscribe(&cfg);
@@ -1926,49 +1769,21 @@ static void recording_thread(void *a, void *b, void *c)
 
     struct hpi_sample_frame f;
     while (1) {
-        if (hpi_bus_pull_wait(g_sub, &f, 100) != 0) {
-            continue;
-        }
-        /* While paused, ignore data channels (ECG/PPG/RESP/VITALS/EEG/INFER)
-         * but still accept EVENT and SYNC frames so markers and recovery work. */
+        /* Timeout or not, an active recording gets its periodic work: sync
+         * markers, the card check and the auto-stop must keep running while
+         * paused, when no frames are written. */
+        bool got = hpi_bus_pull_wait(g_sub, &f, 100) == 0;
+
         if (!g_active) {
             continue;   /* drain + discard while idle */
         }
         k_mutex_lock(&g_lock, K_FOREVER);
         if (g_active) {
-            if (g_paused && f.channel != HPI_CH_EVENT && f.channel != HPI_CH_SYNC) {
-                /* drop data while paused */
-            } else {
-                /* If this is a data channel, respect the dynamic channel mask
-                 * configured by the UI/service. EVENT and SYNC frames are
-                 * always accepted. */
-                // if (f.channel != HPI_CH_EVENT && f.channel != HPI_CH_SYNC) {
-                //     if (!(g_channel_mask & HPI_CH_BIT(f.channel))) {
-                //         /* configured to drop this channel */
-                //     } else {
-                if (f.channel != HPI_CH_EVENT && f.channel != HPI_CH_SYNC) {
-                    uint32_t want = HPI_CH_BIT(f.channel);
-                    if (f.channel == HPI_CH_ECG) {
-                        want |= HPI_CH_BIT(HPI_CH_RESP);   /* RESP rides in the ECG frame */
-                    }
-                    if (!(g_channel_mask & want)) {
-                        /* configured to drop this channel */
-                    } else {
-                        append_frame(&f);
-                        // if (k_uptime_get() - g_last_sync_ms >= (int64_t)REC_SYNC_PERIOD_MS) {
-                        //     emit_sync();   /* periodic 5 s marker for recovery + .IDX */
-                        // }
-                        check_periodic();
-                    }
-                } else {
-                    /* EVENT/SYNC */
-                    append_frame(&f);
-                    // if (k_uptime_get() - g_last_sync_ms >= (int64_t)REC_SYNC_PERIOD_MS) {
-                    //     emit_sync();
-                    // }
-                    check_periodic();
-                }
+            if (got && frame_wanted(&f)) {
+                append_frame(&f);
             }
+            drain_notes();
+            check_periodic();
         }
         k_mutex_unlock(&g_lock);
     }
@@ -1977,22 +1792,24 @@ static void recording_thread(void *a, void *b, void *c)
 K_THREAD_DEFINE(hpi_rec_tid, 4096, recording_thread, NULL, NULL, NULL,
                 7 /* prio */, 0, 0);
 
-// int hpi_recording_service_init(void)
-// {
-//     k_mutex_init(&g_lock);
-//     LOG_INF("recording service ready (root %s)", REC_ROOT);
-//     return 0;
-// }
-int hpi_recording_service_init(void)
+static int rec_wq_init(void)
 {
-    k_mutex_init(&g_lock);
+    /* External RAM is NOLOAD: nothing below has been zeroed. */
+    memset(s_index, 0, sizeof(s_index));
+    memset(s_page_cache, 0, sizeof(s_page_cache));
 
     k_work_queue_init(&s_rec_wq);
     k_work_queue_start(&s_rec_wq, s_rec_wq_stack,
                        K_THREAD_STACK_SIZEOF(s_rec_wq_stack),
                        REC_WQ_PRIORITY, NULL);
     k_thread_name_set(&s_rec_wq.thread, "hpi_rec_wq");
+    return 0;
+}
 
+SYS_INIT(rec_wq_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+
+int hpi_recording_service_init(void)
+{
     LOG_INF("recording service ready (root %s)", REC_ROOT);
     return 0;
 }
