@@ -258,18 +258,26 @@ exactly: `score = confidence - 128`. The unmodified per-class scores are in
 
 ```c
 struct event {
-    uint32_t ts_ms;   /* ms since the recording started */
-    uint16_t type;    /* 1 = user mark; other values reserved */
-    uint16_t seq;     /* 1-based, per recording */
+    uint32_t ts_ms;   /* ms since the recording started (real time) */
+    uint16_t type;    /* see the table below */
+    uint16_t seq;     /* 1-based, per recording, across all types */
 };
 ```
 
 Python: `struct.unpack("<IHH", buf)`
 
-Appears only when something happens, always with `sample_count = 1`; the only
-type today is **1, user mark**. Read events **from the stream** — the in-band
+| `type` | Meaning |
+|---|---|
+| 1 | User mark — the operator marked this instant (screen or hardware button) |
+| 2 | Pause — the recording was paused; data blocks stop here |
+| 3 | Resume — the recording was resumed; data blocks start again |
+
+Appears only when something happens, always with `sample_count = 1`. Events
+are recorded while paused, so a mark can sit between a pause and its resume.
+`seq` counts every event, whatever its type, so a gap still means a dropped
+block. Read events **from the stream** — the in-band
 block survives an interrupted recording, unlike the `.IDX` sidecar. The
-header's `event_count`/`events_offset` (offsets 158/162) are conveniences
+header's `event_count`/`events_offset` (offsets 176/180) are conveniences
 filled on clean close (`events_offset` points at the first EVENT block for
 seeking); both read 0 in a cut-short file, but the blocks are still there.
 Skip unknown `type` values and keep going — new types arrive without a version
@@ -288,7 +296,7 @@ The first 256 bytes of a `.HP6` file. Absent from live streams.
 | 6 | 2 | uint16 | `header_size` — 256 |
 | 8 | 8 | uint64 | `timestamp_start` — Unix ms; **0 if the clock was never set** |
 | 16 | 8 | uint64 | `timestamp_end` — Unix ms; `0xFFFFFFFFFFFFFFFF` if still open |
-| 24 | 4 | uint32 | `duration_ms` |
+| 24 | 4 | uint32 | `duration_ms` — recorded time, **excluding pauses** |
 | 28 | 32 | char[32] | `patient_id` (NUL-padded) |
 | 60 | 64 | char[64] | `session_name` |
 | 124 | 4 | uint32 | `channels` — bit *N* set means channel *N* appears in the file (bit 1 = ECG, … bit 8 = INFER) |
@@ -316,6 +324,10 @@ Python: `struct.unpack("<4sHHQQI32s64sI8H8IIQ16s8s16s20sI4s", buf)`
 Validate: `"HPI6"` at 0, `"HP6E"` at 252, CRC over the first 248 bytes.
 **Use the header's rates, not the defaults in this document** — the PPG rate in
 particular is configurable, and the header records what was actually used.
+
+`timestamp_end` is real time: after a pause, `timestamp_end − timestamp_start`
+is longer than `duration_ms` by the time spent paused. Every other timestamp
+in the file — event `ts_ms`, sync-marker `wall_ms` — is real time too.
 
 `timestamp_end == 0xFFFFFFFFFFFFFFFF` means the file was never closed (card
 removed, power lost, reset). The sample counters and `duration_ms` are then
@@ -353,12 +365,15 @@ A `REC0001.IDX` next to `REC0001.HP6`:
 ```
 12 B header : "HP6I" | uint16 version | uint16 event_count | uint32 sync_count
 N × 20 B    : uint32 ts_ms | uint64 file_offset | uint32 seq | uint32 crc
- 4 B footer : uint32 footer_crc32
+ 4 B footer : uint32 footer_crc32 — CRC-32 of every byte before it
 ```
 
-**Advisory only.** `sync_count` is written on clean close (0 for an interrupted
-file — exactly when you want an index), the footer CRC is a zero placeholder,
-and `event_count` is **always 0** (marks live in-band on channel 6). The
+`ts_ms` in each record is real time since the recording started, like the
+sync marker it mirrors.
+
+**Advisory only.** `sync_count` and the footer are written on clean close (an
+interrupted file has neither — exactly when you want an index), and
+`event_count` is **always 0** (marks live in-band on channel 6). The
 in-band markers in the `.HP6` are authoritative; fall back to scanning them.
 
 ### `.TXT` — human-readable summary

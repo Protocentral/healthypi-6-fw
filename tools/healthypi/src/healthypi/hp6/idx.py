@@ -7,15 +7,14 @@ Layout (recording_service.c ``idx_open`` / ``idx_append_sync`` / ``idx_finalize`
 
     12 B header : "HP6I" | version u16 | event_count u16 | sync_count u32
     N x 20 B    : ts_ms u32 | file_off u64 | seq u32 | crc u32
-     4 B footer : footer_crc32
+     4 B footer : footer_crc32 (CRC-32 of every preceding byte)
 
-Two caveats a host must respect:
+One caveat a host must respect: ``sync_count`` and the footer are written at
+finalize, so a file that was never closed has neither -- the exact case where
+the index is most wanted. Older firmware wrote the footer as a zero
+placeholder.
 
-* ``sync_count`` is patched at finalize, so it reads 0 in a file that was never
-  closed -- the exact case where the index is most wanted.
-* the footer CRC is **currently written as a zero placeholder** by the firmware.
-
-Both mean the same thing: ``.IDX`` is advisory. Recovery falls back to scanning
+So ``.IDX`` is advisory. Recovery falls back to scanning
 the in-band ``HPI_CH_SYNC`` markers, which are always authoritative.
 """
 
