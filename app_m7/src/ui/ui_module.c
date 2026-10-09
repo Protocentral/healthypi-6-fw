@@ -36,6 +36,7 @@
 #include "services/recording_service.h"
 #include "services/config_service.h"
 #include "services/button_service.h"
+#include "screens/scr_recording.h"
 
 LOG_MODULE_REGISTER(hpi_ui, CONFIG_HPI_APP_LOG_LEVEL);
 
@@ -139,7 +140,13 @@ void hpi_ui_show_screen(enum hpi_ui_screen scr)
 	if (scr >= HPI_UI_SCREEN_COUNT) {
 		return;
 	}
+	enum hpi_ui_screen prev = s_active;
+
 	s_active = scr;
+	/* The browser's rows are rebuilt on every visit; free them on leaving. */
+	if (prev == HPI_UI_SCREEN_RECORDINGS && scr != HPI_UI_SCREEN_RECORDINGS) {
+		hpi_scr_recording_release();
+	}
 	for (int i = 0; i < HPI_UI_SCREEN_COUNT; i++) {
 		if (s_screen[i] == NULL) {
 			continue;
@@ -263,6 +270,8 @@ static void ui_build_screens(void)
 	ui_trace("alert");
 	s_screen[HPI_UI_SCREEN_OTA]      = hpi_scr_ota_create(s_content);
 	ui_trace("ota");
+	s_screen[HPI_UI_SCREEN_RECORDINGS] = hpi_scr_recording_create(s_content);
+	ui_trace("recordings");
 	s_screen[HPI_UI_SCREEN_HEALTHYLINK] = hpi_scr_healthylink_create(s_content);
 	ui_trace("hlink");
 
@@ -538,9 +547,12 @@ static void ui_thread(void *a, void *b, void *c)
 			next_refresh = now + UI_REFRESH_MS;
 
 			/* Hide nav + block swipe while actively recording on the
-			 * Record screen; restored on stop / leaving. */
-			bool lock = (s_active == HPI_UI_SCREEN_REC) &&
-				    hpi_recording_active();
+			 * Record screen, and on the Recordings browser (a
+			 * sub-screen with its own back chevron); restored on
+			 * stop / leaving. */
+			bool lock = ((s_active == HPI_UI_SCREEN_REC) &&
+				     hpi_recording_active()) ||
+				    s_active == HPI_UI_SCREEN_RECORDINGS;
 			if (lock != s_nav_locked) {
 				s_nav_locked = lock;
 				if (s_navbar) {
@@ -579,6 +591,8 @@ static void ui_thread(void *a, void *b, void *c)
 				hpi_scr_record_refresh();
 			} else if (s_active == HPI_UI_SCREEN_LINK) {
 				hpi_scr_link_refresh();   /* Wi-Fi status */
+			} else if (s_active == HPI_UI_SCREEN_RECORDINGS) {
+				hpi_scr_recording_refresh();
 			} else if (s_active == HPI_UI_SCREEN_HEALTHYLINK) {
 				hpi_scr_healthylink_refresh();   /* module + link */
 			}

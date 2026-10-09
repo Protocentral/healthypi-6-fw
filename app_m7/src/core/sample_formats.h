@@ -165,9 +165,10 @@ struct hp6_event {
 } __packed;
 
 enum hp6_event_type {
-    HP6_EVENT_USER_MARK = 1,   /* operator marked this instant */
+    HP6_EVENT_USER_MARK     = 1,   /* operator marked this instant */
+    HP6_EVENT_SYSTEM_PAUSE  = 2,   /* recording paused (service-generated) */
+    HP6_EVENT_SYSTEM_RESUME = 3,   /* recording resumed (service-generated) */
 };
-
 /* The payload sizes are the wire format: they are what the .HP6 file, the live
  * stream and every host parser agree on, and docs/HP6_DATA_FORMAT.md publishes
  * them. Pin them here so a field added or a type widened cannot silently change

@@ -47,6 +47,25 @@ def test_event_roundtrip():
     assert ev.is_user_mark
 
 
+@pytest.mark.parametrize(
+    "type_, name",
+    [(1, "USER_MARK"), (2, "PAUSE"), (3, "RESUME")],
+)
+def test_event_types_match_firmware(type_, name):
+    """enum hp6_event_type in core/sample_formats.h."""
+    assert hp6.EventType(type_).name == name
+
+
+def test_pause_event_is_not_a_user_mark():
+    ev = hp6.EventSample(ts_ms=10, type=hp6.EventType.PAUSE, seq=1)
+    assert not ev.is_user_mark
+
+
+def test_unknown_event_type_still_decodes():
+    raw = hp6.EventSample(ts_ms=1, type=99, seq=1).pack()
+    assert hp6.EventSample.unpack_from(raw).type == 99
+
+
 def test_event_channel_is_decoded():
     """Channel 6 was documented Reserved; a reader must now decode it."""
     assert fmt.payload_for(hp6.Channel.EVENT) is hp6.EventSample
