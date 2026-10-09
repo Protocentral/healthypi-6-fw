@@ -238,20 +238,35 @@ static void lane_create(struct live_lane *ln, lv_obj_t *parent, const char *labe
 	}
 }
 
-static int64_t s_resp_lp_q8;
-static bool    s_resp_lp_init;
+/* ---- respiration conditioning ---- */
 
-static int32_t resp_lowpass_x16(int32_t x)
+/* Respiration lane noise floor, uV: below this the auto-scaler stops
+ * enlarging, so a breath-hold with electrodes on reads as a near-flat line
+ * instead of amplifier noise zoomed up to look like breathing. PROVISIONAL --
+ * set from a bench measurement of breath-hold noise on v5 hardware. */
+#define RESP_FLOOR_UV     50
+/* Peak scaled to ~23% of the lane: breathing reads as a calm, slow trace. */
+#define RESP_TARGET       230
+
+/* Smoothing before display: EMA with shift 3, ~2.5 Hz at the ~125/s push
+ * rate. Keeps cardiac artefact off the impedance trace without touching
+ * breathing (0.1-1 Hz). Unity gain, Q8 state. Reset on a lead-off change: a
+ * floating electrode leaves the state far from the reconnected signal. */
+static int64_t s_resp_lp_q8;
+static bool    s_resp_lp_primed;
+
+static int32_t resp_lowpass(int32_t x)
 {
 	int64_t xq = (int64_t)x << 8;
 
-	if (!s_resp_lp_init) {
+	if (!s_resp_lp_primed) {
 		s_resp_lp_q8 = xq;
-		s_resp_lp_init = true;
+		s_resp_lp_primed = true;
 	}
 	s_resp_lp_q8 += (xq - s_resp_lp_q8) >> 3;
-	return (int32_t)(s_resp_lp_q8 >> 4);
+	return (int32_t)(s_resp_lp_q8 >> 8);
 }
+
 /* ---- screen ---- */
 
 lv_obj_t *hpi_scr_live_create(lv_obj_t *parent)
@@ -289,12 +304,14 @@ lv_obj_t *hpi_scr_live_create(lv_obj_t *parent)
 	lv_obj_clear_flag(lanes, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(lanes, LV_FLEX_FLOW_COLUMN);
 
-	/* ECG steadier baseline -> slow DC-block (9); PPG/Resp wander -> fast (5/6). */
+	/* DC-block: ECG steady -> slow (9); PPG wanders -> fast (5). Respiration
+	 * is slow (9, ~0.04 Hz): a faster block (6, ~0.33 Hz) cut into normal
+	 * breathing at 0.2-0.5 Hz. */
 	lane_create(&s_l.ecg,  lanes, "ECG \xC2\xB7 LEAD II", "BPM",   HPI_M3_SIG_ECG,  9, 2000,   true);
 	lane_create(&s_l.ppg,  lanes, "PPG \xC2\xB7 IR",      "% SPO2", HPI_M3_SIG_PPG,  5, 200000, true);
-	//lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, 6, 50000,  false);
-	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, 9, 1024,   false);
-    hpi_ui_waveform_set_target(&s_l.resp.wf, 230);
+	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, 9, 2000,   false);
+	hpi_ui_waveform_set_target(&s_l.resp.wf, RESP_TARGET);
+	hpi_ui_waveform_set_floor(&s_l.resp.wf, RESP_FLOOR_UV);
 
 #if HPI_UI_TEST_VALUES
 	lv_label_set_text(s_l.ecg.value,  "72");
@@ -311,8 +328,7 @@ void hpi_scr_live_push_ecg(int32_t lead_ii_uv, int32_t resp_uv, uint8_t lead_off
 		return;
 	}
 	hpi_ui_waveform_push(&s_l.ecg.wf, lead_ii_uv);
-//	hpi_ui_waveform_push(&s_l.resp.wf, resp_uv);
-		hpi_ui_waveform_push(&s_l.resp.wf, resp_lowpass_x16(resp_uv));
+	hpi_ui_waveform_push(&s_l.resp.wf, resp_lowpass(resp_uv));
 
 	/* Touch LVGL only on a real transition. This runs once per ECG *sample*
 	 * (~125/s after decimation); an unconditional set_text/style call per
@@ -323,6 +339,7 @@ void hpi_scr_live_push_ecg(int32_t lead_ii_uv, int32_t resp_uv, uint8_t lead_off
 		return;
 	}
 	s_l.leads_shown = (int16_t)lead_off;
+	s_resp_lp_primed = false;   /* restart smoothing from the new signal */
 
 	if (lead_off == 0) {
 		lv_label_set_text(s_l.leads, "LEADS OK");
@@ -337,8 +354,11 @@ void hpi_scr_live_push_ecg(int32_t lead_ii_uv, int32_t resp_uv, uint8_t lead_off
 	lv_obj_set_style_text_color(s_l.leads,
 				    lead_off == 0 ? HPI_M3_SUCCESS : HPI_M3_ERROR, 0);
 	/* A floating electrode rails; dim the trace rather than let the artefact
-	 * scroll past at full contrast as though it were a signal. */
+	 * scroll past at full contrast as though it were a signal. Respiration is
+	 * measured across the same limb electrodes, so it is dimmed with ECG. */
 	lv_obj_set_style_line_opa(s_l.ecg.wf.chart,
+				  lead_off ? LV_OPA_20 : LV_OPA_COVER, LV_PART_ITEMS);
+	lv_obj_set_style_line_opa(s_l.resp.wf.chart,
 				  lead_off ? LV_OPA_20 : LV_OPA_COVER, LV_PART_ITEMS);
 }
 

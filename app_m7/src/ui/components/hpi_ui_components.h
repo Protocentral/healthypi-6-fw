@@ -131,15 +131,26 @@ struct hpi_ui_waveform {
 	int32_t            user_q;     /* user zoom on top of gain_q, Q8 (256=x1) */
 	uint8_t            bl_shift;   /* DC-block EMA shift: larger = slower     */
 	bool               primed;
-	int64_t bl_q;
-	int32_t target;
+	int64_t            bl_q;       /* baseline EMA in Q8 (baseline = bl_q>>8) */
+	int32_t            target;     /* display units the peak is scaled to    */
 };
 
 /* Display zoom applied ON TOP of the automatic scaling, Q8 (256 = x1).
  * A multiplier, never a mV/division gain: nothing here maps pixels to
  * millivolts, so an absolute unit would be a fabricated number. */
 void hpi_ui_waveform_set_zoom(struct hpi_ui_waveform *w, int32_t mult_q8);
+
+/* Auto-scale target: the windowed peak is scaled to this many display units
+ * of the ±1000 window (default 800). Lower it for a trace that should sit
+ * smaller in its lane. Clamped to 50..1000. */
 void hpi_ui_waveform_set_target(struct hpi_ui_waveform *w, int32_t target);
+
+/* Noise floor, in the units pushed: the smallest peak the auto-scaler will
+ * enlarge to the target. A signal below it is drawn smaller rather than
+ * zoomed, so a flat input does not show its noise at full height. Defaults to
+ * (ymax - ymin) / 128 from create; set it explicitly where that seed is wrong. */
+void hpi_ui_waveform_set_floor(struct hpi_ui_waveform *w, int32_t floor);
+
 /* Resize the sweep window, in chart points; fewer points is a faster sweep.
  * Label it in seconds (points / push rate), never mm/s — the firmware does not
  * know the panel's physical width. Reallocates the series, so call it on a
