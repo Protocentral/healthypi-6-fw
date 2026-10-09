@@ -3,16 +3,16 @@
 
 """Generated group-64 wire classes.
 
-Two things are checked here, and the second is the point of the whole exercise:
+Two things are checked here:
 
 1. the generated classes encode the headers and CBOR the firmware expects, and
-2. they are **byte-identical** to the hand-written classes they replace.
+2. a set of requests still produces **exactly** the bytes recorded below.
 
-(2) is the migration's safety net. The host scripts carried four independent
-copies of these schemas; if the generated set produces the same bytes on the
-wire, swapping them in cannot change device behaviour. The reference bytes in
-``legacy_g64_reference.py`` are those hand-written classes, kept after the
-scripts themselves were removed.
+(2) is a regression guard on the wire encoding. The golden bytes were taken
+from the hand-written classes the generated set replaced, and those were the
+bytes on the wire when the update path was validated on v5 hardware (July
+2026, and again with the generated classes on 2026-10-01). They are data, not a
+second implementation: the catalog is the only schema.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ def test_device_info_response():
         {
             "sn": "HP6-0001",
             "fw": "1.0.0",
-            "gv": 1,
+            "gv": catalog.SCHEMA_VERSION,
             "br": "v5",
             "hw": b"\xde\xad",
             "m4fw": "1.0.0",
@@ -158,16 +158,17 @@ def test_m4fw_begin_signature_is_optional():
     assert set(signed) == {"len", "sha", "sig"}
 
 
-def test_unknown_reply_key_is_rejected():
-    """A device field the catalog does not declare must fail loudly."""
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        _reply(
-            g.stream_status.Response,
-            {"active": True, "ch": 3, "ann": 0, "sent": 1, "dropped": 0, "new": 1},
-            0x0022,
-        )
+def test_newer_firmware_reply_still_parses():
+    """A field the catalog does not know yet is dropped, not fatal. Found on
+    hardware 2026-09-30: firmware that added `usb_att` to the telemetry reply
+    made this tool fail every telemetry read. The drift test, not the runtime,
+    is what keeps the catalog complete."""
+    r = _reply(
+        g.stream_status.Response,
+        {"active": True, "ch": 3, "ann": 0, "sent": 1, "dropped": 0, "new": 1},
+        0x0022,
+    )
+    assert (r.active, r.sent) == (True, 1)
 
 
 def test_error_formatting_uses_the_group_table():
@@ -214,47 +215,59 @@ def test_plain_rc_errors_still_name_themselves():
     assert fmt_error(Rc()) == "ENOTSUP (8)"
 
 
-# --- equivalence with the hand-written classes being replaced ---------------
+# --- golden wire bytes -------------------------------------------------------
 
-LEGACY = ["fw_versions", "stream_stop", "m4fw_status", "m4fw_abort"]
-
-
-def _legacy_module():
-    """The frozen, hardware-validated baseline (see legacy_g64_reference.py)."""
-    import importlib.util
-    import sys
-    from pathlib import Path
-
-    legacy = Path(__file__).resolve().parent / "legacy_g64_reference.py"
-    spec = importlib.util.spec_from_file_location("_legacy_g64", legacy)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["_legacy_g64"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+# (command, kwargs, SMP header bytes 0-5, bytes 7-end). Byte 6 is the
+# per-request sequence number and is not compared.
+GOLDEN = [
+    ("fw_versions", {}, "080000010040", "31a0"),
+    ("stream_stop", {}, "0a0000010040", "21a0"),
+    ("m4fw_status", {}, "080000010040", "a3a0"),
+    ("m4fw_abort", {}, "0a0000010040", "a4a0"),
+    ("m4fw_chunk", {"off": 512, "data": b"\xaa\xbb"}, "0a0000100040", "a1a2636f6666190200646461746142aabb"),
+    ("m4fw_commit", {}, "0a0000010040", "a2a0"),
+    ("enter_recovery_write", {"arm": True, "rst": True}, "0a00000b0040", "a5a26361726df563727374f5"),
+]
 
 
-@pytest.mark.parametrize(
-    "name,legacy_cls,kwargs",
-    [
-        ("fw_versions", "FwVersions", {}),
-        ("stream_stop", "StreamStop", {}),
-        ("m4fw_status", "M4FwStatus", {}),
-        ("m4fw_abort", "M4FwAbort", {}),
-        ("m4fw_chunk", "M4FwChunk", {"off": 512, "data": b"\xaa\xbb"}),
-        ("m4fw_commit", "M4FwCommit", {}),
-        ("enter_recovery_write", "EnterRecovery", {"arm": True, "rst": True}),
-    ],
-)
-def test_generated_requests_are_byte_identical_to_the_legacy_classes(
-    name, legacy_cls, kwargs
-):
-    """The migration cannot change what goes on the wire."""
-    legacy = _legacy_module()
-    old = getattr(legacy, legacy_cls)(**kwargs)
-    new = g[name](**kwargs)
-    # sequence numbers differ per instance; compare everything else.
-    assert new.BYTES[:6] == old.BYTES[:6], f"{name}: header differs"
-    assert new.BYTES[7:] == old.BYTES[7:], f"{name}: command id or payload differs"
-    assert new.header.group_id == old.header.group_id == 64
-    assert new.header.command_id == old.header.command_id
-    assert new.header.op == old.header.op
+@pytest.mark.parametrize("name,kwargs,head,tail", GOLDEN, ids=[c[0] for c in GOLDEN])
+def test_requests_put_the_recorded_bytes_on_the_wire(name, kwargs, head, tail):
+    """A catalog edit must not silently change an encoding the device relies on."""
+    wire = g[name](**kwargs).BYTES
+    assert wire[:6].hex() == head, f"{name}: header differs"
+    assert wire[7:].hex() == tail, f"{name}: command id or payload differs"
+
+
+def test_unparseable_reply_names_the_command_not_a_TypeError():
+    """smpclient mishandles a reply that fits no schema and raises
+    `TypeError: ValidationError.__new__() missing ... 'line_errors'`, naming
+    neither the command nor the cause. Seen on hardware 2026-09-30 and
+    2026-10-01."""
+    import asyncio
+
+    from healthypi.transport.serial_smp import Connection, UnparseableReplyError
+
+    class Client:
+        async def request(self, req, timeout_s=None):
+            raise TypeError("ValidationError.__new__() missing 1 required positional argument: 'line_errors'")
+
+    conn = Connection(client=Client(), port="/dev/null")
+    with pytest.raises(UnparseableReplyError) as exc:
+        asyncio.run(conn.request(g.m4fw_begin(len=1, sha=b"\x00" * 32)))
+    msg = str(exc.value)
+    assert "M4FwBegin" in msg and "command 160" in msg
+    assert "healthypi device versions" in msg and "smp_add_cmd_err" in msg
+
+
+def test_an_unrelated_TypeError_is_not_relabelled():
+    import asyncio
+
+    from healthypi.transport.serial_smp import Connection
+
+    class Client:
+        async def request(self, req, timeout_s=None):
+            raise TypeError("a genuine programming error")
+
+    conn = Connection(client=Client(), port="/dev/null")
+    with pytest.raises(TypeError, match="genuine"):
+        asyncio.run(conn.request(g.device_info()))

@@ -26,6 +26,7 @@
 #include "screens/scr_boot.h"
 #include "screens/scr_trends.h"
 #include "screens/scr_link.h"
+#include "screens/scr_healthylink.h"
 #include "screens/scr_settings.h"
 #include "screens/scr_ambient.h"
 #include "screens/scr_power.h"
@@ -262,6 +263,8 @@ static void ui_build_screens(void)
 	ui_trace("alert");
 	s_screen[HPI_UI_SCREEN_OTA]      = hpi_scr_ota_create(s_content);
 	ui_trace("ota");
+	s_screen[HPI_UI_SCREEN_HEALTHYLINK] = hpi_scr_healthylink_create(s_content);
+	ui_trace("hlink");
 
 	s_navbar = hpi_ui_navbar_create(scr, HPI_UI_SCREEN_HOME);
 	ui_trace("navbar");
@@ -341,6 +344,15 @@ static void ui_drain_bus(void)
 			hpi_scr_ambient_set_hr(v->hr_bpm, v->flags);
 			break;
 		}
+		case HPI_CH_INFER: {
+			const struct hp6_infer_sample *s = f.payload;
+
+			if (f.len >= sizeof(*s) && s != NULL) {
+				hpi_scr_live_set_infer(s);
+				hpi_scr_healthylink_set_infer(s);
+			}
+			break;
+		}
 		default:
 			break;
 		}
@@ -389,7 +401,7 @@ static void ui_thread(void *a, void *b, void *c)
 	struct hpi_bus_sub_cfg cfg = {
 		.name = "ui",
 		.channel_mask = HPI_CH_BIT(HPI_CH_ECG) | HPI_CH_BIT(HPI_CH_PPG) |
-				HPI_CH_BIT(HPI_CH_VITALS),
+				HPI_CH_BIT(HPI_CH_VITALS) | HPI_CH_BIT(HPI_CH_INFER),
 		.ring_frames = UI_RING_FRAMES,
 	};
 	s_sub = hpi_bus_subscribe(&cfg);
@@ -567,6 +579,8 @@ static void ui_thread(void *a, void *b, void *c)
 				hpi_scr_record_refresh();
 			} else if (s_active == HPI_UI_SCREEN_LINK) {
 				hpi_scr_link_refresh();   /* Wi-Fi status */
+			} else if (s_active == HPI_UI_SCREEN_HEALTHYLINK) {
+				hpi_scr_healthylink_refresh();   /* module + link */
 			}
 		}
 

@@ -707,7 +707,7 @@ Each test has:
 |-----|------|----------|--------------|
 | 0x0001 | `smp_loopback` | Yes | `os echo` round-trip (inherently passes if SMP dispatcher runs) |
 | 0x0002 | `sdram_sweep` | Yes | Walks 10 test patterns across 32 MB SDRAM; reads back |
-| 0x0003 | `qspi_jedec_id` | Yes | Reads 0xEF4021 expected for W25Q01JV |
+| 0x0003 | `qspi_jedec_id` | Yes | Reads the QSPI NOR JEDEC ID: Winbond (0xEF), capacity code 0x20 = 512 Mbit on v5 and later |
 | 0x0004 | `flash_xip` | Yes | Executes a short code block from QSPI XIP region |
 | 0x0005 | `ads1294r_present` | Yes | Reads ID register; expects 0x9X |
 | 0x0006 | `afe4400_present` | Yes | Reads ID register; expects 0x00 |
@@ -994,7 +994,7 @@ User disconnects            → close CDC 1
 
 ## 12. A worked example
 
-The repo ships [`tools/healthypi/`](../tools/healthypi/) — a pip-installable library plus the `healthypi` / `hpi` CLI that talks to a device over CDC 1. Use it as:
+The repo ships [`tools/healthypi/`](../tools/healthypi/) — a pip-installable library plus the `healthypi` CLI that talks to a device over CDC 1. Use it as:
 
 - A worked example of how to connect and issue commands from Python
   (`healthypi.transport.serial_smp` for the connection, `healthypi.smp.group64` for the commands)

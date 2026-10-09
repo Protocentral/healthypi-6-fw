@@ -22,11 +22,17 @@
 
 #include "hpi_common_types.h"          /* raw batch + vitals payload structs */
 #include "core/acquisition.h"          /* debounced ECG lead-off state */
+#include "core/temp_sensor.h"          /* external AS6221, 0 if unplugged */
+#include "core/resp_rate.h"            /* thoracic Z, 0 if leads off / unlocked */
+#include "core/imu.h"                  /* BMI323, HP6_VIT_MOTION flag only */
 #include "core/sample_bus.h"
 #include "core/sample_formats.h"
 #include "m4_ipc_protocol.h"           /* envelope + msg ids + ept name */
 #include "ipc.h"
 #include "health.h"                    /* M4 link heartbeat */
+#if IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+#include "healthylink/npu_stream.h"
+#endif
 
 LOG_MODULE_REGISTER(hpi_ipc, CONFIG_HPI_APP_LOG_LEVEL);
 
@@ -123,6 +129,13 @@ static void publish_vitals(void)
     if (hr_src.ppg_weak) {
         g_vitals.flags |= HP6_VIT_PPG_WEAK;
     }
+    /* Artifact hint only — do not suppress HR/SpO2 while this is set. */
+    if (hpi_imu_motion()) {
+        g_vitals.flags |= HP6_VIT_MOTION;
+    }
+
+    g_vitals.temp_c_x100 = hpi_temp_c_x100();
+    g_vitals.rr_bpm = hpi_resp_rate_bpm();
 
     /* HRV comes from the ECG beat series, so it dies with the ECG HR. */
     if (!ecg_ok) {
@@ -164,8 +177,9 @@ static void on_ecg_vitals(const struct hpi_ipc_ecg_vitals *v)
     int64_t now = k_uptime_get();
     if (now - last_log >= HPI_VITALS_LOG_PERIOD_MS) {
         last_log = now;
-        LOG_INF("vitals(ecg): HR=%u SDNN=%u RMSSD=%u q=%u",
-                v->heart_rate, v->hrv_sdnn, v->hrv_rmssd, v->signal_quality);
+        LOG_INF("vitals(ecg): HR=%u RR=%u SDNN=%u RMSSD=%u q=%u",
+                v->heart_rate, g_vitals.rr_bpm, v->hrv_sdnn, v->hrv_rmssd,
+                v->signal_quality);
     }
 #endif
 }
@@ -224,6 +238,24 @@ const char *hpi_ipc_m4_version(void)
     return m4_version;
 }
 
+BUILD_ASSERT(sizeof(struct hpi_ipc_beat_notify) == 16,
+             "BEAT_NOTIFY payload is 16 B (IPC <= 512)");
+
+static void on_beat_notify(const struct hpi_ipc_beat_notify *b)
+{
+    /* STREAM_PUSH t_ms is M7 k_uptime. M4 timestamp_ms is M4 uptime
+     * (the remote boots ~7 s later) and must not be forwarded as the
+     * event time. Stamp the beat when it arrives. */
+    uint32_t t_ms = k_uptime_get_32();
+
+#if IS_ENABLED(CONFIG_HPI_NPU_STREAM)
+    npu_stream_on_beat(t_ms);
+#endif
+    LOG_DBG("beat: m4_t=%u sample=%u rr=%u hr=%u -> t=%u",
+            b->timestamp_ms, b->sample_number, b->rr_interval_ms,
+            b->heart_rate_bpm, t_ms);
+}
+
 static void on_m4_version(const struct hpi_ipc_version *v)
 {
     /* Copy defensively: the payload is fixed-size but the sender's string may
@@ -257,6 +289,11 @@ static void ept_recv(const void *data, size_t len, void *priv)
     case HPI_IPC_MSG_TYPE_VERSION:
         if (m->length >= sizeof(struct hpi_ipc_version)) {
             on_m4_version((const struct hpi_ipc_version *)m->data);
+        }
+        break;
+    case HPI_IPC_MSG_TYPE_BEAT_NOTIFY:
+        if (m->length >= sizeof(struct hpi_ipc_beat_notify)) {
+            on_beat_notify((const struct hpi_ipc_beat_notify *)m->data);
         }
         break;
     default:

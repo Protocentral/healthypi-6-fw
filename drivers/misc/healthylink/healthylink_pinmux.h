@@ -118,21 +118,46 @@ void healthylink_pinmux_fdcan1_gpio_set(uint8_t tx_val, uint8_t rx_val);
 void healthylink_pinmux_fdcan1_gpio_get(uint8_t *tx_val, uint8_t *rx_val);
 
 /**
- * @brief Configure pins for a specific module type
+ * @brief Claim and configure the shared pins for a specific module type
  *
- * High-level function that configures all HealthyLink pins
- * appropriate for the detected module type.
+ * High-level function that configures the HealthyLink expansion pins
+ * appropriate for the detected module type, and records @p owner as holding
+ * them.
  *
+ * These pins (SPI6 PG12/13/14, FDCAN1 PH13/14) run to every slot in parallel,
+ * so they belong to one slot at a time. If another owner already holds them
+ * this returns -EBUSY and changes nothing -- detecting a module in one slot
+ * must never disturb a module running in another. Module types that need none
+ * of these pins (Compute, and anything unrecognised) succeed without claiming.
+ *
+ * @param owner Opaque token for the claiming slot; pass the same value to
+ *              healthylink_pinmux_release(). Must not be NULL.
  * @param module_id Module ID from EEPROM
- * @return 0 on success, negative errno on failure
+ * @return 0 on success, -EBUSY if another slot holds the pins, negative errno
+ *         on failure
  */
-int healthylink_pinmux_configure_for_module(uint16_t module_id);
+int healthylink_pinmux_configure_for_module(const void *owner, uint16_t module_id);
+
+/**
+ * @brief Give the shared pins back and return them to a safe state
+ *
+ * Releases a claim taken by healthylink_pinmux_configure_for_module() and
+ * hi-Zs the pins. Does nothing if @p owner is not the current holder, so it is
+ * always safe to call on a slot that lost its module.
+ *
+ * @param owner The token passed when the pins were claimed
+ */
+void healthylink_pinmux_release(const void *owner);
 
 /**
  * @brief Reset all HealthyLink pins to safe default state
  *
  * Configures all expansion pins as high-impedance inputs
  * to prevent contention when no module is connected.
+ *
+ * This is the raw primitive and honours no ownership: it will hi-Z pins a
+ * module in another slot is using. Unless you know no slot holds them, call
+ * healthylink_pinmux_release() instead.
  *
  * @return 0 on success, negative errno on failure
  */

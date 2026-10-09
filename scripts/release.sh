@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 ProtoCentral Electronics
 # SPDX-License-Identifier: MIT
-# HealthyPi 6 — build a shippable release: production images + a .hpifw bundle.
+# HealthyPi 6 — build a shippable release: production images + a firmware bundle (zip).
 #
 #   scripts/release.sh                        dev key, for rehearsing the flow
 #   HP6_SIGNING_KEY=/abs/release.pem scripts/release.sh
-#   scripts/release.sh --allow-test-vid       bench-only escape (see below)
+#   HP6_SIGNING_KEY=/abs/my_key.pem scripts/release.sh --own-key   (a re-keyed unit)
 #
 # Output: build/release/
 #   m7s/                       the sysbuild tree (MCUboot + signed app)
-#   hpi6-<version>.hpifw       the bundle a customer or Studio applies
+#   hpi6-firmware-<version>.zip  the bundle a customer or Studio applies
 #
 # This is the ONLY supported way to produce firmware for a unit that leaves the
 # building. It exists because "which build ships" was previously undefined: the
@@ -26,12 +26,12 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 cd "$HPI_ROOT"
 
-ALLOW_TEST_VID=0
 SKIP_ESP32=0
+OWN_KEY=0
 for arg in "$@"; do
     case "$arg" in
-        --allow-test-vid) ALLOW_TEST_VID=1 ;;
         --no-esp32)       SKIP_ESP32=1 ;;
+        --own-key)        OWN_KEY=1 ;;
         -h|--help)        sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option $arg" >&2; exit 1 ;;
     esac
@@ -67,21 +67,40 @@ echo ""
 FLAVOR=prod HPI_SIGNED_OUT="$M7S" "$HPI_ROOT/scripts/build.sh" signed prod
 "$HPI_ROOT/scripts/build.sh" m4
 
-# The C6 image is OPTIONAL in a bundle: the C6 updates itself over WiFi and has
-# no wired path through the M7, so a missing ESP-IDF must not take the whole
-# release down with it. Warn and carry on.
+# The C6 image is OPTIONAL in a bundle. Nothing applies it yet -- `fw update`
+# skips the C6, and the C6 has no OTA slots until its A/B partition table lands
+# -- so a missing ESP-IDF must not take the whole release down. Carry it when it
+# builds, and say loudly when it does not.
+#
+# The image's file name is read from ESP-IDF's own build metadata rather than
+# guessed: the project name (and so the .bin name) is per-target, and a guessed
+# "healthybridge.bin" never existed, so the image was silently left out of
+# every bundle.
+c6_image() {   # <healthybridge dir> -> path of the HP6 (esp32c6) app image
+    python3 - "$1/build.hp6/project_description.json" <<'PY'
+import json, pathlib, sys
+desc = pathlib.Path(sys.argv[1])
+d = json.loads(desc.read_text())
+if d.get("target") != "esp32c6":
+    sys.exit(f"build.hp6 was built for {d.get('target')!r}, not esp32c6")
+img = pathlib.Path(d["build_dir"]) / d["app_bin"]
+if not img.is_file():
+    sys.exit(f"{img} is missing")
+print(img)
+PY
+}
 if [ "$SKIP_ESP32" = 0 ]; then
     if hb="$(hpi_find_healthybridge 2>/dev/null)"; then
         if ( cd "$hb" && ./hp6.sh build ); then
-            ESP_BIN="$hb/build.hp6/healthybridge.bin"
+            if ! ESP_BIN="$(c6_image "$hb")"; then
+                ESP_BIN=""
+                echo "⚠️  ESP32-C6 built, but its image could not be located (above)."
+            fi
         else
-            echo "⚠️  ESP32-C6 build failed (ESP-IDF not sourced?) — the bundle"
-            echo "   will carry no C6 image. Source ESP-IDF's export.sh and re-run,"
-            echo "   or pass --no-esp32 if that is intentional."
+            echo "⚠️  ESP32-C6 build failed (ESP-IDF not sourced?)."
         fi
     else
-        echo "ℹ️  HealthyBridge repo not found — the bundle will carry no C6 image."
-        echo "   --no-esp32 silences this."
+        echo "ℹ️  HealthyBridge repo not found."
     fi
 fi
 
@@ -89,27 +108,19 @@ fi
 echo ""
 echo "--- shippability check ---"
 CHECK_ARGS=(--release "$M7S")
+# No escape hatch. --allow-test-vid existed to rehearse the pipeline before the
+# pid.codes allocation existed; it is allocated (1209/FF91), and the flag
+# bypassed *any* gate failure, not only the VID.
 if ! bash tools/ci/check_prod_surface.sh "${CHECK_ARGS[@]}"; then
-    if [ "$ALLOW_TEST_VID" = 1 ]; then
-        # Narrow escape so the whole pipeline can be rehearsed before the
-        # pid.codes allocation exists. It does NOT make the output shippable,
-        # and the bundle is renamed so nobody can mistake it for one.
-        echo ""
-        echo "⚠️  --allow-test-vid: proceeding with a NON-SHIPPABLE build."
-        SUFFIX="-TESTVID"
-    else
-        echo ""
-        echo "❌ refusing to build a release bundle."
-        echo "   Fix the violations above. If this is the USB VID and you are"
-        echo "   only rehearsing the flow, re-run with --allow-test-vid."
-        exit 1
-    fi
+    echo ""
+    echo "❌ refusing to build a release bundle. Fix the violations above."
+    exit 1
 fi
 
 # --- 3. package -------------------------------------------------------------
 echo ""
 echo "--- bundle ---"
-BUNDLE="$OUT/hpi6-${M7_VER}${SUFFIX:-}.hpifw"
+BUNDLE="$OUT/hpi6-firmware-${M7_VER}.zip"
 CREATED="$(git log -1 --format=%cI 2>/dev/null || echo unknown)"
 
 BUNDLE_ARGS=(
@@ -119,13 +130,38 @@ BUNDLE_ARGS=(
     --release "$M7_VER" --hw-rev v5
     --key "$HP6_SIGNING_KEY" --created "$CREATED"
 )
-if [ -n "${ESP_BIN:-}" ] && [ -f "${ESP_BIN:-}" ]; then
+if [ -n "${ESP_BIN:-}" ]; then
+    echo "  esp32c6: $ESP_BIN"
     BUNDLE_ARGS+=(--esp32c6 "$ESP_BIN")
+elif [ "$SKIP_ESP32" = 0 ]; then
+    echo "⚠️  This bundle carries NO ESP32-C6 image. Source ESP-IDF's export.sh"
+    echo "   and re-run, or pass --no-esp32 if that is intentional."
 fi
 healthypi fw bundle create "${BUNDLE_ARGS[@]}"
 
 # --- 4. verify what was just written ---------------------------------------
 healthypi fw info --bundle "$BUNDLE" --pubkey "$HP6_SIGNING_KEY"
+# An OFFICIAL release must also verify against the release public key(s) the
+# published tools ship with -- otherwise every user's `healthypi fw update`
+# refuses it. Not for the dev key (the tools never trust it), and not with
+# --own-key: an owner who re-keyed their unit signs with a key the tools do not
+# ship, and applies with --pubkey (.github/SECURITY.md, "Your device, your key").
+REL_KEYS="$HPI_ROOT/tools/healthypi/src/healthypi/fw/release_keys"
+if [ "$OWN_KEY" = 1 ]; then
+    echo "  --own-key: signed with your key; apply with --pubkey $HP6_SIGNING_KEY"
+elif [ "$HP6_SIGNING_KEY" != "$HPI_ROOT/keys/hp6_dev_ec256.pem" ]; then
+    if ! ls "$REL_KEYS"/*.pub.pem > /dev/null 2>&1; then
+        echo "⚠️  no release public key in $REL_KEYS -- the published tools cannot"
+        echo "   verify this release. Add it (keys/README.md) before publishing."
+    elif ! healthypi fw info --bundle "$BUNDLE" > /dev/null; then
+        echo "❌ this bundle does not verify against the release public key(s) in"
+        echo "   $REL_KEYS -- signed with the wrong key?"
+        echo "   (Signing for your own re-keyed unit? Re-run with --own-key.)"
+        exit 1
+    else
+        echo "  verifies against the release key(s) shipped with the healthypi tools"
+    fi
+fi
 
 echo ""
 echo "✅ release ready: $BUNDLE"

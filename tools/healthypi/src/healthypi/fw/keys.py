@@ -79,3 +79,42 @@ def verify_digest_raw(digest: bytes, sig: bytes, pub_pem_or_key: Path) -> bool:
         return True
     except Exception:  # noqa: BLE001 -- any failure is "does not verify"
         return False
+
+
+# --------------------------------------------------------------------------
+# release public keys shipped with this package
+# --------------------------------------------------------------------------
+
+#: Public halves of the HealthyPi 6 release signing key(s), shipped inside the
+#: package so a bundle can be checked without the user finding a key. More than
+#: one file means primary + backup: a bundle signed by any of them verifies.
+#: Only `*.pub.pem` files are read; a private key never belongs here (CI fails
+#: the build if one is tracked anywhere in the repository).
+RELEASE_KEY_DIR = Path(__file__).with_name("release_keys")
+
+
+def release_public_keys() -> list[Path]:
+    """The release public keys this copy of the tool trusts by default."""
+    return sorted(RELEASE_KEY_DIR.glob("*.pub.pem"))
+
+
+def fingerprint(pub_pem_or_key: Path) -> str:
+    """SHA-256 of the DER SubjectPublicKeyInfo, first 16 hex digits.
+
+    The same number for a private key and its exported public half, so it can
+    be read off either and compared -- in release notes, SECURITY.md, or by a
+    user holding a bundle.
+    """
+    import hashlib
+
+    from cryptography.hazmat.primitives import serialization
+
+    blob = Path(pub_pem_or_key).read_bytes()
+    try:
+        pub = serialization.load_pem_private_key(blob, password=None).public_key()
+    except ValueError:
+        pub = serialization.load_pem_public_key(blob)
+    der = pub.public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return hashlib.sha256(der).hexdigest()[:16]

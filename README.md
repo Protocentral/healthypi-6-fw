@@ -22,6 +22,11 @@ over Wi-Fi and BLE by a network co-processor.
 This repository builds the images that run on the STM32H757 and drives the
 ESP32-C6.
 
+> **Looking for the hardware?** The KiCad schematics and PCB layouts for the
+> HealthyPi 6 main and display boards, the HealthyLink modules and the
+> enclosure are in
+> **[protocentral_healthypi6_hardware](https://github.com/Protocentral/protocentral_healthypi6_hardware)**.
+
 > **HealthyPi 6 is a research and education instrument, not a medical device.**
 > Read [Important notice](#important-notice) before connecting it to a person.
 > It also says which derived values are not yet trustworthy, and why.
@@ -70,12 +75,16 @@ the wire, so the hardware and the metadata cannot drift apart.
 
 ## Hardware
 
+Hardware design files — KiCad schematics and PCB layouts, HealthyLink module
+boards and the enclosure — are in
+[`protocentral_healthypi6_hardware`](https://github.com/Protocentral/protocentral_healthypi6_hardware).
+
 - **STM32H757BI** (LQFP208) — Cortex-M7 @ 400 MHz (application) + Cortex-M4 @ 200 MHz
   (algorithms), communicating over OpenAMP/RPMSG
 - **ESP32-C6** network co-processor for Wi-Fi and BLE, reached over a framed UART
   link at 2 Mbaud with hardware flow control
 - **4" 480×800 touch display** (GC9503V, MIPI-DSI) driven by LVGL
-- **32 MB SDRAM**, **128 MB QSPI NOR**, **microSD**
+- **32 MB SDRAM**, **64 MB QSPI NOR**, **microSD**
 - **USB-C** composite device — two CDC ACM ports, plus mass storage on demand
 - **HealthyLink expansion port** — M.2 connector carrying SPI, UART, I²C, CAN-FD
   and ADC for add-on modules
@@ -128,11 +137,11 @@ scripts/build.sh all                # m7 + m4
 ### What ships
 
 ```bash
-scripts/release.sh        # -> build/release/hpi6-<version>.hpifw
+scripts/release.sh        # -> build/release/hpi6-firmware-<version>.zip
 ```
 
 `release.sh` is the only supported production path. It builds the signed prod
-image, packages it with the M4 image into a `.hpifw` bundle, and refuses to emit
+image, packages it with the M4 image into a firmware bundle (zip), and refuses to emit
 one that fails the shippability check. A plain `scripts/build.sh m7` image has no
 bootloader, no update path and no recovery entry — a unit flashed with it can
 only ever be updated over SWD, with the case open.
@@ -162,7 +171,7 @@ Each processor updates differently, because the hardware differs:
 One release key signs all of it, and a release is a single bundle:
 
 ```bash
-healthypi fw update --port <control-port> --bundle build/release/hpi6-1.0.0.hpifw
+healthypi fw update --port <control-port> --bundle build/release/hpi6-firmware-1.0.0.zip
 ```
 
 If an update ever leaves a device unbootable, MCUboot's **serial recovery** takes
@@ -194,9 +203,11 @@ enumerates only while armed.
 |---|---|
 | [`healthypi-6-fw`](https://github.com/protocentral/healthypi-6-fw) | This repository — STM32H757 firmware |
 | [`healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32) | ESP32 network co-processor firmware, shared with HealthyPi 5 |
+| [`protocentral_healthypi6_hardware`](https://github.com/Protocentral/protocentral_healthypi6_hardware) | Open hardware design files — KiCad boards, HealthyLink modules, enclosure |
 
-> The two update together. The link between them carries a versioned wire
-> contract, and mismatched firmware on either side is not a graceful degradation.
+> The two firmware repositories update together. The link between them carries
+> a versioned wire contract, and mismatched firmware on either side is not a
+> graceful degradation.
 
 Design documentation is in [`docs/`](docs/):
 
@@ -234,6 +245,7 @@ Please open an issue in the repository that matches the problem:
 
 - Firmware, build or update issues → this repository
 - Wi-Fi, BLE, MQTT or the dashboard → [`healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32)
+- Schematics, PCB or board hardware → [`protocentral_healthypi6_hardware`](https://github.com/Protocentral/protocentral_healthypi6_hardware)
 
 For a firmware issue, include the board revision, the exact `scripts/build.sh`
 command you used, and the device's reported firmware versions.
@@ -268,9 +280,11 @@ As of firmware 1.0.0:
   a known RR series.
 - **Lead-off** detects the RA, LA and LL electrodes. **V1 is not detected**, so
   absence of a V1 lead-off warning does not mean the V1 electrode is attached.
-- **Temperature and respiration rate are never produced.** Both fields exist in
-  the data format and both always read 0. Zero means "not available" throughout,
-  never "measured zero".
+- **Temperature** is the external AS6221 skin probe (`temp_c_x100`). Unplugged
+  reads 0. **Respiration rate** is thoracic impedance (`rr_bpm`); 0 until the
+  detector locks, and while RA/LA/LL are off. Zero means "not available"
+  throughout, never "measured zero". Neither has been validated as a clinical
+  number.
 
 Heart rate from the ECG is the one derived value that has been exercised
 end to end.

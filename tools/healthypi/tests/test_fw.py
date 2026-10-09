@@ -1,7 +1,7 @@
 # Copyright (c) 2026 ProtoCentral Electronics
 # SPDX-License-Identifier: MIT
 
-"""The .hpifw bundle: create, verify, and refuse.
+"""The firmware bundle (zip): create, verify, and refuse.
 
 These cover the offline half of the update path -- the half that can be tested
 without a board. What they are really guarding is the *negative* cases: a
@@ -64,7 +64,7 @@ def bundle_path(tmp_path, key):
     m4 = tmp_path / "m4.bin"
     m4.write_bytes(b"\x5a" * 2048)
     return fw.create(
-        tmp_path / "hpi6-1.0.0.hpifw",
+        tmp_path / "hpi6-firmware-1.0.0.zip",
         [
             fw.ImageSpec("m7", m7, "1.0.0", "mcumgr-img"),
             fw.ImageSpec("m4", m4, "1.0.0", "hpi-g64", sign=True),
@@ -111,8 +111,8 @@ def test_manifest_is_reproducible(tmp_path, key):
     specs = lambda: [fw.ImageSpec("m7", m7, "1.0.0", "mcumgr-img")]  # noqa: E731
     kw = dict(release="1.0.0", hw_rev=["v5"], key_path=key,
               created="2026-08-03T00:00:00Z")
-    one = fw.create(tmp_path / "one.hpifw", specs(), **kw)
-    two = fw.create(tmp_path / "two.hpifw", specs(), **kw)
+    one = fw.create(tmp_path / "one.zip", specs(), **kw)
+    two = fw.create(tmp_path / "two.zip", specs(), **kw)
     assert (zipfile.ZipFile(one).read("manifest.json")
             == zipfile.ZipFile(two).read("manifest.json"))
 
@@ -132,7 +132,7 @@ def test_describe_lists_every_image(bundle_path):
 def test_missing_source_image_is_named(tmp_path, key):
     with pytest.raises(fw.BundleError, match="not found"):
         fw.create(
-            tmp_path / "x.hpifw",
+            tmp_path / "x.zip",
             [fw.ImageSpec("m7", tmp_path / "nope.bin", "1.0.0", "mcumgr-img")],
             release="1.0.0", hw_rev=["v5"], key_path=key, created="t",
         )
@@ -144,14 +144,14 @@ def test_missing_source_image_is_named(tmp_path, key):
 def test_digests_checked_without_a_key(tmp_path, bundle_path):
     """A missing key must not mean a missing check. Corruption in transit is the
     ordinary failure; the signature only catches a deliberate one."""
-    bad = _rebuild(bundle_path, tmp_path / "bad.hpifw",
+    bad = _rebuild(bundle_path, tmp_path / "bad.zip",
                    lambda m: m.__setitem__("m4.bin", b"\x00" * 2048))
     with pytest.raises(fw.BundleError, match="digest mismatch"):
         fw.Bundle(bad).verify(None)
 
 
 def test_truncated_payload_rejected(tmp_path, bundle_path, key):
-    bad = _rebuild(bundle_path, tmp_path / "trunc.hpifw",
+    bad = _rebuild(bundle_path, tmp_path / "trunc.zip",
                    lambda m: m.__setitem__("m7.bin", m["m7.bin"][:-16]))
     with pytest.raises(fw.BundleError, match="digest mismatch"):
         fw.Bundle(bad).verify(key)
@@ -163,7 +163,7 @@ def test_edited_manifest_fails_the_signature(tmp_path, bundle_path, key):
         d["release"] = "9.9.9"
         members["manifest.json"] = json.dumps(d, indent=2, sort_keys=True).encode()
 
-    bad = _rebuild(bundle_path, tmp_path / "edited.hpifw", bump)
+    bad = _rebuild(bundle_path, tmp_path / "edited.zip", bump)
     with pytest.raises(fw.BundleError, match="signature does NOT verify"):
         fw.Bundle(bad).verify(key)
 
@@ -173,16 +173,23 @@ def test_wrong_key_rejected(bundle_path, other_key):
         fw.Bundle(bundle_path).verify(other_key)
 
 
+def test_extension_is_not_significant(bundle_path, key, tmp_path):
+    # Bundles were named .hpifw before 2026-10; the same zip still opens.
+    legacy = tmp_path / "hpi6-1.0.0.hpifw"
+    legacy.write_bytes(bundle_path.read_bytes())
+    fw.Bundle(legacy).verify(key)
+
+
 def test_not_a_zip(tmp_path):
-    junk = tmp_path / "junk.hpifw"
+    junk = tmp_path / "junk.zip"
     junk.write_bytes(b"not a zip")
-    with pytest.raises(fw.BundleError, match="not a .hpifw"):
+    with pytest.raises(fw.BundleError, match="not a firmware bundle"):
         fw.Bundle(junk)
 
 
 def test_missing_file_is_not_a_traceback(tmp_path):
     with pytest.raises(fw.BundleError, match="no such file"):
-        fw.Bundle(tmp_path / "absent.hpifw")
+        fw.Bundle(tmp_path / "absent.zip")
 
 
 def test_unknown_format_version(tmp_path, bundle_path):
@@ -191,7 +198,7 @@ def test_unknown_format_version(tmp_path, bundle_path):
         d["format"] = 99
         members["manifest.json"] = json.dumps(d).encode()
 
-    bad = _rebuild(bundle_path, tmp_path / "future.hpifw", future)
+    bad = _rebuild(bundle_path, tmp_path / "future.zip", future)
     with pytest.raises(fw.BundleError, match="understands"):
         fw.Bundle(bad)
 
@@ -210,9 +217,25 @@ def test_signature_is_raw_not_der(key):
     upload."""
     import hashlib
 
-    sig = fw.sign_digest_raw(hashlib.sha256(b"x").digest(), key)
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import (
+        Prehashed,
+        encode_dss_signature,
+    )
+
+    digest = hashlib.sha256(b"x").digest()
+    sig = fw.sign_digest_raw(digest, key)
     assert len(sig) == 64
-    assert sig[0] != 0x30  # a DER SEQUENCE would start here
+    # Prove the layout rather than sniff it: split as r||s, re-encode, verify.
+    # (Checking sig[0] != 0x30 for "not DER" failed 1 run in 256, whenever r
+    # happened to start with 0x30.)
+    r = int.from_bytes(sig[:32], "big")
+    s = int.from_bytes(sig[32:], "big")
+    priv = serialization.load_pem_private_key(key.read_bytes(), password=None)
+    priv.public_key().verify(
+        encode_dss_signature(r, s), digest, ec.ECDSA(Prehashed(hashes.SHA256()))
+    )
 
 
 def test_verify_accepts_a_public_pem(tmp_path, key):
@@ -251,3 +274,168 @@ def test_wrong_curve_refused(tmp_path):
     # signature fails long after the release was cut.
     with pytest.raises(KeyError_, match="P-256"):
         load_private_key(path)
+
+
+# --- refusals made before anything is written -------------------------------
+
+
+def test_a_dev_build_is_refused_not_reported_up_to_date():
+    """A unit on `scripts/build.sh m7` has no img group and no M4-update service.
+    Found 2026-09-30: --dry-run against one said "nothing to do"."""
+    from healthypi.fw.update import unsupported
+
+    why = unsupported({"m7": False, "m4": False}, ["m4", "m7"])
+    assert why and "no MCUboot image group" in why and "no M4-update service" in why
+    assert "scripts/flash.sh factory" in why
+
+
+def test_a_signed_build_is_supported():
+    from healthypi.fw.update import unsupported
+
+    assert unsupported({"m7": True, "m4": True}, ["m4", "m7"]) is None
+
+
+def test_support_is_judged_only_for_what_will_be_written():
+    """--only m4 must not be refused for a missing img group."""
+    from healthypi.fw.update import unsupported
+
+    assert unsupported({"m7": False, "m4": True}, ["m4"]) is None
+    assert "no M4-update service" in unsupported({"m7": True, "m4": False}, ["m4"])
+
+
+@pytest.mark.parametrize(
+    "installed, bundle, refused",
+    [
+        ("1.0.1", "1.0.0", True),   # downgrade: MCUboot would refuse after a 40 s upload
+        ("1.0.1", "1.0.1", False),  # same: left to the version skip / --force
+        ("1.0.1", "1.0.2", False),
+        ("1.0.1-dev", "1.0.1", False),  # suffixes are not an ordering
+        ("", "1.0.0", False),       # unknown installed version: let MCUboot decide
+    ],
+)
+def test_m7_downgrade_is_refused_up_front(installed, bundle, refused):
+    from healthypi.fw.update import m7_downgrade
+
+    msg = m7_downgrade(installed, bundle)
+    assert bool(msg) is refused
+    if refused:
+        assert "fw recover" in msg
+
+
+# --- the release key(s) shipped with the tool -------------------------------
+
+
+def _public_half(private_pem, dest):
+    from cryptography.hazmat.primitives import serialization
+
+    priv = serialization.load_pem_private_key(private_pem.read_bytes(), password=None)
+    dest.write_bytes(
+        priv.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    )
+    return dest
+
+
+@pytest.fixture
+def release_keys(tmp_path, monkeypatch):
+    """Point the shipped-release-key directory at an empty temp dir."""
+    from healthypi.fw import keys as K
+
+    d = tmp_path / "release_keys"
+    d.mkdir()
+    monkeypatch.setattr(K, "RELEASE_KEY_DIR", d)
+    return d
+
+
+def test_no_pubkey_verifies_against_the_shipped_release_key(bundle_path, key, release_keys):
+    _public_half(key, release_keys / "hp6_release_ec256.pub.pem")
+    msg = fw.Bundle(bundle_path).authenticate(None)
+    assert "release key" in msg
+
+
+def test_a_bundle_signed_by_another_key_is_refused_without_pubkey(
+    bundle_path, other_key, release_keys
+):
+    """The point of shipping the key: without --pubkey, a repackaged bundle used
+    to pass on digests alone."""
+    _public_half(other_key, release_keys / "hp6_release_ec256.pub.pem")
+    with pytest.raises(fw.BundleError, match="pass --pubkey"):
+        fw.Bundle(bundle_path).authenticate(None)
+
+
+def test_either_of_two_release_keys_is_accepted(bundle_path, key, other_key, release_keys):
+    """Primary + backup: a bundle signed by the backup key still verifies."""
+    _public_half(other_key, release_keys / "a_primary.pub.pem")
+    _public_half(key, release_keys / "b_backup.pub.pem")
+    assert "release key" in fw.Bundle(bundle_path).authenticate(None)
+
+
+def test_no_shipped_key_checks_digests_and_says_so(bundle_path, release_keys):
+    msg = fw.Bundle(bundle_path).authenticate(None)
+    assert "NOT checked" in msg
+
+
+def test_explicit_pubkey_wins_over_the_shipped_key(bundle_path, key, other_key, release_keys):
+    """An owner who re-keyed their unit, or the bench with a dev key."""
+    _public_half(other_key, release_keys / "hp6_release_ec256.pub.pem")
+    assert "verified against" in fw.Bundle(bundle_path).authenticate(key)
+
+
+def test_a_private_key_and_its_public_half_share_a_fingerprint(key, tmp_path):
+    from healthypi.fw.keys import fingerprint
+
+    pub = _public_half(key, tmp_path / "k.pub.pem")
+    assert fingerprint(key) == fingerprint(pub)
+    assert len(fingerprint(pub)) == 16
+
+
+# --- an extracted bundle (a browser unpacked the .zip) ----------------------
+
+
+def _extract(bundle_path, dest):
+    import zipfile
+
+    dest.mkdir()
+    with zipfile.ZipFile(bundle_path) as zf:
+        zf.extractall(dest)
+    return dest
+
+
+def test_an_extracted_folder_is_a_bundle(bundle_path, key, tmp_path):
+    """Safari's default "Open safe files after downloading" unpacks a .zip.
+    The folder carries the same manifest, signature and images, so it must
+    verify exactly as the zip does."""
+    folder = _extract(bundle_path, tmp_path / "hpi6-firmware-1.0.0")
+    b = fw.Bundle(folder)
+    b.verify(key)
+    assert b.read_image("m7") == fw.Bundle(bundle_path).read_image("m7")
+    assert b.image_sig("m4") == fw.Bundle(bundle_path).image_sig("m4")
+
+
+def test_a_tampered_file_in_the_folder_fails_its_digest(bundle_path, tmp_path):
+    folder = _extract(bundle_path, tmp_path / "x")
+    (folder / "m4.bin").write_bytes(b"\x00" * 2048)
+    with pytest.raises(fw.BundleError, match="digest mismatch"):
+        fw.Bundle(folder).verify(None)
+
+
+def test_a_missing_file_in_the_folder_is_named(bundle_path, tmp_path):
+    folder = _extract(bundle_path, tmp_path / "x")
+    (folder / "m7.bin").unlink()
+    with pytest.raises(fw.BundleError, match="m7.bin is missing"):
+        fw.Bundle(folder).read_image("m7")
+
+
+def test_a_folder_manifest_cannot_reach_outside_the_folder(bundle_path, tmp_path):
+    """Member names come from manifest.json. In folder form they are paths, so
+    one must not be able to point the reader at a file elsewhere."""
+    import json
+
+    (tmp_path / "secret.bin").write_bytes(b"not part of the bundle")
+    folder = _extract(bundle_path, tmp_path / "x")
+    man = json.loads((folder / "manifest.json").read_text())
+    man["images"]["m7"]["file"] = "../secret.bin"
+    (folder / "manifest.json").write_text(json.dumps(man))
+    with pytest.raises(fw.BundleError, match="outside the bundle"):
+        fw.Bundle(folder).read_image("m7")

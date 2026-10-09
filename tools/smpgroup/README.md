@@ -68,8 +68,8 @@ MY_GROUP = Group(
 )
 ```
 
-`T.MAP` fields take `nested=(...)` for maps whose keys you know; nested models
-forbid unknown keys too.
+`T.MAP` fields take `nested=(...)` for maps whose keys you know; nested maps
+follow the same unknown-key policy as the reply that contains them.
 
 ### 2. Generate the wire classes
 
@@ -91,6 +91,18 @@ async with SMPClient(SMPSerialTransport(), port) as client:
 A command declaring both ops is exposed as `g.<name>` (read) and
 `g.<name>_write`. Commands marked `UNREACHABLE` generate nothing — you cannot
 accidentally ship a verb the device will only ever answer with `ENOTSUP`.
+
+**Unknown reply keys are dropped by default.** A host tool and the firmware it
+talks to ship on their own schedules, so a device newer than your spec will
+send keys the spec does not declare. `build(MY_GROUP)` ignores them, so the
+reply still parses; `build(MY_GROUP, strict=True)` rejects them, for a test
+bench that should notice the spec falling behind. Requests are always strict.
+
+The SMP error keys are the exception: an undeclared top-level `rc` or `err`
+still fails validation. `smpclient` tries a reply as the success class before
+the error classes, so a tolerant success class would otherwise accept an error
+reply to any command that has no reply fields. Keeping the spec complete is the
+drift checker's job (below), not the runtime's.
 
 ### 3. Check the spec against the firmware
 
@@ -119,8 +131,8 @@ It catches:
 - a command the firmware declares but your spec doesn't have (or vice versa)
 - a command your spec calls live that the firmware never dispatches
 - an error code that moved, was renamed, or is missing from either side
-- **a request or response key that appears in no handler** — the renamed-field
-  case that breaks `extra="forbid"` clients
+- **a request or response key missing from that command's handler** — a
+  renamed or removed field, or one the spec gave to the wrong command
 
 Drop it in a pytest and your CI now fails on protocol drift instead of your
 users discovering it:
@@ -131,9 +143,12 @@ def test_no_drift():
     assert report.ok, str(report)
 ```
 
-The checker parses rather than compiles, so it is deliberately shallow: it
-proves a key exists *somewhere in the handlers*, not that it belongs to that
-specific command. Shallow still catches the failure that actually happens.
+Keys are checked per command. The dispatch table names each op's handler, and
+a key must appear in that function, in a function it calls within the sources,
+or at file scope in its file (a static key table). A key that only *another*
+command emits does not count — a global search would have passed it. The
+checker parses rather than compiles, so when it cannot find a handler (a macro,
+or code outside the given sources) it falls back to searching every handler.
 
 ## Design notes
 

@@ -64,7 +64,12 @@ extern "C" {
 #define HEALTHYLINK_MODULE_ID_STIM      0x0007
 #define HEALTHYLINK_MODULE_ID_SYNC      0x0008
 #define HEALTHYLINK_MODULE_ID_GSR_RESP  0x0009
-/* 0x000A - 0x00FF: Reserved for ProtoCentral */
+/* Passive breakout: headers for every HealthyLink interface, the slot
+ * regulators and the ID EEPROM. It claims no interface and drives nothing, so
+ * the host leaves the shared SPI6/FDCAN1 pins exactly as the devicetree left
+ * them -- which is what makes the board usable for bringing up a new module. */
+#define HEALTHYLINK_MODULE_ID_GPIO      0x000A
+/* 0x000B - 0x00FF: Reserved for ProtoCentral */
 /* 0x0100 - 0xFFFE: Community/third-party modules */
 #define HEALTHYLINK_MODULE_ID_RESERVED  0xFFFF
 
@@ -194,13 +199,13 @@ enum healthylink_status {
 };
 
 /**
- * @brief Detect connected HealthyLink module
+ * @brief Detect the module in one slot
  *
- * Scans I2C3 for the module identification EEPROM and reads the
- * module header. If a valid module is found, attempts to load
- * the appropriate driver.
+ * Probes the slot's ID EEPROM and reads the module header with the slot
+ * unpowered, then powers the slot only for a valid header and no load-switch
+ * fault. Safe to re-run.
  *
- * @param dev HealthyLink controller device
+ * @param dev HealthyLink slot device
  * @return 0 on success (module found and initialized),
  *         -ENODEV if no module present,
  *         -EINVAL if EEPROM invalid,
@@ -208,6 +213,45 @@ enum healthylink_status {
  *         other negative errno on failure
  */
 int healthylink_detect(const struct device *dev);
+
+/**
+ * @brief Switch a slot's module power
+ *
+ * Drives the slot load switch (EN_MOD_x). Switching on checks the fault line
+ * and switches back off on a fault. The rail only: nothing is detected,
+ * started or stopped.
+ *
+ * @param dev HealthyLink slot device
+ * @param on  true to power the slot
+ * @return 0 on success, -EIO on a load-switch fault, -ENOTSUP if the slot has
+ *         no power control
+ */
+int healthylink_slot_power(const struct device *dev, bool on);
+
+/**
+ * @brief Probe every 7-bit address on the bus carrying this slot's ID EEPROM
+ *
+ * A bring-up instrument: it says whether the bus works at all, and at which
+ * address a module is actually answering. Uses a zero-length write, so nothing
+ * is read from or written to whatever responds. Does not change slot power.
+ *
+ * @param dev   HealthyLink slot device
+ * @param addrs Buffer for the responding 7-bit addresses
+ * @param max   Capacity of @p addrs
+ * @return Number of devices found, or a negative errno
+ */
+int healthylink_bus_scan(const struct device *dev, uint8_t *addrs, size_t max);
+
+/**
+ * @brief Whether the slot's load switch is driven on (the command, not a
+ *        measurement). Never blocks.
+ */
+bool healthylink_slot_is_powered(const struct device *dev);
+
+/**
+ * @brief The slot's devicetree `slot-label`, e.g. "A"
+ */
+const char *healthylink_slot_label(const struct device *dev);
 
 /**
  * @brief Get connected module information

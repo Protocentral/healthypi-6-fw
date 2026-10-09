@@ -6,13 +6,19 @@
 A host-side protocol definition is a transcription of what the firmware does,
 and transcriptions rot. This module re-derives the facts from the C sources and
 reports where the spec disagrees: command ids, which commands are actually
-routed, the error-code table, and whether every declared CBOR key appears in a
-handler.
+routed, the error-code table, and whether every declared CBOR key appears in
+*that command's* handler.
 
-It parses rather than compiles, so it is deliberately shallow -- it proves a key
-*exists somewhere in the handlers*, not that it belongs to that command. Shallow
-checks still catch the failure that actually happens: a renamed or added field
-that nobody propagated to the host.
+Keys are scoped per command: the dispatch table names each op's handler
+function, and a key must appear in that function, in a function it calls within
+the given sources, or at file scope in its file (a static key table). A
+global search would pass a key that only a *different* command emits -- which is
+how a phantom ``off`` in one reply survived because another reply has one. When
+a handler cannot be located the check falls back to the global search, so it is
+never weaker than that.
+
+It parses rather than compiles, so it is a heuristic: macros that build key
+strings, or handlers outside the given sources, fall back as above.
 
 Stdlib only. Point it at a Zephyr tree with :class:`Sources` and run
 :func:`check`; wire the result into pytest or CI.
@@ -24,7 +30,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .spec import Field, Group, Status
+from .spec import Field, Group, Op, Status
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +128,88 @@ def _handler_text(src: Sources) -> str:
     return "\n".join(p.read_text() for p in src.handlers if p.is_file())
 
 
+_C_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+# A function definition: a name, a parameter list, then an opening brace
+# (possibly on the next line). Declarations end in ';' and do not match.
+_FUNC_DEF = re.compile(r"^[A-Za-z_][\w \t\*]*?\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{", re.M)
+_CONTROL = {"if", "for", "while", "switch", "return", "sizeof", "do", "else"}
+
+
+def _strip_comments(text: str) -> str:
+    return _C_COMMENT.sub(" ", text)
+
+
+def _functions(src: Sources) -> tuple[dict[str, str], dict[str, str]]:
+    """Map each function defined in the sources to its body, and to the
+    file-scope text of the file that defines it (everything outside functions:
+    static tables, macros)."""
+    bodies: dict[str, str] = {}
+    scope: dict[str, str] = {}
+    for path in (*src.handlers, src.dispatch):
+        if not path.is_file():
+            continue
+        text = _strip_comments(path.read_text())
+        outside: list[str] = []
+        pos = 0
+        found: list[tuple[str, int, int]] = []
+        for m in _FUNC_DEF.finditer(text):
+            if m.start() < pos or m.group(1) in _CONTROL:
+                continue
+            depth, i = 0, m.end() - 1
+            while i < len(text):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            found.append((m.group(1), m.start(), i + 1))
+            outside.append(text[pos : m.start()])
+            pos = i + 1
+        outside.append(text[pos:])
+        file_scope = "\n".join(outside)
+        for name, start, end in found:
+            bodies[name] = text[start:end]
+            scope[name] = file_scope
+    return bodies, scope
+
+
+def _op_handlers(src: Sources) -> dict[tuple[str, Op], str]:
+    """``(command, op) -> handler function`` from the dispatch table."""
+    text = _strip_comments(src.dispatch.read_text())
+    entry = re.compile(r"\[" + re.escape(src.id_prefix) + r"([A-Z0-9_]+)\]\s*=\s*\{([^}]*)\}")
+    out: dict[tuple[str, Op], str] = {}
+    for m in entry.finditer(text):
+        for op, slot in ((Op.READ, "mh_read"), (Op.WRITE, "mh_write")):
+            fn = re.search(r"\." + slot + r"\s*=\s*([A-Za-z_]\w*)", m.group(2))
+            if fn and fn.group(1) != "NULL":
+                out[(m.group(1).lower(), op)] = fn.group(1)
+    return out
+
+
+def _reachable_text(fn: str, bodies: dict[str, str], scope: dict[str, str]) -> str | None:
+    """The handler's body, every function it calls that the sources define
+    (transitively), and the file-scope text of each. None if ``fn`` is not
+    defined in the sources."""
+    if fn not in bodies:
+        return None
+    seen: set[str] = set()
+    todo = [fn]
+    parts: list[str] = []
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in bodies:
+            continue
+        seen.add(name)
+        parts.append(bodies[name])
+        parts.append(scope[name])
+        for call in re.findall(r"\b([A-Za-z_]\w*)\s*\(", bodies[name]):
+            if call in bodies and call not in seen:
+                todo.append(call)
+    return "\n".join(parts)
+
+
 def _all_fields(fields: tuple[Field, ...]) -> list[Field]:
     out: list[Field] = []
     for f in fields:
@@ -141,6 +229,9 @@ def check(group: Group, src: Sources, *, check_keys: bool = True) -> Report:
     rep.routed = _routed(src)
     rep.errors = _error_codes(src)
     handlers = _handler_text(src) if check_keys else ""
+    if check_keys:
+        bodies, scope = _functions(src)
+        op_fn = _op_handlers(src)
 
     for cmd in group.commands:
         fw_id = rep.declared.get(cmd.name)
@@ -158,16 +249,21 @@ def check(group: Group, src: Sources, *, check_keys: bool = True) -> Report:
                 f"{'routes' if cmd.name in rep.routed else 'does not route'} it"
             )
         if check_keys and cmd.status is Status.LIVE:
-            seen = set()
             for op in cmd.ops:
+                fn = op_fn.get((cmd.name, op))
+                text = _reachable_text(fn, bodies, scope) if fn else None
+                where = f"its {op.value} handler {fn}()" if text is not None else "any handler"
+                if text is None:
+                    text = handlers
+                seen: set[str] = set()
                 for group_fields in cmd.schema(op):
                     for f in _all_fields(group_fields):
                         if f.name in seen:
                             continue
                         seen.add(f.name)
-                        if f'"{f.name}"' not in handlers:
+                        if f'"{f.name}"' not in text:
                             rep.problems.append(
-                                f"{cmd.name}: key {f.name!r} appears in no handler"
+                                f"{cmd.name}: key {f.name!r} does not appear in {where}"
                             )
 
     spec_ids = {c.name for c in group.commands}

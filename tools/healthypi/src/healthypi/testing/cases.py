@@ -116,7 +116,7 @@ async def datetime_read(conn, g, is_error, fmt_error):
     """Stock `os` datetime, READ ONLY.
 
     The write half lives in its own destructive case. It used to run here, on
-    every default `hpi test run`, and it set the clock to a hardcoded date in
+    every default `healthypi test run`, and it set the clock to a hardcoded date in
     the past and never put it back -- so a suite advertised as "read-only by
     default" silently backdated the device, and any recording started just
     afterwards carried a wrong wall-clock timestamp.
@@ -144,7 +144,7 @@ async def datetime_rw(conn, g, is_error, fmt_error):
     try:
         from smpclient.requests.os_management import DateTimeRead, DateTimeWrite
     except ImportError:
-        return skip("datetime", "this smpclient build has no datetime request")
+        return skip("datetime write", "this smpclient build has no datetime request")
 
     resp = await conn.request(DateTimeRead())
     if is_error(resp):
@@ -156,21 +156,21 @@ async def datetime_rw(conn, g, is_error, fmt_error):
             # here -- so it is an unmet precondition, which this suite reports
             # as SKIP rather than as a failure someone learns to ignore.
             return skip(
-                "datetime",
+                "datetime write",
                 "device clock has never been set (os/RTC_NOT_SET); set it with "
                 "`healthypi device datetime --set now` and re-run",
             )
-        return _err("datetime", resp, fmt_error, "read refused")
+        return _err("datetime write", resp, fmt_error, "read refused")
     before = getattr(resp, "datetime", None)
 
     stamp = "2026-08-03T12:34:56"
     w = await conn.request(DateTimeWrite(datetime=stamp))
     if is_error(w):
-        return _err("datetime", w, fmt_error, "write refused")
+        return _err("datetime write", w, fmt_error, "write refused")
 
     back = await conn.request(DateTimeRead())
     if is_error(back):
-        return _err("datetime", back, fmt_error, "read-back refused")
+        return _err("datetime write", back, fmt_error, "read-back refused")
     got = getattr(back, "datetime", "") or ""
     if not got.startswith("2026-08-03T12:34:5"):
         return fail("datetime write", f"wrote {stamp}, read back {got!r}")
@@ -299,6 +299,32 @@ async def module_list(conn, g, is_error, fmt_error):
     if is_error(resp):
         return _err("module_list", resp, fmt_error, "refused")
     return ok("module_list", f"slot A={resp.a} slot B={resp.b}")
+
+
+@case("module_eeprom_read", group="system", requires=(REQ_UNLOCK,))
+async def module_eeprom_read(conn, g, is_error, fmt_error):
+    """Read the head of slot A's ID EEPROM.
+
+    An empty slot is a SKIP, not a failure: it is the normal state of a bench
+    unit, and reporting it as a pass would make the case worthless -- the whole
+    point is to prove the I2C path to the module actually works.
+    """
+    resp = await conn.request(g.module_eeprom_read(slot=0, off=0, len=16))
+    if _is_err(resp, catalog.GROUP_ID, 256):   # NOT_READY
+        return skip("module_eeprom_read", "slot A is empty (no EEPROM answering)")
+    if is_error(resp):
+        return _err("module_eeprom_read", resp, fmt_error, "refused")
+    head = bytes(resp.data)
+    if len(head) != 16:
+        return fail("module_eeprom_read",
+                    f"asked for 16 B, got {len(head)}")
+    if head[:4] != b"HLNK":
+        return fail("module_eeprom_read",
+                    f"slot A answered but holds no HealthyLink image "
+                    f"(magic {head[:4].hex()}) -- program it with "
+                    f"`healthypi hl eeprom program`")
+    module_id = int.from_bytes(head[6:8], "little")
+    return ok("module_eeprom_read", f"slot A module 0x{module_id:04X}")
 
 
 @case("wifi_status", group="system")
@@ -442,7 +468,7 @@ async def soak(conn, iterations: int, on_progress=None) -> tuple[int, list[float
     """Tight-loop `os echo`, returning (errors, latencies_ms).
 
     Kept out of the case registry: it takes a count, runs for minutes, and is
-    driven explicitly by `hpi test soak`.
+    driven explicitly by `healthypi test soak`.
     """
     from smpclient.requests.os_management import EchoWrite
 

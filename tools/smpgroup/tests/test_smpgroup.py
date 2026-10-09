@@ -193,6 +193,80 @@ def test_clean_spec_passes(fw):
     assert len(rep.declared) == 6 and len(rep.routed) == 5
 
 
+# Real functions this time, so keys can be scoped to the command that owns them.
+SCOPED_HANDLERS = """
+static int reply_ok(zcbor_state_t *zse)
+{
+    return zcbor_tstr_put_lit(zse, "ok") && zcbor_bool_put(zse, true);
+}
+
+int info_read(struct smp_streamer *ctxt)
+{
+    zcbor_tstr_put_lit(zse, "sn"); zcbor_tstr_put_lit(zse, "up");
+    zcbor_tstr_put_lit(zse, "hw");
+    return 0;
+}
+
+int both_r(struct smp_streamer *ctxt) { zcbor_tstr_put_lit(zse, "armed"); return 0; }
+int both_w(struct smp_streamer *ctxt)
+{
+    ZCBOR_MAP_DECODE_KEY_DECODER("on", d, &o);
+    zcbor_tstr_put_lit(zse, "armed");
+    return 0;
+}
+int set_thing(struct smp_streamer *ctxt)
+{
+    ZCBOR_MAP_DECODE_KEY_DECODER("name", d, &n);
+    ZCBOR_MAP_DECODE_KEY_DECODER("on", d, &o);
+    return reply_ok(zse);   /* "ok" comes from a helper */
+}
+int nested_read(struct smp_streamer *ctxt)
+{
+    zcbor_tstr_put_lit(zse, "top"); zcbor_tstr_put_lit(zse, "health");
+    zcbor_tstr_put_lit(zse, "a"); zcbor_tstr_put_lit(zse, "b");
+    return 0;
+}
+int stubbed(struct smp_streamer *ctxt) { return MGMT_ERR_ENOTSUP; }
+"""
+
+
+@pytest.fixture
+def scoped_fw(fw):
+    (fw.dispatch.parent / "demo_handlers.c").write_text(textwrap.dedent(SCOPED_HANDLERS))
+    return fw
+
+
+def test_scoped_clean_spec_passes(scoped_fw):
+    """Keys emitted by a called helper count for the handler that calls it."""
+    from smpgroup.drift import check
+
+    rep = check(DEMO, scoped_fw)
+    assert rep.ok, str(rep)
+
+
+def test_key_owned_by_another_command_is_caught(scoped_fw):
+    """The m4fw_begin case: the spec gave begin's reply an `off` key, and the
+    old global search passed it because the *chunk* handler emits `off`. Here
+    `armed` exists only in both's handlers, so declaring it on set_thing must
+    fail."""
+    import dataclasses
+
+    from smpgroup.drift import check
+
+    cmd = DEMO.by_name("set_thing")
+    bad = dataclasses.replace(
+        DEMO,
+        commands=tuple(
+            dataclasses.replace(c, response=(Field("armed", T.BOOL),)) if c is cmd else c
+            for c in DEMO.commands
+        ),
+    )
+    rep = check(bad, scoped_fw)
+    assert not rep.ok
+    assert any("set_thing: key 'armed' does not appear in its write handler set_thing()" in p
+               for p in rep.problems), str(rep)
+
+
 def test_missing_sources_is_reported_not_raised(tmp_path):
     from smpgroup.drift import Sources, check
 
@@ -206,7 +280,7 @@ def test_missing_sources_is_reported_not_raised(tmp_path):
     [
         (lambda c: {"cmd_id": 0x00FF}, "spec id"),
         (lambda c: {"status": Status.UNREACHABLE, "ops": ()}, "firmware routes it"),
-        (lambda c: {"response": (Field("nope", T.UINT),)}, "appears in no handler"),
+        (lambda c: {"response": (Field("nope", T.UINT),)}, "does not appear in"),
         (lambda c: {"name": "ghost"}, "not declared by the firmware"),
     ],
 )
@@ -333,30 +407,100 @@ def test_nested_map_response(bound):
     assert r.top == 1 and r.health.a == 2 and r.health.b == 3
 
 
-def test_unknown_key_is_rejected(bound):
-    """The contract smpgroup exists to protect: a device field the host does not
-    declare must fail loudly, not silently."""
+@pytest.fixture
+def strict():
+    from smpgroup.build import build
+
+    return build(DEMO, strict=True)
+
+
+def test_strict_rejects_an_unknown_key(strict):
+    """strict=True is for benches that must notice the spec falling behind the
+    firmware: an undeclared device field fails loudly."""
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
         _reply(
-            bound.info.Response,
+            strict.info.Response,
             {"sn": "S", "up": 1, "hw": b"", "surprise": 9},
             0x0001,
             smp.header.OP.READ_RSP,
         )
 
 
-def test_nested_map_also_forbids_unknown_keys(bound):
+def test_strict_nested_map_rejects_an_unknown_key(strict):
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
         _reply(
-            bound.nested.Response,
+            strict.nested.Response,
             {"top": 1, "health": {"a": 2, "b": 3, "c": 4}},
             0x0004,
             smp.header.OP.READ_RSP,
         )
+
+
+def test_default_drops_an_unknown_key(bound):
+    """A device newer than the spec must still parse: the tool and the firmware
+    ship separately. (A firmware that added one telemetry key made every older
+    tool fail the whole reply.)"""
+    r = _reply(
+        bound.info.Response,
+        {"sn": "S", "up": 1, "hw": b"", "surprise": 9},
+        0x0001,
+        smp.header.OP.READ_RSP,
+    )
+    assert (r.sn, r.up) == ("S", 1)
+    assert not hasattr(r, "surprise")
+
+
+def test_default_nested_map_drops_an_unknown_key(bound):
+    r = _reply(
+        bound.nested.Response,
+        {"top": 1, "health": {"a": 2, "b": 3, "c": 4}},
+        0x0004,
+        smp.header.OP.READ_RSP,
+    )
+    assert (r.health.a, r.health.b) == (2, 3)
+
+
+@pytest.mark.parametrize("error_body", [{"rc": 3}, {"err": {"group": 64, "rc": 257}}])
+def test_tolerance_never_reads_an_error_as_success(error_body):
+    """smpclient tries the success class first. A tolerant success class with no
+    reply fields would otherwise swallow an error reply whole."""
+    from pydantic import ValidationError
+
+    from smpgroup.build import build
+
+    grp = Group(
+        group_id=64,
+        name="empty_reply",
+        commands=(Command(0x0001, "begin", (W,), request=(Field("len", T.UINT),)),),
+    )
+    cmd = build(grp).begin
+    with pytest.raises(ValidationError):
+        _reply(cmd.Response, error_body, 0x0001, smp.header.OP.WRITE_RSP)
+
+
+def test_tolerance_keeps_a_declared_err_field_typed():
+    """A command may declare `err` as a success field (an errno). The success
+    value parses; an error-shaped `err` map still falls through to the error
+    classes, because it fails the declared type."""
+    from pydantic import ValidationError
+
+    from smpgroup.build import build
+
+    grp = Group(
+        group_id=64,
+        name="status_err",
+        commands=(
+            Command(0x0001, "status", (R,), response=(Field("st", T.UINT), Field("err", T.INT))),
+        ),
+    )
+    cmd = build(grp).status
+    assert _reply(cmd.Response, {"st": 1, "err": -5}, 0x0001, smp.header.OP.READ_RSP).err == -5
+    with pytest.raises(ValidationError):
+        _reply(cmd.Response, {"err": {"group": 64, "rc": 257}}, 0x0001, smp.header.OP.READ_RSP)
 
 
 def test_optional_field_may_be_omitted():
@@ -397,6 +541,29 @@ def test_error_formatting():
 
     assert is_error(FakeErr())
     assert format_error(DEMO, FakeErr()) == "HW_FAULT (257) -- hardware"
+
+
+def test_success_with_an_err_field_is_not_an_error():
+    """A success reply may legitimately carry a field named `err`. Deciding by
+    `hasattr` called group 64's m4fw_status an error on every signed device,
+    which made `healthypi fw update` refuse every M4 update."""
+    from smpgroup.build import build, is_error
+
+    grp = Group(
+        group_id=64,
+        name="status_demo",
+        commands=(
+            Command(0x0001, "status", (R,), response=(Field("st", T.UINT), Field("err", T.INT))),
+        ),
+    )
+    cmd = build(grp).status
+
+    ok = _reply(cmd.Response, {"st": 0, "err": 0}, 0x0001, smp.header.OP.READ_RSP)
+    assert ok.err == 0
+    assert not is_error(ok)
+
+    err = _reply(cmd.ErrorV2, {"err": {"group": 64, "rc": 257}}, 0x0001, smp.header.OP.READ_RSP)
+    assert is_error(err)
 
 
 def test_error_from_another_group_is_not_named_from_ours():

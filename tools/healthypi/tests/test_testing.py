@@ -57,7 +57,7 @@ def test_every_case_declares_a_known_group():
 
 
 def test_destructive_cases_are_marked():
-    """Anything that changes device state must be opt-in. A default `hpi test
+    """Anything that changes device state must be opt-in. A default `healthypi test
     run` is expected to be safe against a unit that is mid-recording."""
     by_name = {c.name: c for c in testing.registry()}
     for name in ("stream start/stop", "record start/stop"):
@@ -183,6 +183,25 @@ def test_a_crashing_case_fails_without_killing_the_suite():
         assert by["explodes"].outcome is Outcome.FAIL
         assert "kaboom" in by["explodes"].detail
         assert by["fine"].outcome is Outcome.PASS
+    finally:
+        S._REGISTRY[:] = saved
+
+
+def test_a_result_carries_its_case_name_whatever_the_case_wrote():
+    """The clock-write case reported its skips as "datetime", the read case's
+    name, so the two were indistinguishable in a report (seen 2026-10-01)."""
+    from healthypi.testing import suite as S
+
+    saved = list(S._REGISTRY)
+    try:
+        S._REGISTRY.clear()
+
+        @S.case("clock write")
+        async def mislabelled(conn, g, is_error, fmt_error):
+            return S.skip("clock", "copied from a sibling case")
+
+        report = asyncio.run(S.run(_FakeConn()))
+        assert [r.name for r in report.results] == ["clock write"]
     finally:
         S._REGISTRY[:] = saved
 

@@ -105,6 +105,7 @@ static struct statusbar_inst {
 	lv_obj_t *title;     /* the title label, or the date label when `date`  */
 	lv_obj_t *link;      /* ESP32 link glyph (hidden while the link is down) */
 	lv_obj_t *usb;       /* USB glyph (hidden while no host is attached)     */
+	lv_obj_t *charge;    /* charge bolt (hidden unless actively charging)    */
 	lv_obj_t *batt;      /* battery percentage                              */
 	lv_obj_t *clock;     /* HH:MM                                           */
 	bool      date;      /* left slot carries the live date, not a title     */
@@ -208,6 +209,10 @@ lv_obj_t *hpi_ui_statusbar_create(lv_obj_t *parent, const char *title)
 	/* Shown only while a USB host is attached; hidden otherwise. */
 	lv_obj_t *usb = sb_icon(right, HPI_SYM_USB, HPI_M3_SUCCESS);
 	lv_obj_add_flag(usb, LV_OBJ_FLAG_HIDDEN);
+	/* Charge bolt: sits between the USB glyph and the battery so the cluster
+	 * reads [host] [charging] [battery] NN%. Hidden unless current flows. */
+	lv_obj_t *charge = sb_icon(right, HPI_SYM_CHARGE, HPI_M3_SUCCESS);
+	lv_obj_add_flag(charge, LV_OBJ_FLAG_HIDDEN);
 	sb_icon(right, HPI_SYM_BATT, HPI_M3_SUCCESS);
 	lv_obj_t *batt = sb_text(right, SB_NA_STR, HPI_M3_ON_SURFACE_VARIANT);
 	lv_obj_t *clock = sb_text(right, SB_NA_STR, HPI_M3_ON_SURFACE);
@@ -221,7 +226,8 @@ lv_obj_t *hpi_ui_statusbar_create(lv_obj_t *parent, const char *title)
 	}
 	*b = (struct statusbar_inst){
 		.bar = bar, .left = left, .title = t, .link = link,
-		.usb = usb, .batt = batt, .clock = clock, .date = (title == NULL),
+		.usb = usb, .charge = charge, .batt = batt, .clock = clock,
+		.date = (title == NULL),
 	};
 	return bar;
 }
@@ -242,15 +248,28 @@ lv_obj_t *hpi_ui_statusbar_left(lv_obj_t *bar)
 	return b ? b->left : NULL;
 }
 
-/* Battery + USB, from one power snapshot. Attachment (from enumeration) and
- * charging (from the BQ24074's CHG pin) are separate signals: charging is
- * shown as a COLOUR on the percentage, attachment as the USB glyph. */
+/*
+ * Battery + USB, from one power snapshot. THREE independent facts, each with
+ * its own indicator, because on real hardware they genuinely come apart:
+ *
+ *   USB glyph  -- a host is attached (enumeration).
+ *   bolt       -- a charge cycle is actually running (BQ24074 CHG pin).
+ *   percentage -- state of charge, tinted while charging or full.
+ *
+ * A unit can show the USB glyph with no bolt and a falling percentage: that is
+ * a host that talks to us but delivers no usable input power, and it is a state
+ * worth being able to see at a glance rather than one to hide. The bolt is
+ * driven by CHARGING only, never FULL -- a bolt on a terminated cell would
+ * claim current that is not flowing.
+ */
 static void sb_render_power(struct statusbar_inst *b,
 			    const struct hpi_power_status *p)
 {
 	char pct[8];
 
-	lv_obj_set_flag(b->usb, LV_OBJ_FLAG_HIDDEN, !p->usb_present);
+	lv_obj_set_flag(b->usb, LV_OBJ_FLAG_HIDDEN, !p->usb_attached);
+	lv_obj_set_flag(b->charge, LV_OBJ_FLAG_HIDDEN,
+			p->charge_state != HPI_CHG_CHARGING);
 
 	if (!p->valid) {
 		sb_label_set(b->batt, SB_NA_STR);
@@ -448,6 +467,45 @@ void hpi_ui_lead_off_text(uint8_t mask, char *buf, size_t len)
 		/* "\xC2\xB7" is the middle dot the rest of the UI separates with. */
 		used += (size_t)snprintf(buf + used, len - used, "%s%s",
 					 used ? " \xC2\xB7 " : "", E[i].name);
+	}
+}
+
+/* ---- status chip ---- */
+lv_obj_t *hpi_ui_chip_create(lv_obj_t *parent, const char *text, lv_color_t col)
+{
+	lv_obj_t *c = lv_obj_create(parent);
+
+	lv_obj_set_size(c, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+	lv_obj_set_style_bg_color(c, col, 0);
+	lv_obj_set_style_bg_opa(c, LV_OPA_20, 0);
+	lv_obj_set_style_radius(c, HPI_M3_RADIUS_PILL, 0);
+	lv_obj_set_style_border_width(c, 0, 0);
+	lv_obj_set_style_pad_hor(c, HPI_M3_SPACE_2, 0);
+	lv_obj_set_style_pad_ver(c, HPI_M3_SPACE_1, 0);
+	lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+
+	lv_obj_t *l = lv_label_create(c);
+
+	lv_label_set_text(l, text);
+	lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
+	lv_obj_set_style_text_color(l, col, 0);
+	return l;   /* the label: what hpi_ui_chip_set() retexts */
+}
+
+void hpi_ui_chip_set(lv_obj_t *chip_label, const char *text, lv_color_t col)
+{
+	if (chip_label == NULL) {
+		return;
+	}
+	/* Same reasoning as sb_label_set(): only touch what actually moved. The
+	 * wash behind the text lives on the parent, so recolour both or neither. */
+	if (strcmp(lv_label_get_text(chip_label), text) != 0) {
+		lv_label_set_text(chip_label, text);
+	}
+	if (lv_color_to_u32(lv_obj_get_style_text_color(chip_label, 0)) !=
+	    lv_color_to_u32(col)) {
+		lv_obj_set_style_text_color(chip_label, col, 0);
+		lv_obj_set_style_bg_color(lv_obj_get_parent(chip_label), col, 0);
 	}
 }
 

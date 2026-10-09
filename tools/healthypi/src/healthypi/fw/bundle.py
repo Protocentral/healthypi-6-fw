@@ -1,7 +1,7 @@
 # Copyright (c) 2026 ProtoCentral Electronics
 # SPDX-License-Identifier: MIT
 
-"""HealthyPi 6 firmware bundle (``.hpifw``) -- create, read, verify.
+"""HealthyPi 6 firmware bundle -- create, read, verify.
 
 A release is one file, not a directory of loose binaries, because a HealthyPi 6
 unit has three independently-updateable processors whose versions have to move
@@ -10,12 +10,16 @@ device ends up with an M7 that no longer understands its M4.
 
 Layout (a plain zip, so it can be inspected without this tool):
 
-    hpi6-2.0.1.hpifw
+    hpi6-firmware-2.0.1.zip
       manifest.json     what is inside, per processor, with digests
       manifest.sig      ECDSA-P256 over sha256(manifest.json), raw r||s
-      m7.signed.bin     MCUboot-signed M7 image      (stock SMP img group)
+      m7.bin            MCUboot-signed M7 image      (stock SMP img group)
       m4.bin            raw M4 image + its signature (group-64 0x00A0-0x00A4)
       esp32c6.bin       optional C6 image            (ESP self-OTA over HTTP)
+
+The extension is not significant: readers open the file as a zip, so bundles
+named ``.hpifw`` (the name used before 2026-10) still work. Releases are
+named ``hpi6-firmware-<version>.zip``.
 
 Signing the MANIFEST rather than the bundle covers every image at once through
 their digests, and keeps verification cheap on a host that has already streamed
@@ -23,7 +27,7 @@ gigabytes. The M7 image additionally carries its own MCUboot signature -- that i
 the one the device enforces; the manifest signature is for the host, so a tool
 can refuse a tampered bundle before it starts writing flash.
 
-Used by ``scripts/release.sh`` (``hpi fw bundle create``) and
+Used by ``scripts/release.sh`` (``healthypi fw bundle create``) and
 :mod:`healthypi.fw.update` (apply).
 """
 
@@ -36,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .keys import KeyError_, sign_digest_raw, verify_digest_raw
+from .keys import KeyError_, fingerprint, release_public_keys, sign_digest_raw, verify_digest_raw
 
 MANIFEST_NAME = "manifest.json"
 SIGNATURE_NAME = "manifest.sig"
@@ -87,7 +91,7 @@ def create(
     key_path: Path,
     created: str,
 ) -> Path:
-    """Write a .hpifw bundle. `created` is passed in rather than read from the
+    """Write a bundle zip. `created` is passed in rather than read from the
     clock so a release build is reproducible."""
     manifest: dict[str, Any] = {
         "format": FORMAT_VERSION,
@@ -143,17 +147,33 @@ def create(
 
 
 class Bundle:
+    """A release bundle: the zip, or the folder it was extracted to.
+
+    The folder form exists because browsers unpack downloads -- Safari's
+    default "Open safe files after downloading" turns hpi6-firmware-*.zip into
+    a directory -- and a user holding that directory has everything the zip
+    had. Nothing is trusted more for it: the digests in manifest.json and the
+    manifest signature are checked exactly as for the zip.
+    """
+
     def __init__(self, path: Path):
         self.path = Path(path)
-        try:
-            self._zf = zipfile.ZipFile(self.path)
-        except FileNotFoundError:
-            raise BundleError(f"{self.path}: no such file") from None
-        except zipfile.BadZipFile as exc:
-            raise BundleError(f"{self.path} is not a .hpifw bundle: {exc}") from exc
+        self._zf: zipfile.ZipFile | None = None
+        self._dir: Path | None = None
+        if self.path.is_dir():
+            self._dir = self.path.resolve()
+        else:
+            try:
+                self._zf = zipfile.ZipFile(self.path)
+            except FileNotFoundError:
+                raise BundleError(f"{self.path}: no such file") from None
+            except zipfile.BadZipFile as exc:
+                raise BundleError(
+                    f"{self.path} is not a firmware bundle (zip): {exc}"
+                ) from exc
 
         try:
-            self.raw_manifest = self._zf.read(MANIFEST_NAME)
+            self.raw_manifest = self._read(MANIFEST_NAME)
         except KeyError:
             raise BundleError(f"{self.path} has no {MANIFEST_NAME}") from None
         self.manifest = json.loads(self.raw_manifest)
@@ -164,6 +184,20 @@ class Bundle:
                 f"{self.path}: bundle format {fmt}, this tool understands "
                 f"{FORMAT_VERSION}"
             )
+
+    def _read(self, member: str) -> bytes:
+        """One member's bytes, from the zip or the extracted folder. Raises
+        KeyError when it is absent, like ZipFile.read()."""
+        if self._zf is not None:
+            return self._zf.read(member)
+        target = (self._dir / member).resolve()
+        # Member names come from manifest.json; never follow one out of the
+        # bundle folder.
+        if self._dir not in target.parents and target != self._dir:
+            raise BundleError(f"{self.path}: member {member!r} is outside the bundle")
+        if not target.is_file():
+            raise KeyError(member)
+        return target.read_bytes()
 
     @property
     def release(self) -> str:
@@ -197,7 +231,7 @@ class Bundle:
         if pubkey is None:
             return
         try:
-            sig = self._zf.read(SIGNATURE_NAME)
+            sig = self._read(SIGNATURE_NAME)
         except KeyError:
             raise BundleError(f"{self.path} is unsigned but a key was given") from None
         digest = hashlib.sha256(self.raw_manifest).digest()
@@ -210,11 +244,51 @@ class Bundle:
                 f"{self.path}: manifest signature does NOT verify against {pubkey}"
             )
 
+    def authenticate(self, pubkey: Path | None = None) -> str:
+        """Check digests, then the manifest signature, and say what was checked.
+
+        With `pubkey`, the signature must verify against it -- the bench case,
+        a dev key, or an owner who re-keyed their unit. Without it, against the
+        HealthyPi 6 release key(s) shipped in this package; any one may match
+        (primary + backup). Only when the package ships no release key is the
+        signature left unchecked, and the returned line says so.
+
+        Every device-facing command goes through here, so "no --pubkey" can no
+        longer mean "anyone's repackaged bundle is accepted".
+        """
+        if pubkey is not None:
+            self.verify(Path(pubkey))
+            return f"manifest signature verified against {pubkey} ({fingerprint(Path(pubkey))})"
+        keys = release_public_keys()
+        if not keys:
+            self.verify(None)
+            return (
+                "note: this healthypi carries no release public key, so the manifest "
+                "signature was NOT checked (digests were). Pass --pubkey to check it."
+            )
+        self.verify(None)  # digests first: a corrupt download is the common case
+        for key in keys:
+            try:
+                self.verify(key)
+            except BundleError:
+                continue
+            return f"manifest signature verified: HealthyPi 6 release key {fingerprint(key)}"
+        known = ", ".join(fingerprint(k) for k in keys)
+        raise BundleError(
+            f"{self.path}: manifest signature does not verify against the HealthyPi 6 "
+            f"release key(s) shipped with this tool ({known}).\n"
+            "  If you built and signed this bundle yourself (your own key, or the dev "
+            "key), pass --pubkey <that key>.pem."
+        )
+
     def read_image(self, name: str) -> bytes:
         entry = self.images().get(name)
         if entry is None:
             raise BundleError(f"no {name} image in {self.path}")
-        return self._zf.read(entry["file"])
+        try:
+            return self._read(entry["file"])
+        except KeyError:
+            raise BundleError(f"{self.path}: {entry['file']} is missing") from None
 
     def image_sig(self, name: str) -> bytes | None:
         entry = self.images().get(name) or {}

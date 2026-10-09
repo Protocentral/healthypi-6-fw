@@ -5,7 +5,7 @@
 
 Two real uses, neither of them "write fake data":
 
-1. ``hpi stream capture`` -- a live CDC0 capture is a *bare frame sequence*, not
+1. ``healthypi stream capture`` -- a live CDC0 capture is a *bare frame sequence*, not
    a valid ``.HP6`` file. Turning one into a file means synthesizing the 256-byte
    header around the frames the device actually sent.
 2. Test fixtures -- an encoder that is exactly the inverse of the decoder is how
