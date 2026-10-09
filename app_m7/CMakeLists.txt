@@ -45,6 +45,9 @@ endif()
 # --- onboard acquisition producers (ECG/PPG -> bus) ---
 target_sources(app PRIVATE
     src/core/acquisition.c
+    src/core/temp_sensor.c
+    src/core/resp_rate.c
+    src/core/imu.c
 )
 
 # --- M4 IPC vitals feed -> bus ---
@@ -82,6 +85,7 @@ target_sources_ifdef(CONFIG_HPI_DISPLAY_ENABLED app PRIVATE
     src/ui/screens/scr_boot.c
     src/ui/screens/scr_trends.c
     src/ui/screens/scr_link.c
+    src/ui/screens/scr_healthylink.c
     src/ui/screens/scr_settings.c
     src/ui/screens/scr_ambient.c
     src/ui/screens/scr_power.c
@@ -144,10 +148,21 @@ target_sources(app PRIVATE
 target_sources(app PRIVATE
     src/healthylink/hl_arbiter.c
     src/healthylink/healthylink_service.c
+    src/healthylink/hlink_proto.c
     src/healthylink/mod_eeg.c
+    src/healthylink/mod_gpio.c
     src/healthylink/mod_npu.c
     src/healthylink/npu_uart_host.c
     src/control/mcumgr_hpi/hpi_modules.c
+)
+target_sources_ifdef(CONFIG_HPI_NPU_COMMS_CHECK app PRIVATE
+    src/healthylink/npu_models.c
+)
+target_sources_ifdef(CONFIG_HPI_NPU_INFER app PRIVATE
+    src/healthylink/npu_infer.c
+)
+target_sources_ifdef(CONFIG_HPI_NPU_STREAM app PRIVATE
+    src/healthylink/npu_stream.c
 )
 
 # SPI4 bring-up loopback diagnostic (gated; default off)

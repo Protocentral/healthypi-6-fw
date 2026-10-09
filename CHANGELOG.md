@@ -6,7 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Versions here are the **firmware** version reported by the device
-(`app_m7/VERSION`, `app_m4/VERSION`) and carried in the `.hpifw` release bundle.
+(`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
+
+## [Unreleased]
+
+### Fixed
+- **QSPI flash is 64 MiB on HealthyPi 6 v5 and later.** The board definition
+  declared the 1 Gbit (128 MiB) W25Q01JV and placed the `/lfs` LittleFS at
+  `0x4000000`; the fitted part is 512 Mbit (64 MiB), which ignores the higher
+  address bit, so LittleFS aliased the start of the chip -- the M7 update slot.
+  An in-app M7 update could hang the device until the watchdog reset it, and
+  each M7 update could silently erase stored settings. The QSPI is now declared
+  as 64 MiB and every partition sits inside it (`xip` 48 MB, `tflite_model` at
+  `0x3000000`, `/lfs` 8 MB at `0x3800000`); the M7 update slot and M4 staging
+  are unchanged. **Settings start empty on the first boot after updating**, as
+  LittleFS moves. The release check now fails a build whose QSPI partitions do
+  not fit the declared part, or a v5+ board that declares anything but 64 MiB.
+
+### Changed
+- The release bundle is now named `hpi6-firmware-<version>.zip` instead of
+  `hpi6-<version>.hpifw`. The format and signing are unchanged: it was always a
+  plain zip. Tools read it by content, so existing `.hpifw` files still work.
 
 ## [1.0.0] — unreleased
 

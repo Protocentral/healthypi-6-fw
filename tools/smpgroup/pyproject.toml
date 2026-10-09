@@ -28,7 +28,9 @@ smp = ["smpclient>=2.0"]
 dev = ["pytest>=8", "smpclient>=2.0"]
 
 [project.urls]
-Source = "https://github.com/protocentral/smpgroup"
+# Lives in the HealthyPi 6 firmware repository until it has its own.
+Source = "https://github.com/Protocentral/healthypi-6-fw/tree/main/tools/smpgroup"
+Issues = "https://github.com/Protocentral/healthypi-6-fw/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

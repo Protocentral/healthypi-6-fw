@@ -2,9 +2,17 @@ License Information
 ===================
 
 Hardware
----------
+--------
 
-**All hardware is released under [Creative Commons Share-alike 4.0 International](http://creativecommons.org/licenses/by-sa/4.0/).**
+The hardware is not in this repository. The KiCad schematics and PCB layouts
+are in [protocentral_healthypi6_hardware](https://github.com/Protocentral/protocentral_healthypi6_hardware)
+and are released under the **CERN Open Hardware Licence Version 2 – Permissive
+(CERN-OHL-P v2)**; see that repository's LICENSE.
+
+Documentation
+-------------
+
+**Documentation in this repository is released under [Creative Commons Share-alike 4.0 International](http://creativecommons.org/licenses/by-sa/4.0/).**
 
 You are free to:
 

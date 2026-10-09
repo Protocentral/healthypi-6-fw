@@ -47,6 +47,25 @@ static enum {
 	PINMUX_STATE_FDCAN1_GPIO,
 } spi6_state = PINMUX_STATE_RESET, fdcan1_state = PINMUX_STATE_RESET;
 
+/*
+ * The SPI6 (PG12/13/14) and FDCAN1 (PH13/14) pins are board-wide singletons
+ * wired to EVERY HealthyLink slot in parallel, so only one slot may drive them
+ * at a time. `pin_owner` is the slot that currently has them, or NULL if they
+ * are free.
+ *
+ * This exists because detection is per-slot: detecting a module in slot B must
+ * not reprogram -- or hi-Z -- the pins a module already running in slot A is
+ * using. A slot that wants them while another slot holds them is refused; the
+ * pins are left exactly as the owner set them.
+ *
+ * Deliberately unlocked. Every caller reaches this through the HealthyLink
+ * service, which serialises bring-up and tear-down of BOTH slots under its own
+ * g_op_lock, so two slots never claim or release concurrently. (The only other
+ * entry, CONFIG_HEALTHYLINK_AUTO_DETECT, runs in single-threaded device init.)
+ * Anything that gives a slot its own detect thread must add a lock here.
+ */
+static const void *pin_owner;
+
 /**
  * @brief Configure a single pin
  *
@@ -299,11 +318,46 @@ void healthylink_pinmux_fdcan1_gpio_get(uint8_t *tx_val, uint8_t *rx_val)
 
 /* High-level Configuration Functions */
 
-int healthylink_pinmux_configure_for_module(uint16_t module_id)
+int healthylink_pinmux_configure_for_module(const void *owner, uint16_t module_id)
 {
 	int ret = 0;
 
 	LOG_INF("Configuring pins for module ID 0x%04X", module_id);
+
+	/*
+	 * Modules that need none of the shared pins never claim them -- they
+	 * just drop any claim this same slot was holding from a previous
+	 * module, which leaves another slot's claim untouched. Compute and the
+	 * GPIO breakout are the two such modules today; an unrecognised module
+	 * is handled the same way in `default:`.
+	 *
+	 * GPIO is a passive breakout: it brings every interface out to headers
+	 * and drives nothing itself. Programming the shared pins on its behalf
+	 * would be guesswork, and it would take them away from the other slot,
+	 * so it gets the devicetree's pin state and nothing more.
+	 */
+	if (module_id == HEALTHYLINK_MODULE_ID_COMPUTE ||
+	    module_id == HEALTHYLINK_MODULE_ID_GPIO) {
+		/*
+		 * HealthyLink Compute (NPU): uses SPI4 only. SPI4 pins
+		 * (PE2/4/5/6) are already configured by the &spi4 pinctrl-0 DT
+		 * entry, so this case MUST stay a no-op: doing SPI6 RCC +
+		 * GPIOG/GPIOH AF writes here wedges the very next SPI4
+		 * transceive.
+		 */
+		LOG_INF("%s: no extra pinmux needed (the devicetree's pin state "
+			"is what this module wants)",
+			healthylink_module_name(module_id));
+		healthylink_pinmux_release(owner);
+		return 0;
+	}
+
+	if (pin_owner != NULL && pin_owner != owner) {
+		LOG_ERR("Module 0x%04X needs the shared SPI6/FDCAN1 pins, but "
+			"another slot's module already has them -- leaving them "
+			"alone", module_id);
+		return -EBUSY;
+	}
 
 	switch (module_id) {
 	case HEALTHYLINK_MODULE_ID_EEG_8CH:
@@ -313,19 +367,6 @@ int healthylink_pinmux_configure_for_module(uint16_t module_id)
 		if (ret == 0) {
 			ret = healthylink_pinmux_fdcan1_to_gpio(HEALTHYLINK_PIN_MODE_HIZ);
 		}
-		break;
-
-	case HEALTHYLINK_MODULE_ID_COMPUTE:
-		/*
-		 * HealthyLink Compute (NPU): uses SPI4 only. SPI4 pins
-		 * (PE2/4/5/6) are already configured by the &spi4 pinctrl-0 DT
-		 * entry, so this case MUST stay a no-op: doing SPI6 RCC +
-		 * GPIOG/GPIOH AF writes here wedges the very next SPI4
-		 * transceive.
-		 */
-		LOG_INF("HealthyLink Compute: no extra pinmux needed (SPI4 already "
-			"configured via DT pinctrl)");
-		ret = 0;
 		break;
 
 	case HEALTHYLINK_MODULE_ID_CAN:
@@ -383,13 +424,34 @@ int healthylink_pinmux_configure_for_module(uint16_t module_id)
 		break;
 
 	default:
-		/* Unknown module: Reset to safe defaults */
-		LOG_WRN("Unknown module 0x%04X, resetting pins to safe state", module_id);
-		ret = healthylink_pinmux_reset();
-		break;
+		/*
+		 * Unknown module: we do not know what it wants, so give it
+		 * nothing. Hand the pins back (a no-op unless this slot held
+		 * them) rather than programming them blind.
+		 */
+		LOG_WRN("Unknown module 0x%04X, leaving the shared pins unclaimed",
+			module_id);
+		healthylink_pinmux_release(owner);
+		return 0;
+	}
+
+	if (ret == 0) {
+		pin_owner = owner;
 	}
 
 	return ret;
+}
+
+void healthylink_pinmux_release(const void *owner)
+{
+	if (pin_owner == NULL || pin_owner != owner) {
+		/* Never ours to give back: either already free, or another
+		 * slot's module is still driving these pins. */
+		return;
+	}
+
+	pin_owner = NULL;
+	(void)healthylink_pinmux_reset();
 }
 
 int healthylink_pinmux_reset(void)

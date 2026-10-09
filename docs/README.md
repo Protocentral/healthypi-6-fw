@@ -36,4 +36,5 @@ Several subsystems here are real code that is **not finished**, and the document
 say so where it matters rather than implying otherwise. In particular: the NPU
 and EEG data links are hardware-gated and default to off; Wi-Fi OTA is not
 enabled; the M4 currently computes the ECG → heart-rate path only; and the
-`rr_bpm` / `temp_c_x100` fields in the sample format are present but read zero.
+`rr_bpm` is thoracic impedance (0 until locked / leads off); `temp_c_x100` is
+the external AS6221 (0 if unplugged).

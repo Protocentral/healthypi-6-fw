@@ -1,7 +1,7 @@
 # Copyright (c) 2026 ProtoCentral Electronics
 # SPDX-License-Identifier: MIT
 
-"""``healthypi`` / ``hpi`` -- the command line.
+"""``healthypi`` -- the command line.
 
 Thin by construction: every verb is a few lines over a library call, mirroring
 the firmware's own rule that a capability is implemented once and adapted
@@ -80,6 +80,8 @@ def _run_device(args, coro_factory) -> int:
                     return _fail(fmt_error(resp), 2)
                 _emit(args, _model_dict(resp))
                 return 0
+        except serial_smp.UnparseableReplyError as exc:
+            return _fail(str(exc), 2)
         except serial_smp.NoDeviceError as exc:
             return _fail(str(exc), 3)
         except (TimeoutError, asyncio.TimeoutError):
@@ -144,6 +146,43 @@ def _conn_enable(args) -> int:
     return _run_device(args, lambda conn, g: conn.request(g["conn_enable"](radios=mask)))
 
 
+def cmd_device_reset(args) -> int:
+    """Reboot the device (stock MCUmgr os reset).
+
+    Needed in the field more often than it looks: a committed M4 image waits
+    for a reset, and an M7 install that leaves the M4 unbound is fixed by one.
+    Without this verb the only instruction available was "power-cycle it".
+    """
+    import asyncio
+
+    try:
+        from smpclient.requests.os_management import ResetWrite
+    except ImportError:
+        return _fail(
+            "this command needs the device stack, which is not installed.\n"
+            "  Run: pip install 'healthypi[device]'",
+            4,
+        )
+
+    async def reset(conn, g):
+        from ..smp.group64 import is_error
+
+        try:
+            resp = await conn.request(ResetWrite(), timeout_s=3.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            resp = None  # rebooted before the reply got out: that is success
+        if resp is not None and is_error(resp):
+            return resp  # a refusal: _run_device names it and exits non-zero
+        print(
+            "reset sent; the device re-enumerates in a few seconds "
+            "(its M4 reports a version again ~10 s after boot).",
+            file=sys.stderr,
+        )
+        return None
+
+    return _run_device(args, reset)
+
+
 def cmd_device_datetime(args) -> int:
     """Read, or set, the on-device RTC.
 
@@ -203,6 +242,8 @@ def cmd_device_datetime(args) -> int:
                 dt = getattr(resp, "datetime", None)
                 _emit(args, {"datetime": dt}, f"RTC: {dt}")
                 return 0
+        except serial_smp.UnparseableReplyError as exc:
+            return _fail(str(exc), 2)
         except serial_smp.NoDeviceError as exc:
             return _fail(str(exc), 3)
         except (TimeoutError, asyncio.TimeoutError):
@@ -425,7 +466,7 @@ def cmd_stream_capture(args) -> int:
     if not raw:
         return _fail(
             f"no data on {args.stream_port}. Is streaming enabled "
-            "(hpi stream start) and is this CDC 0?"
+            "(healthypi stream start) and is this CDC 0?"
         )
     hp6.wrap_capture(raw, args.out, hp6.new_header(session_name=args.name or "capture"))
     rep = hp6.verify(args.out)
@@ -496,6 +537,30 @@ def _bundle_or_fail(args):
         return None, _fail(str(exc))
 
 
+def cmd_fw_keys(args) -> int:
+    """The release public keys this tool trusts, or one key's fingerprint."""
+    try:
+        from ..fw.keys import RELEASE_KEY_DIR, fingerprint, release_public_keys
+    except ImportError:
+        return _fail("this command needs `cryptography`: pip install 'protocentral-healthypi[device]'", 4)
+    if args.key:
+        from pathlib import Path
+
+        try:
+            print(f"{fingerprint(Path(args.key))}  {args.key}")
+        except (OSError, ValueError) as exc:
+            return _fail(f"{args.key}: not a PEM key ({exc})")
+        return 0
+    keys = release_public_keys()
+    if not keys:
+        print(f"no release public key shipped in {RELEASE_KEY_DIR}")
+        print("  bundles are checked for digests only unless --pubkey is given")
+        return 0
+    for k in keys:
+        print(f"{fingerprint(k)}  {k.name}")
+    return 0
+
+
 def cmd_fw_info(args) -> int:
     from ..fw import BundleError
 
@@ -503,17 +568,14 @@ def cmd_fw_info(args) -> int:
     if bundle is None:
         return err
     try:
-        bundle.verify(args.pubkey)
+        checked = bundle.authenticate(args.pubkey)
     except BundleError as exc:
         return _fail(str(exc))
     if getattr(args, "json", False):
         _emit(args, bundle.manifest)
         return 0
     print(bundle.describe())
-    if args.pubkey:
-        print(f"  manifest signature verified against {args.pubkey}")
-    else:
-        print("  digests OK (pass --pubkey to check the manifest signature too)")
+    print(f"  {checked}")
     return 0
 
 
@@ -578,6 +640,8 @@ def _fw_device(args, coro_factory) -> int:
     try:
         return asyncio.run(coro_factory(target))
     except UpdateError as exc:
+        return _fail(str(exc), 2)
+    except serial_smp.UnparseableReplyError as exc:
         return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
@@ -693,6 +757,267 @@ def cmd_hl_eeprom_read(args) -> int:
     return 0 if info.crc_valid else 1
 
 
+def _hl_device(args, coro_factory) -> int:
+    """Run one multi-step ID-EEPROM flow over CDC 1.
+
+    Not ``_run_device``: programming is read, write, verify and rescan across
+    several commands, and it prints as it goes instead of returning a single
+    reply to render.
+    """
+    import asyncio
+
+    try:
+        from ..hw.program import ProgramError
+        from ..smp.group64 import g
+        from ..transport import serial_smp
+    except ImportError:
+        return _fail(
+            "this command needs the device stack, which is not installed.\n"
+            "  Run: pip install 'healthypi[device]'",
+            4,
+        )
+
+    async def _main() -> int:
+        try:
+            async with serial_smp.session(
+                args.port, baud=args.baud, frame_size=args.frame_size
+            ) as conn:
+                # Caught INSIDE the session: an exception that escapes the
+                # `async with` is logged by smpclient with a full traceback
+                # before we ever get to print one clean line.
+                try:
+                    return await coro_factory(conn, g)
+                except ProgramError as exc:
+                    return _fail(str(exc), 2)
+                except serial_smp.UnparseableReplyError as exc:
+                    return _fail(str(exc), 2)
+        except serial_smp.NoDeviceError as exc:
+            return _fail(str(exc), 3)
+        except (TimeoutError, asyncio.TimeoutError):
+            where = args.port or "the detected port"
+            return _fail(
+                f"no response from {where}. Is it CDC 1 (the control port)? "
+                "CDC 0 carries the sample stream and never answers.",
+                3,
+            )
+        except OSError as exc:
+            return _fail(f"could not open {args.port or 'the port'}: {exc}", 3)
+
+    try:
+        return asyncio.run(_main())
+    except KeyboardInterrupt:
+        return 130
+
+
+def _hl_image_from_args(args) -> tuple[bytes | None, int]:
+    """The image a ``program`` run should write: a file, or one built here."""
+    from pathlib import Path
+
+    from ..hw import eeprom
+
+    if args.from_file:
+        try:
+            image = Path(args.from_file).read_bytes()
+        except OSError as exc:
+            return None, _fail(str(exc))
+        if len(image) != eeprom.EEPROM_SIZE:
+            return None, _fail(
+                f"{args.from_file} is {len(image)} bytes; an EEPROM image is "
+                f"{eeprom.EEPROM_SIZE}"
+            )
+        return image, 0
+
+    if not args.module_id or not args.name:
+        return None, _fail(
+            "give --module-id and --name (or --from-file with a built image). "
+            "Names: " + ", ".join(eeprom.MODULE_IDS)
+        )
+    try:
+        return eeprom.create_image(
+            module_id=eeprom.resolve_module_id(args.module_id),
+            name=args.name,
+            manufacturer=args.manufacturer,
+            serial=args.serial,
+            hw_rev_major=args.hw_major,
+            hw_rev_minor=args.hw_minor,
+            fw_compat_min=args.fw_compat,
+            capabilities=eeprom.resolve_capabilities(args.capabilities),
+            stack_position=args.stack_position,
+        ), 0
+    except (eeprom.EepromError, ValueError) as exc:
+        return None, _fail(str(exc))
+
+
+def cmd_hl_eeprom_program(args) -> int:
+    """Write a module identity into the slot's EEPROM, through the device."""
+    from ..hw import program
+
+    try:
+        slot = program.resolve_slot(args.slot)
+    except program.ProgramError as exc:
+        return _fail(str(exc))
+
+    image, err = _hl_image_from_args(args)
+    if image is None:
+        return err
+
+    async def run(conn, g) -> int:
+        from ..hw import eeprom
+
+        name = program.slot_name(slot)
+        before = await program.read_existing(conn, g, slot)
+
+        if before.raw == image:
+            print(f"slot {name} already carries exactly this image — nothing written")
+        else:
+            if before.valid and not args.force:
+                return _fail(
+                    f"slot {name} already holds a valid image:\n"
+                    f"{before.describe()}\n"
+                    "Pass --force to overwrite it.",
+                    2,
+                )
+            print(f"slot {name}: {before.describe().splitlines()[0]}")
+            print(f"writing {len(image)} B ...", end="", flush=True)
+            await program.write_image(
+                conn, g, slot, image,
+                progress=lambda done, total: print(
+                    f"\rwriting {done}/{total} B ...", end="", flush=True
+                ),
+            )
+            print(" verified")
+
+        # An image from --from-file is whatever the user handed us; report it
+        # rather than crashing on something that is not a HealthyLink header.
+        try:
+            after = eeprom.parse_image(image)
+        except eeprom.EepromError as exc:
+            print(f"note: wrote {len(image)} B that do not parse as a "
+                  f"HealthyLink image ({exc})")
+            after = None
+        if args.rescan:
+            # A written identity only takes effect at the next detect, and
+            # `on` alone does not re-detect a slot that is already active
+            # (healthylink_service.c) -- which is exactly the case when a
+            # module is being re-identified. So: off, then on.
+            from ..smp.group64 import fmt_error, is_error
+
+            await conn.request(g.module_power(slot=slot, on=False))
+            resp = await conn.request(g.module_power(slot=slot, on=True))
+            if is_error(resp):
+                print(f"note: rescan refused: {fmt_error(resp)}")
+            elif not resp.ok:
+                print(f"note: slot {name} did not come up active — "
+                      f"see `healthypi module list`")
+
+        if after is not None:
+            if getattr(args, "json", False):
+                _emit(args, {"slot": name, **after.to_dict()})
+            else:
+                print()
+                print(after.describe())
+        return 0
+
+    return _hl_device(args, run)
+
+
+def cmd_hl_eeprom_dump(args) -> int:
+    """Read a slot's EEPROM and say what is on it."""
+    from ..hw import program
+
+    try:
+        slot = program.resolve_slot(args.slot)
+    except program.ProgramError as exc:
+        return _fail(str(exc))
+
+    async def run(conn, g) -> int:
+        from pathlib import Path
+
+        found = await program.read_existing(conn, g, slot)
+        if args.output:
+            Path(args.output).write_bytes(found.raw)
+        if getattr(args, "json", False):
+            _emit(args, {
+                "slot": program.slot_name(slot),
+                "blank": found.blank,
+                "file": args.output,
+                **(found.info.to_dict() if found.info else {"error": found.error}),
+            })
+        else:
+            print(f"slot {program.slot_name(slot)}:")
+            print(found.describe())
+            if args.output:
+                print(f"\n256 B written to {args.output}")
+        # A chip that answers but holds nothing valid is not an error worth a
+        # non-zero exit; a bad CRC is, because that is a module the device will
+        # refuse to power.
+        return 0 if found.info is None or found.info.crc_valid else 1
+
+    return _hl_device(args, run)
+
+
+def cmd_hl_eeprom_erase(args) -> int:
+    """Return a slot's EEPROM to its factory-blank 0xFF."""
+    from ..hw import eeprom, program
+
+    try:
+        slot = program.resolve_slot(args.slot)
+    except program.ProgramError as exc:
+        return _fail(str(exc))
+    if not args.yes:
+        return _fail(
+            f"this erases slot {program.slot_name(slot)}'s module identity. "
+            "Pass --yes to confirm."
+        )
+
+    async def run(conn, g) -> int:
+        await program.write_image(conn, g, slot, b"\xff" * eeprom.EEPROM_SIZE)
+        print(f"slot {program.slot_name(slot)}: erased (256 B of 0xFF, verified)")
+        return 0
+
+    return _hl_device(args, run)
+
+
+def cmd_hl_scan(args) -> int:
+    """Which addresses answer on the slot's I2C bus, rail off and rail on.
+
+    Both slots share one bus (I2C3 on v5) and the two ID EEPROMs are the only
+    devices on it, so this is the one measurement that separates "no module",
+    "module at the wrong address" and "the bus is not working".
+    """
+    from ..hw import program
+
+    try:
+        slot = program.resolve_slot(args.slot)
+    except program.ProgramError as exc:
+        return _fail(str(exc))
+
+    async def run(conn, g) -> int:
+        off = await program.bus_scan(conn, g, slot, powered=False)
+        on = await program.bus_scan(conn, g, slot, powered=True)
+
+        if getattr(args, "json", False):
+            _emit(args, {
+                "slot": program.slot_name(slot),
+                "rail_off": [f"0x{a:02X}" for a in off],
+                "rail_on": [f"0x{a:02X}" for a in on],
+            })
+            return 0
+
+        def fmt(addrs):
+            return " ".join(f"0x{a:02X}" for a in addrs) if addrs else "(nothing)"
+
+        print(f"slot {program.slot_name(slot)} I2C bus — shared by both slots")
+        print(f"  rail off : {fmt(off)}")
+        print(f"  rail on  : {fmt(on)}")
+        print()
+        for line in program.explain_scan(slot, off, on):
+            print(line)
+        return 0
+
+    return _hl_device(args, run)
+
+
 def cmd_hl_eeprom_stack(args) -> int:
     from pathlib import Path
 
@@ -801,6 +1126,8 @@ def cmd_test_run(args) -> int:
 
     try:
         return asyncio.run(_main())
+    except serial_smp.UnparseableReplyError as exc:
+        return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
     except KeyboardInterrupt:
@@ -852,36 +1179,104 @@ def cmd_test_soak(args) -> int:
 
     try:
         return asyncio.run(_main())
+    except serial_smp.UnparseableReplyError as exc:
+        return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
     except KeyboardInterrupt:
         return 130
 
 
+def _field_json(f) -> dict[str, Any]:
+    out: dict[str, Any] = {"name": f.name, "type": f.type.value}
+    if f.optional:
+        out["optional"] = True
+    if f.doc:
+        out["doc"] = f.doc
+    if f.nested:
+        out["nested"] = [_field_json(n) for n in f.nested]
+    return out
+
+
+def _command_json(c, full: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": f"0x{c.cmd_id:04X}",
+        "name": c.name,
+        "ops": [o.value for o in c.ops],
+        "status": c.status.value,
+        "unlock": bool(c.meta.get("unlock")),
+        "signed_build": bool(c.meta.get("signed_build")),
+    }
+    if full:
+        for key in ("request", "response", "write_request", "write_response"):
+            fields = getattr(c, key)
+            if fields:
+                out[key] = [_field_json(f) for f in fields]
+        if c.errors:
+            out["errors"] = list(c.errors)
+        if c.doc:
+            out["doc"] = c.doc
+    return out
+
+
+def _formats_json() -> dict[str, Any]:
+    """The .HP6 DBLK layout this build decodes: the host-side mirror of
+    app_m7/src/core/sample_formats.h, for consumers that generate code from it."""
+    from ..hp6 import format as f
+
+    def flags(prefix: str) -> dict[str, int]:
+        return {
+            k[len(prefix):]: v
+            for k, v in vars(f).items()
+            if k.startswith(prefix) and isinstance(v, int) and not isinstance(v, bool)
+        }
+
+    return {
+        "file_version": f"0x{f.FILE_VERSION:04X}",
+        "dblk_header_len": f.DBLK_HDR_LEN,
+        "dblk_crc_len": f.DBLK_CRC_LEN,
+        "channels": {ch.name: int(ch) for ch in f.Channel},
+        "payloads": {
+            f.Channel(ch).name: {
+                "channel": int(ch),
+                "size": cls.SIZE,
+                "struct": cls._STRUCT.format,
+            }
+            for ch, cls in sorted(f.PAYLOADS.items())
+        },
+        "flags": {
+            "lead_off": flags("LEAD_OFF_"),
+            "vitals": flags("VIT_"),
+            "infer": flags("INF_"),
+        },
+    }
+
+
 def cmd_catalog(args) -> int:
     """Print the group-64 surface this build knows about."""
+    from .. import __version__
     from ..smp import catalog
 
+    if getattr(args, "formats", False):
+        args.json = True
+        _emit(args, {"tool_version": __version__, **_formats_json()})
+        return 0
     if getattr(args, "json", False):
-        _emit(
-            args,
-            {
-                "group_id": catalog.GROUP_ID,
-                "schema_version": catalog.SCHEMA_VERSION,
-                "commands": [
-                    {
-                        "id": f"0x{c.cmd_id:04X}",
-                        "name": c.name,
-                        "ops": [o.value for o in c.ops],
-                        "status": c.status.value,
-                        "unlock": bool(c.meta.get("unlock")),
-                        "signed_build": bool(c.meta.get("signed_build")),
-                    }
-                    for c in catalog.COMMANDS
-                ],
-                "errors": {k: v[0] for k, v in catalog.ERRORS.items()},
-            },
-        )
+        full = bool(getattr(args, "full", False))
+        doc: dict[str, Any] = {
+            "group_id": catalog.GROUP_ID,
+            "schema_version": catalog.SCHEMA_VERSION,
+            "commands": [_command_json(c, full) for c in catalog.COMMANDS],
+            "errors": {k: v[0] for k, v in catalog.ERRORS.items()},
+        }
+        if full:
+            doc = {"tool_version": __version__, **doc}
+            doc["error_hints"] = {k: v[1] for k, v in catalog.ERRORS.items()}
+            doc["stock_errors"] = {
+                g: {k: v[0] for k, v in codes.items()}
+                for g, codes in catalog.STOCK_ERRORS.items()
+            }
+        _emit(args, doc)
         return 0
     print(catalog.HPI_GROUP.describe())
     print(
@@ -954,6 +1349,10 @@ def build_parser() -> argparse.ArgumentParser:
         _add_device_opts(p)
         p.set_defaults(func=_simple(cmd))
 
+    p = devs.add_parser("reset", help="reboot the device")
+    _add_device_opts(p)
+    p.set_defaults(func=cmd_device_reset)
+
     p = devs.add_parser("datetime", help="read or set the on-device clock")
     _add_device_opts(p)
     p.add_argument(
@@ -1013,8 +1412,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_simple("sd_status"))
 
     rec.epilog = (
-        "Recordings are retrieved over USB mass storage: `hpi transfer arm`, "
-        "copy from the mounted disk, then `hpi transfer disarm`. Firmware 1.0.0 "
+        "Recordings are retrieved over USB mass storage: `healthypi transfer arm`, "
+        "copy from the mounted disk, then `healthypi transfer disarm`. Firmware 1.0.0 "
         "has no file-download command."
     )
 
@@ -1123,16 +1522,24 @@ def build_parser() -> argparse.ArgumentParser:
     fw = sub.add_parser("fw", help="firmware bundles, update and recovery")
     fws = fw.add_subparsers(dest="verb", metavar="<verb>")
 
+    p = fws.add_parser("keys", help="release keys this tool trusts; or a key's fingerprint")
+    p.add_argument("--key", help="print this PEM key's fingerprint instead")
+    p.set_defaults(func=cmd_fw_keys)
+
     p = fws.add_parser("info", help="describe a bundle (no device needed)")
-    p.add_argument("--bundle", required=True)
-    p.add_argument("--pubkey", help="PEM key to verify the manifest signature")
+    p.add_argument("--bundle", required=True,
+                   help="the release .zip, or the folder it was extracted to")
+    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+                   "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_fw_info)
 
     p = fws.add_parser("update", help="bring a device up to a bundle")
     _add_device_opts(p)
-    p.add_argument("--bundle", required=True)
-    p.add_argument("--pubkey", help="PEM key to verify the manifest signature")
+    p.add_argument("--bundle", required=True,
+                   help="the release .zip, or the folder it was extracted to")
+    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+                   "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.add_argument("--only", choices=("esp32c6", "m4", "m7"),
                    help="restrict to one processor")
     p.add_argument("--force", action="store_true",
@@ -1149,14 +1556,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = fws.add_parser("recover",
                        help="write the M7 to a device already in recovery")
     _add_device_opts(p)
-    p.add_argument("--bundle", required=True)
-    p.add_argument("--pubkey")
+    p.add_argument("--bundle", required=True,
+                   help="the release .zip, or the folder it was extracted to")
+    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+                   "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.set_defaults(func=cmd_fw_recover)
 
     bnd = fws.add_parser("bundle", help="build a release bundle")
     bnds = bnd.add_subparsers(dest="bundle_verb", metavar="<verb>")
-    p = bnds.add_parser("create", help="pack signed images into a .hpifw")
-    p.add_argument("out", help="output .hpifw path")
+    p = bnds.add_parser("create", help="pack signed images into a bundle zip")
+    p.add_argument("out", help="output path, e.g. hpi6-firmware-1.0.3.zip")
     p.add_argument("--m7", required=True, help="MCUboot-signed M7 image")
     p.add_argument("--m7-version", required=True)
     p.add_argument("--m4", required=True, help="raw M4 image")
@@ -1205,6 +1614,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_hl_eeprom_read)
 
+    # -- through the device, no external programmer -------------------------
+    p = ees.add_parser(
+        "program",
+        help="write a module identity into a slot's EEPROM, via the device",
+    )
+    _add_device_opts(p)
+    p.add_argument("--slot", required=True, help="a or b")
+    p.add_argument("--module-id", "-m", help="name (GPIO), 0x000A, or a decimal id")
+    p.add_argument("--name", "-n", help="module name (max 31 chars)")
+    p.add_argument("--manufacturer", default="ProtoCentral")
+    p.add_argument("--serial", "-s", type=int, default=1)
+    p.add_argument("--hw-major", type=int, default=1)
+    p.add_argument("--hw-minor", type=int, default=0)
+    p.add_argument("--fw-compat", type=lambda x: int(x, 0), default=0x0110)
+    p.add_argument("--caps", "--capabilities", dest="capabilities", nargs="*",
+                   help="capability flags by name, 0x… or decimal; "
+                        "the module id's defaults are used if omitted")
+    p.add_argument("--stack-position", type=int, default=0,
+                   help="0 = base, 1-3 = stacked")
+    p.add_argument("--from-file", help="write this 256-byte image instead of "
+                                       "building one")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite an EEPROM that already holds a valid image")
+    p.add_argument("--no-rescan", dest="rescan", action="store_false",
+                   help="skip the re-detect that makes the new identity live")
+    p.set_defaults(func=cmd_hl_eeprom_program, rescan=True)
+
+    p = ees.add_parser("dump", help="read a slot's EEPROM from the device")
+    _add_device_opts(p)
+    p.add_argument("--slot", required=True, help="a or b")
+    p.add_argument("--output", "-o", help="also save the raw 256 bytes here")
+    p.set_defaults(func=cmd_hl_eeprom_dump)
+
+    p = ees.add_parser("erase", help="blank a slot's EEPROM (0xFF), via the device")
+    _add_device_opts(p)
+    p.add_argument("--slot", required=True, help="a or b")
+    p.add_argument("--yes", action="store_true", help="confirm the erase")
+    p.set_defaults(func=cmd_hl_eeprom_erase)
+
     p = ees.add_parser("stack", help="build a set for stacked modules")
     p.add_argument("--modules", nargs="+", required=True,
                    help="ID[:Name[:Manufacturer[:Serial]]], in stack order")
@@ -1213,10 +1661,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_hl_eeprom_stack)
 
+    p = hls.add_parser("scan", help="which addresses answer on the slot's I2C bus")
+    _add_device_opts(p)
+    p.add_argument("--slot", required=True, help="a or b")
+    p.set_defaults(func=cmd_hl_scan)
+
     ee.epilog = (
-        "Writing an image to a real 24AA02 needs an external programmer "
-        "(FT232H, Raspberry Pi I2C, CH341A, Bus Pirate) and its own tool — "
-        "this builds the file."
+        "program/dump/erase go through a connected HealthyPi on CDC 1, which "
+        "is wired to both slot EEPROMs — no external programmer, and the "
+        "module stays in its slot. generate/read/stack are offline and touch "
+        "no hardware. An unslotted module still needs a programmer (FT232H, "
+        "Raspberry Pi I2C, CH341A, Bus Pirate): build the file with generate."
     )
 
     # -- test ---------------------------------------------------------------
@@ -1251,6 +1706,16 @@ def build_parser() -> argparse.ArgumentParser:
     # -- catalog ------------------------------------------------------------
     p = sub.add_parser("catalog", help="the group-64 command surface")
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="with --json: include request/reply field schemas and error hints",
+    )
+    p.add_argument(
+        "--formats",
+        action="store_true",
+        help="print the .HP6 DBLK payload layouts as JSON instead",
+    )
     p.set_defaults(func=cmd_catalog)
 
     return ap
@@ -1278,7 +1743,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = build_parser()
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):
-        # `hpi`, or `hpi hp6` with no verb: show the relevant help.
+        # `healthypi`, or `healthypi hp6` with no verb: show the right help.
         if getattr(args, "group", None):
             for action in ap._subparsers._group_actions[0].choices.items():  # type: ignore[union-attr]
                 if action[0] == args.group:

@@ -18,7 +18,7 @@ send a custom group ID — most can.
 - [8. Reserved command IDs](#8-reserved-command-ids)
 - [9. Compatibility](#9-compatibility)
 
-Firmware 1.0.0 · group schema version `0x0001`.
+Firmware 1.0.0 · group schema version `0x0002`.
 
 ---
 
@@ -207,7 +207,7 @@ Request `{}` →
 | `ibat_ma` | **int** | Battery current, mA — signed; negative while charging |
 | `soc` | uint | State of charge, % |
 | `tc_x10` | **int** | Temperature × 10 — **always the unavailable sentinel in 1.0.0** |
-| `charge` | uint | Charge state |
+| `charge` | uint | Charge state, from the charger's status pins: 0 discharging · 1 charging · 2 full (charging terminated; independent of `soc`) · 3 fault (charger safety timer expired) |
 | `usb` | bool | USB power present |
 | `batt` | bool | Running on battery — currently just `!usb` |
 | `ok` | bool | Reading is valid |
@@ -389,11 +389,72 @@ Request `{}` → a map **keyed by slot**, not an array:
   "b": {"state": u, "id": u, "pwr": bool, "name": tstr} }
 ```
 
-`state` values in §7.5.
+`state` values in §7.5. `pwr` is the slot's load-switch enable as the
+firmware last drove it — the command, not a measurement of the rail. A slot is
+powered only while its module is running.
 
 #### `0x0052` module_power — write · 🔒 lock
 
-`slot` uint, `on` bool → `ok` bool.
+`slot` uint (`0` = A, `1` = B), `on` bool → `ok` bool.
+
+`on: true` re-detects the slot from its ID EEPROM and starts whatever it finds,
+so it is also how to retry a slot in state 3, 4 or 5, and how to rescan an empty
+one. `ok` is true only if the slot ends up active (state 2). `on: false` stops
+the module, releases its interfaces and cuts the rail. The slot then reads
+state 5, or 0 if it was empty; `ok` is true.
+
+#### `0x0053` module_eeprom_read — read · 🔒 lock
+
+`slot` uint (`0` = A, `1` = B), `off` uint (0–255), `len` uint (1–64) →
+`off` uint, `data` bstr.
+
+Raw bytes from the slot's identification EEPROM — the 256-byte image described
+in [HEALTHYLINK.md §4.3](HEALTHYLINK.md). The device does not parse what it
+returns; a request that runs past byte 255, or asks for more than 64 bytes,
+is `EINVAL`. A slot with no EEPROM answering (empty, or a module that will not
+ACK) is `256 NOT_READY`, and an I2C failure is `257 HW_FAULT`.
+
+Unlock-gated: a NAK on the unpowered probe retries with the slot rail on, which
+pulses `EN_MOD_x` — the same privilege as `module_i2c_scan`.
+
+#### `0x0054` module_eeprom_write — write · 🔒 lock
+
+`slot` uint, `off` uint, `data` bstr (1–64 bytes) → `off` uint, `len` uint,
+echoing what was written.
+
+The counterpart, and the reason a module can be identified over the same cable
+as everything else instead of needing an external I2C programmer. The device
+writes the bytes and nothing more: it does not check the magic, recompute the
+CRC, or care whether the module ID means anything to this firmware. **That is
+deliberate** — it is what lets a module type newer than the firmware be
+programmed — and the consequence is that a half-finished write leaves a module
+whose identity is neither the old one nor the new one. Write the whole image,
+then read it back and compare.
+
+The 24AA02's 8-byte pages and 5 ms write cycle are handled on the device, so a
+chunk only has to fit the SMP frame.
+
+A written identity takes effect at the **next detect**: follow with
+`module_power {slot, on: true}`. `healthypi hl eeprom program` does all of
+this — build, write, verify, rescan — in one command.
+
+#### `0x0055` module_i2c_scan — read · 🔒 lock
+
+`slot` uint, `pwr` bool (optional, default false) → `addrs` bstr, one byte per
+responding 7-bit address.
+
+A bring-up instrument. Both slots' ID EEPROMs share one I²C bus and are the only
+devices on it, so a slot that answers nothing gives no way to tell a module that
+is not responding from a bus that is not working — and "the module is at the
+wrong address" looks the same as "there is no module". This separates all three.
+The probe is a zero-length write: whatever answers is neither read nor written.
+
+`pwr: true` scans with the slot rail on and puts it back afterwards, which is
+what identifies a module whose EEPROM sits behind the load switch instead of on
+the always-on rail. That is also why the command is lock-gated — it can energise
+a module whose identity is not yet known.
+
+`healthypi hl scan --slot a` runs it both ways and interprets the result.
 
 ### 5.8. Diagnostics
 
@@ -460,7 +521,7 @@ of these. The M7 firmware itself updates through the stock `img` group.
 
 | ID | Command | Op | 🔒 | Request | Response |
 |---|---|---|---|---|---|
-| `0x00A0` | m4fw_begin | write | 🔒 | `len` uint, `sha` bstr, `sig` bstr (optional) | `off` uint |
+| `0x00A0` | m4fw_begin | write | 🔒 | `len` uint, `sha` bstr, `sig` bstr (optional) | `{}` |
 | `0x00A1` | m4fw_chunk | write | 🔒 | `off` uint, `data` bstr | `off` uint |
 | `0x00A2` | m4fw_commit | write | 🔒 | `{}` | `rst` bool |
 | `0x00A3` | m4fw_status | read | | `{}` | `st`, `len`, `rx` uint, `err` int, `rst`, `sig` bool |
@@ -468,8 +529,9 @@ of these. The M7 firmware itself updates through the stock `img` group.
 
 **Call `m4fw_status` first.** Its `sig` field tells you whether this firmware
 requires a signature before you spend minutes uploading an image it will reject.
-`off` in the `begin` reply is a resume offset, so an interrupted upload can
-continue rather than restart.
+`begin` replies with an empty map and always starts the upload from offset 0;
+an interrupted upload cannot be resumed and must be restarted with `begin`.
+Each `chunk` reply's `off` is the next offset the device expects.
 
 The target flash is written only after the whole image has arrived *and* its
 SHA-256 matches *and*, when required, its signature verifies — so an interrupted
@@ -502,7 +564,11 @@ Standard MCUmgr codes apply: `0` OK, `2` unknown, `3` invalid argument,
 `4` message too large, `8` not supported, `11` access denied (locked).
 
 HealthyPi adds codes from 256 upward, returned in the reply's error map as
-`{"group": 64, "rc": <code>}`:
+`{"group": 64, "rc": <code>}` — **never** as a top-level `rc`, which is the
+protocol-wide namespace where those numbers do not exist. Read the two shapes
+differently: a top-level `{"rc": n}` is a standard MCUmgr code, and `n` in an
+error map means whatever the named group says it means. A client that reads a
+group code against the standard table reports a confident lie.
 
 | Code | Name | Meaning |
 |---|---|---|
@@ -569,7 +635,29 @@ filter the stream. Derived values arrive in vitals blocks either way.
 ### 7.5. Module slot state
 
 `0` empty · `1` module present but unsupported · `2` active · `3` error during
-probe or claim · `4` quarantined after a fault
+probe or claim · `4` quarantined after a fault · `5` module present, powered
+off on request
+
+### 7.6. Module IDs
+
+From the ID EEPROM's `module_id` field, and from `module_list`'s `id`:
+
+| ID | Module |
+|----|--------|
+| `0x0001` | EEG-8CH (ADS1299) |
+| `0x0002` | EMG-4CH |
+| `0x0003` | TRIGGER-IO |
+| `0x0004` | CAN-INTERFACE |
+| `0x0005` | HealthyLink Compute (STM32N657 NPU) |
+| `0x0006` | HIGH-RES-ADC |
+| `0x0007` | STIM-OUTPUT |
+| `0x0008` | SYNC-MASTER |
+| `0x0009` | GSR-RESPIRATION |
+| `0x000A` | GPIO — passive breakout: headers for every interface, no claim |
+
+`0x000B`–`0x00FF` are reserved for ProtoCentral; `0x0100`–`0xFFFE` are free for
+community and third-party modules. A module whose ID has no provider in the
+running firmware is reported in state `1` (unsupported) and left unpowered.
 
 ---
 
@@ -592,7 +680,7 @@ recordings off the device.**
 
 ## 9. Compatibility
 
-`device_info.gv` reports the group schema version, currently `0x0001`. Within a
+`device_info.gv` reports the group schema version, currently `0x0002`. Within a
 major schema version:
 
 - Command IDs and their meanings do not change.

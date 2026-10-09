@@ -8,13 +8,12 @@
  * like the onboard sensors, so EEG reaches stream/recording/UI with zero
  * special-casing.
  *
- * Bus: the ADS1299 shares **SPI4** with the NPU (slot A; the two modules are
- * mutually exclusive). The `ads1299` node exists in the base DT (deferred-
- * init), so node-existence alone does NOT mean the active path can build --
- * the ADS1299 sensor driver (CONFIG_SENSOR_ADS1299) supplies the symbols this
- * code uses. The full path (init -> DATA_READY -> read 8 ch -> batch 16 ->
- * publish) compiles only when the driver is enabled AND the node is okay;
- * otherwise start() logs and no-ops.
+ * Bus: the ADS1299 shares **SPI4** with the NPU (the arbiter runs one SPI4
+ * module at a time). There is one ADS1299 node per slot (`ads1299`,
+ * `ads1299_b`; they differ only in reset), and start() brings up the one for
+ * the module's slot. The full path (init -> DATA_READY -> read 8 ch -> batch
+ * 16 -> publish) compiles only when CONFIG_SENSOR_ADS1299 is enabled AND the
+ * slot-A node is okay; otherwise start() logs and no-ops.
  */
 
 #include "hl_provider.h"
@@ -25,7 +24,8 @@
 
 LOG_MODULE_REGISTER(mod_eeg, CONFIG_HPI_APP_LOG_LEVEL);
 
-#define EEG_NODE DT_NODELABEL(ads1299)
+#define EEG_NODE   DT_NODELABEL(ads1299)
+#define EEG_NODE_B DT_NODELABEL(ads1299_b)
 
 /* Active path requires BOTH the node enabled AND the ADS1299 driver built --
  * the node alone is in the base DT as deferred-init even with no board. */
@@ -45,7 +45,22 @@ LOG_MODULE_REGISTER(mod_eeg, CONFIG_HPI_APP_LOG_LEVEL);
 
 #define EEG_BATCH 16
 
-static const struct device *const eeg_dev = DEVICE_DT_GET(EEG_NODE);
+/* The ADS1299 for a slot, or NULL if this board has none there. */
+static const struct device *eeg_dev_for(hl_slot_t slot)
+{
+    switch (slot) {
+    case HL_SLOT_A:
+        return DEVICE_DT_GET(EEG_NODE);
+#if DT_NODE_HAS_STATUS(EEG_NODE_B, okay)
+    case HL_SLOT_B:
+        return DEVICE_DT_GET(EEG_NODE_B);
+#endif
+    default:
+        return NULL;
+    }
+}
+
+static const struct device *eeg_dev;   /* set by start(), for the slot in use */
 static struct hp6_eeg_sample eeg_batch[EEG_BATCH];
 static uint16_t eeg_n;
 static uint64_t eeg_t0_us;
@@ -90,6 +105,10 @@ static void eeg_drdy(const struct device *dev, const struct sensor_trigger *trig
 
 static int eeg_bringup(void)
 {
+    if (eeg_dev == NULL) {
+        LOG_ERR("EEG: no ADS1299 node for this slot");
+        return -ENODEV;
+    }
     if (!device_is_ready(eeg_dev)) {
         /* Try the driver's explicit HW init once (deferred-init parts). */
         if (ads1299_hw_init(eeg_dev) != 0 || !device_is_ready(eeg_dev)) {
@@ -121,14 +140,15 @@ static int eeg_bringup(void)
 
 static int eeg_probe(struct hl_ctx *ctx)
 {
-    LOG_INF("EEG probe (slot %d): claiming SPI4", ctx->slot);
+    LOG_INF("EEG probe (slot %c): claiming SPI4", 'A' + ctx->slot);
     return 0;
 }
 
 static int eeg_start(struct hl_ctx *ctx)
 {
 #if EEG_PRESENT
-    LOG_INF("EEG start (slot %d): bringing up ADS1299 -> bus", ctx->slot);
+    LOG_INF("EEG start (slot %c): bringing up ADS1299 -> bus", 'A' + ctx->slot);
+    eeg_dev = eeg_dev_for(ctx->slot);
     int rc = eeg_bringup();
     if (rc != 0) {
         return rc;
@@ -150,9 +170,12 @@ static int eeg_stop(struct hl_ctx *ctx)
     ARG_UNUSED(ctx);
 #if EEG_PRESENT
     eeg_running = false;
-    struct sensor_value stop = { .val1 = 0, .val2 = 0 };
-    (void)sensor_attr_set(eeg_dev, SENSOR_CHAN_ADS1299_ALL,
-                          (enum sensor_attribute)ADS1299_ATTR_START, &stop);
+    if (eeg_dev != NULL && device_is_ready(eeg_dev)) {
+        struct sensor_value stop = { .val1 = 0, .val2 = 0 };
+
+        (void)sensor_attr_set(eeg_dev, SENSOR_CHAN_ADS1299_ALL,
+                              (enum sensor_attribute)ADS1299_ATTR_START, &stop);
+    }
 #endif
     LOG_INF("EEG stop");
     return 0;
@@ -162,7 +185,7 @@ static int eeg_selftest(struct hl_ctx *ctx, struct hl_test_result *out)
 {
     ARG_UNUSED(ctx);
 #if EEG_PRESENT
-    bool ready = device_is_ready(eeg_dev);
+    bool ready = eeg_dev != NULL && device_is_ready(eeg_dev);
     out->status = ready ? 0 /*PASS*/ : 1 /*FAIL*/;
     strncpy(out->detail, ready ? "ADS1299 ready" : "ADS1299 not ready",
             sizeof(out->detail) - 1);

@@ -29,7 +29,7 @@ from smpgroup import Command, Field, Group, Op, Status, T
 GROUP_ID = 64
 
 #: HPI_MGMT_SCHEMA_VERSION reported by device_info's `gv` field.
-SCHEMA_VERSION = 0x0001
+SCHEMA_VERSION = 0x0002
 
 # --- group-64 extension error codes (MGMT_ERR_USER_START = 256) -------------
 
@@ -161,9 +161,19 @@ COMMANDS: tuple[Command, ...] = (
             Field("ibat_ma", T.INT),
             Field("soc", T.UINT, "state of charge, %"),
             Field("tc_x10", T.INT, "always the unavailable sentinel in 1.0.0"),
-            Field("charge", T.UINT),
-            Field("usb", T.BOOL),
+            Field("charge", T.UINT, "0 discharging, 1 charging, 2 full, 3 fault (charger timer)"),
+            Field("usb", T.BOOL, "input supply present (charger PGOOD)"),
             Field("batt", T.BOOL, "literally !usb"),
+            # Optional so this CLI still parses a reply from firmware built
+            # before the field existed. Responses are extra="forbid" AND
+            # required-by-default, so a required field here would break
+            # telemetry outright against every older image.
+            Field(
+                "usb_att",
+                T.BOOL,
+                "a USB host is enumerated -- NOT the same as usb",
+                optional=True,
+            ),
             Field("ok", T.BOOL),
         ),
     ),
@@ -218,6 +228,47 @@ COMMANDS: tuple[Command, ...] = (
         meta={"unlock": True},
         request=(Field("slot", T.UINT), Field("on", T.BOOL)),
         response=(Field("ok", T.BOOL),),
+    ),
+    Command(
+        0x0053,
+        "module_eeprom_read",
+        (R,),
+        meta={"unlock": True},
+        request=(
+            Field("slot", T.UINT, "0 = A, 1 = B"),
+            Field("off", T.UINT, "byte offset into the 256-byte image"),
+            Field("len", T.UINT, "1-64"),
+        ),
+        response=(Field("off", T.UINT), Field("data", T.BSTR)),
+        errors=(256, 257),
+        doc="raw bytes; the device does not parse the image",
+    ),
+    Command(
+        0x0054,
+        "module_eeprom_write",
+        (W,),
+        meta={"unlock": True},
+        request=(
+            Field("slot", T.UINT, "0 = A, 1 = B"),
+            Field("off", T.UINT),
+            Field("data", T.BSTR, "1-64 bytes"),
+        ),
+        response=(Field("off", T.UINT), Field("len", T.UINT)),
+        errors=(256, 257),
+        doc="identity takes effect at the next detect (module_power on)",
+    ),
+    Command(
+        0x0055,
+        "module_i2c_scan",
+        (R,),
+        meta={"unlock": True},
+        request=(
+            Field("slot", T.UINT, "0 = A, 1 = B"),
+            Field("pwr", T.BOOL, "scan with the slot rail on", optional=True),
+        ),
+        response=(Field("addrs", T.BSTR, "responding 7-bit addresses"),),
+        errors=(256, 257),
+        doc="bring-up: both slots share one bus, so this says whether it works",
     ),
     # -- recording ---------------------------------------------------------
     Command(
@@ -404,7 +455,8 @@ COMMANDS: tuple[Command, ...] = (
             Field("sha", T.BSTR, "SHA-256 of the image"),
             Field("sig", T.BSTR, "ECDSA-P256 r||s", optional=True),
         ),
-        response=(Field("off", T.UINT, "resume offset"),),
+        # No reply payload: begin always restarts the upload, so there is no
+        # resume offset to report (hpi_m4fw.c returns a bare EOK).
         errors=(256, 269, 270),
     ),
     Command(

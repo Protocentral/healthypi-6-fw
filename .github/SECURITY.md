@@ -46,8 +46,41 @@ welcome if you can show the reasoning is wrong, but they are not news:
 - **Physical access is game over.** The device is a USB-tethered research
   instrument. There is no RDP level 2, no JTAG lockout and no tamper detection.
   Anyone who can open the case can read the flash.
-- **Anti-rollback is version-based only.** MCUboot refuses a lower version; there
-  is no hardware security counter.
+- **Anti-rollback is a guard against accidents, not a security boundary.**
+  MCUboot refuses a lower M7 version on a normal update, but serial recovery
+  writes the M7 directly and accepts any image signed with the release key,
+  older ones included; the M4 path compares no versions at all. There is no
+  hardware security counter. Details: [`docs/DEVICE_LOCK.md`](../docs/DEVICE_LOCK.md)
+  and [`docs/ARCHITECTURE.md` §9](../docs/ARCHITECTURE.md#9-firmware-update-and-recovery).
+
+## Firmware signing, and running your own firmware
+
+Official firmware is signed with Protocentral's ECDSA-P256 **release key**. The
+private half never leaves an offline machine. The public half is published, and
+appears in three places:
+
+- **compiled into MCUboot,** which refuses an M7 image signed by any other key;
+- **compiled into the M7 application,** which refuses any other M4 image;
+- **shipped with the `healthypi` tools**
+  ([`tools/healthypi/src/healthypi/fw/release_keys/`](../tools/healthypi/src/healthypi/fw/release_keys/)),
+  which check a release bundle's signature by default. `healthypi fw keys`
+  prints the fingerprint, which should match the one in the release notes.
+
+**Your device, your key.** The code is open and so is the hardware, but a unit
+programmed at the factory accepts only firmware signed with the release key over
+USB. To run your own builds, re-key the unit:
+
+1. Generate a key: `imgtool keygen -k my_key.pem -t ecdsa-p256`.
+2. Build and program it over SWD:
+   `HP6_SIGNING_KEY=/abs/path/my_key.pem scripts/release.sh --own-key && scripts/flash.sh factory`.
+   This replaces the bootloader too, so its embedded public key becomes yours.
+   v1 does not lock the debug port, so this always works.
+3. From then on, update the unit over USB with your own bundles:
+   `healthypi fw update --bundle … --pubkey my_key.pem`.
+4. To return to official firmware, program a release image over SWD the same way.
+
+Protocentral will **not** publish a shared "community" private key: every unit
+would then accept anything signed with it, which is no signature at all.
 
 ## What this product is
 

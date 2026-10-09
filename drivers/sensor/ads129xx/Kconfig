@@ -35,4 +35,24 @@ config SENSOR_ADS129XX_TRIGGER
 	  When enabled, the driver uses GPIO interrupts to signal
 	  when new sample data is available.
 
+config SENSOR_ADS129XX_RESP_PHASE
+	int "Respiration demodulation phase code (RESP_PH[2:0])"
+	range 0 6
+	default 4
+	help
+	  Demodulation phase, in 22.5 degree steps starting at 22.5 degrees
+	  (0 = 22.5, 4 = 112.5, 6 = 157.5). The default is TI's value for a
+	  32 kHz modulation clock (SBAA181). The demodulated output scales with
+	  the cosine of the phase error, so tune this on the bench: sweep 0..6
+	  and keep the code that gives the largest respiration amplitude.
+
+config SENSOR_ADS129XX_RESP_GAIN
+	int "Respiration channel (CH1) PGA gain"
+	range 1 12
+	default 4
+	help
+	  PGA gain for the respiration channel. Valid values: 1, 2, 3, 4, 6,
+	  8, 12. Lower it if raw CH1 sits near full scale (carrier clipping).
+	  The app's respiration µV conversion follows this value.
+
 endif # SENSOR_ADS129XX

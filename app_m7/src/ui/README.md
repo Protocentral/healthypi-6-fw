@@ -1,14 +1,15 @@
 # ui/ — the on-device LVGL UI
 
 The Material 3 LVGL UI: 5-slot bottom navigation (Home · Live · Rec · Trends ·
-More), boot splash + self-test, ambient clock, and the More submenu (Link / HRV
-/ Settings / Alert limits / OTA). Structure:
+More), boot splash + self-test, ambient clock, and the More submenu (Link /
+HealthyLink / HRV / Settings / Alert limits / OTA). Structure:
 
 - `ui_module.c` — the engine: owns the LVGL thread, the screen manager + nav,
   the boot state machine, the ambient idle timeout, and the sample-bus drain.
 - `screens/` — one file per screen; each exposes `create()` plus optional
   `refresh()`/`push_*()` hooks called from the UI thread.
-- `components/` — shared M3 widgets (appbar, navbar, waveform, tiles).
+- `components/` — shared M3 widgets (appbar, navbar, status chip, waveform,
+  tiles).
 - `theme/hpi_m3_theme.h` — every color/font/shape token. **Screens use tokens
   only; no per-screen hex.**
 - `fonts/` — committed LVGL bitmap fonts + the regeneration pipeline

@@ -12,6 +12,7 @@
 #include "ipc_module.h"
 #include "../../app_m7/src/hpi_common_types.h"
 #include <zephyr/logging/log.h>
+#include <zephyr/toolchain.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <string.h>
 #include <math.h>
@@ -194,6 +195,7 @@ static void update_rr_interval(uint16_t interval_ms);
 static void calculate_hrv_time_domain(struct hrv_time_domain *hrv);
 static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq);
 static void send_ecg_vitals(void);
+static void send_beat_notify(const struct ecg_algorithm_results *results);
 
 /* Thread starts suspended (K_TICKS_FOREVER); started explicitly by
  * algorithm_module_start(). */
@@ -396,6 +398,9 @@ static void ecg_algorithm_thread_func(void *p1, void *p2, void *p3)
         static uint16_t last_sent_hr = 0;
         bool hr_changed = (results.heart_rate != last_sent_hr) && (results.heart_rate > 0);
 
+        if (results.qrs_detected) {
+            send_beat_notify(&results);
+        }
         if (results.qrs_detected || hr_changed || hrv_just_calculated) {
             send_ecg_vitals();
             if (hr_changed) {
@@ -765,26 +770,19 @@ static uint8_t assess_signal_quality(const int32_t *samples, size_t count)
     
     int32_t min_val = samples[0];
     int32_t max_val = samples[0];
-    int64_t sum = 0;
     
     for (size_t i = 0; i < count; i++) {
         if (samples[i] < min_val) min_val = samples[i];
         if (samples[i] > max_val) max_val = samples[i];
-        sum += samples[i];
     }
     
-    int32_t mean = sum / count;
     int32_t amplitude = max_val - min_val;
     
-    /* Quality based on amplitude (expected range: 100-5000 for good signal) */
+    /* Quality based on amplitude (expected range: 100-5000 for good signal).
+     * A flat line (poor contact) is the amplitude <= 100 case below. */
     uint8_t quality = 0;
     if (amplitude > 100 && amplitude < 10000) {
         quality = 80;  /* Good amplitude */
-        
-        /* Check for flat line (poor contact) */
-        if (amplitude < 50) {
-            quality = 20;  /* Likely flat line */
-        }
     } else if (amplitude >= 10000) {
         quality = 30;  /* Too noisy or saturated */
     } else {
@@ -982,7 +980,6 @@ static size_t interpolate_rr_intervals(const uint16_t *rr_intervals, size_t rr_c
     }
 
     /* Build cumulative time array and RR values */
-    float32_t t_cumulative = 0;
     size_t rr_idx = 0;
     float32_t t_prev = 0;
     float32_t rr_prev = 0;
@@ -1151,6 +1148,28 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
             hrv_freq->vlf_power_ms2, hrv_freq->lf_power_ms2, hrv_freq->hf_power_ms2,
             hrv_freq->lf_hf_ratio_x10 / 10, hrv_freq->lf_hf_ratio_x10 % 10,
             hrv_freq->lf_nu, hrv_freq->hf_nu);
+}
+
+BUILD_ASSERT(sizeof(struct hpi_ipc_beat_notify) == 16,
+	     "BEAT_NOTIFY payload is 16 B (IPC <= 512)");
+
+static void send_beat_notify(const struct ecg_algorithm_results *results)
+{
+	struct hpi_ipc_beat_notify n = {
+		.timestamp_ms = results->timestamp,
+		.sample_number = (uint32_t)ecg_state.last_qrs_sample,
+		.rr_interval_ms = results->rr_interval_ms,
+		.heart_rate_bpm = results->heart_rate != 0
+					  ? results->heart_rate
+					  : ecg_state.current_hr,
+		.qrs_confidence = ecg_state.hr_confidence,
+		.signal_quality = results->signal_quality,
+	};
+	int ret = hpi_ipc_send(HPI_IPC_MSG_TYPE_BEAT_NOTIFY, &n, sizeof(n));
+
+	if (ret < 0) {
+		LOG_WRN("BEAT_NOTIFY send failed: %d", ret);
+	}
 }
 
 /*----------------------------------------------------------------------------*/

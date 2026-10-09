@@ -141,21 +141,24 @@ if [ "$REQUIRE_RELEASE" = 1 ] || [ -n "$BOOT_CFG" ]; then
   # USB identity. Assert the product VID rather than merely rejecting the
   # Zephyr development one: an unset or mistyped value would otherwise pass.
   #
-  # Deliberately NOT asserted: any relationship between the application and
-  # recovery PIDs. They happen to be equal today because pid.codes allocates one
-  # PID per entry, but nothing depends on that. Both ports enumerate either way,
-  # and a host tells them apart from the PROTOCOL -- the application answers
-  # group 64, the bootloader does not -- which is what `healthypi fw recover`
-  # probes. Pinning the two together here would buy nothing and would break a
-  # future second allocation.
+  # The PID is asserted against HealthyPi 6's pid.codes allocation, on both
+  # images. Nothing *depends* on the application and recovery PIDs being equal --
+  # a host tells the two ports apart by PROTOCOL (the application answers group
+  # 64, the bootloader does not), which is what `healthypi fw recover` probes --
+  # but each must be a PID we hold. A second allocation would be added to
+  # HP6_PIDS, not exempted.
+  HP6_PIDS="0xff91"   # pid.codes 1209/FF91, approved 2026-10-01
+  is_hp6_pid() { case " $HP6_PIDS " in *" $1 "*) return 0 ;; esac; return 1; }
   app_vid="$(val_of CONFIG_HPI_USB_VID "$APP_CFG" | tr 'A-F' 'a-f')"
   app_pid="$(val_of CONFIG_HPI_USB_PID "$APP_CFG" | tr 'A-F' 'a-f')"
   if [ "$app_vid" = "0x2fe3" ]; then
     fail "CONFIG_HPI_USB_VID is still the 0x2FE3 Zephyr development VID"
   elif [ "$app_vid" != "0x1209" ]; then
     fail "CONFIG_HPI_USB_VID is '${app_vid:-<unset>}', expected 0x1209 (pid.codes)"
-  elif [ "$app_pid" = "0x0100" ] || [ -z "$app_pid" ]; then
-    fail "CONFIG_HPI_USB_PID is '${app_pid:-<unset>}' — that is the development default, not an allocated PID"
+  elif [ "$app_pid" = "0xff90" ]; then
+    fail "CONFIG_HPI_USB_PID is 0xFF90 — that is HealthyPi 5's PID; HealthyPi 6 is 0xFF91"
+  elif ! is_hp6_pid "$app_pid"; then
+    fail "CONFIG_HPI_USB_PID is '${app_pid:-<unset>}', expected HealthyPi 6's pid.codes PID ($HP6_PIDS)"
   else
     note "usb: app VID=$app_vid PID=$app_pid"
   fi
@@ -166,14 +169,55 @@ if [ "$REQUIRE_RELEASE" = 1 ] || [ -n "$BOOT_CFG" ]; then
     elif [ "$boot_vid" != "0x1209" ]; then
       fail "MCUboot CONFIG_USB_DEVICE_VID is '${boot_vid:-<unset>}', expected 0x1209"
     else
-      note "usb: recovery VID=$boot_vid PID=$(val_of CONFIG_USB_DEVICE_PID "$BOOT_CFG")"
+      boot_pid="$(val_of CONFIG_USB_DEVICE_PID "$BOOT_CFG" | tr 'A-F' 'a-f')"
+      if ! is_hp6_pid "$boot_pid"; then
+        fail "MCUboot CONFIG_USB_DEVICE_PID is '${boot_pid:-<unset>}', expected HealthyPi 6's pid.codes PID ($HP6_PIDS) -- the recovery port ships too"
+      else
+        note "usb: recovery VID=$boot_vid PID=$boot_pid"
+      fi
     fi
   fi
-  # Visible on every release build until the allocation is confirmed. Not a
-  # failure: adopting the applied-for PID was a deliberate call.
-  if [ "$app_pid" = "0xff90" ]; then
-    note "usb: PID 0xFF90 is PROVISIONAL — pid.codes allocation unconfirmed as of 2026-07-27"
-  fi
+fi
+
+# QSPI NOR layout, from the build's final devicetree. The v5 DTS once declared a
+# 128 MiB part on a board carrying 64 MiB, and put LittleFS at 0x4000000; the
+# part ignores address bit 26, so LittleFS silently aliased the M7 update slot
+# and an in-app M7 update hung the device. The driver only logged "Unexpected
+# flash size" and carried on, so the build must refuse instead:
+#   - every QSPI partition ends inside the declared size (any board);
+#   - healthypi6_v5 (and later) declares 64 MiB, the only part fitted.
+APP_DTS="$(dirname "$APP_CFG")/zephyr.dts"
+if [ -f "$APP_DTS" ]; then
+  board="$(val_of CONFIG_BOARD "$APP_CFG" | tr -d '"')"
+  qspi_msgs="$(python3 - "$APP_DTS" "$board" <<'PY'
+import re, sys
+dts, board = open(sys.argv[1]).read(), sys.argv[2]
+m = re.search(r"qspi-nor-flash[^{]*\{", dts)
+if not m:
+    sys.exit(0)                       # no QSPI NOR on this board
+# The node body: match braces from the opening one.
+i, depth = m.end(), 1
+while depth:
+    depth += {"{": 1, "}": -1}.get(dts[i], 0); i += 1
+node = dts[m.end():i]
+size = re.search(r"^\s*size = < (0x[0-9a-f]+|\d+) >;", node, re.M)
+size_bytes = int(size.group(1), 0) // 8
+print(f"NOTE qspi: {size_bytes >> 20} MiB declared")
+if board.startswith("healthypi6_v") and board[len("healthypi6_v"):].isdigit() \
+        and int(board[len("healthypi6_v"):]) >= 5 and size_bytes != 64 << 20:
+    print(f"FAIL qspi: {board} declares {size_bytes >> 20} MiB; every v5+ board carries a 64 MiB part")
+for label, off, ln in re.findall(r"(\w+): partition@[0-9a-f]+ \{[^}]*?reg = < (0x[0-9a-f]+) (0x[0-9a-f]+) >", node):
+    end = int(off, 16) + int(ln, 16)
+    if end > size_bytes:
+        print(f"FAIL qspi: {label} ends at {end:#x}, past the {size_bytes >> 20} MiB part -- it would wrap onto the start of the chip")
+PY
+)"
+  while IFS= read -r line; do
+    case "$line" in
+      NOTE*) note "${line#NOTE }" ;;
+      FAIL*) fail "${line#FAIL }" ;;
+    esac
+  done <<< "$qspi_msgs"
 fi
 
 if [ "$rc" -eq 0 ]; then

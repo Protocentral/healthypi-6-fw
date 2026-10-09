@@ -51,7 +51,9 @@ int hpi_diag_run_selftest(struct smp_streamer *ctxt)
     /* QSPI NOR readiness: the st,stm32-qspi-nor driver reads the JEDEC ID at
      * init and fails to become ready if the flash is absent/mis-IDed, so this
      * is a safe runtime proxy for the manufacturing "QSPI flash ID" check. */
-    bool qspi = node_ready(DEVICE_DT_GET(DT_NODELABEL(w25q01jv)));
+    /* The board's QSPI NOR, whatever the part: every HealthyPi 6 board names
+     * it as its chosen flash controller. */
+    bool qspi = node_ready(DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_controller)));
 
     uint32_t pass = (uint32_t)sd + batt + ecg + ppg + m4 + qspi;
     uint32_t fail = 6u - pass;

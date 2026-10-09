@@ -38,6 +38,9 @@
 #include "platform/watchdog.h"
 #include "platform/fs_mount.h"
 #include "services/connectivity/healthybridge_service.h"
+#if IS_ENABLED(CONFIG_HPI_NPU_INFER_SELFTEST)
+#include "healthylink/npu_infer.h"
+#endif
 
 /* ---- LIVE: system ---- */
 
@@ -275,6 +278,23 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_link,
     SHELL_SUBCMD_SET_END
 );
 
+#if IS_ENABLED(CONFIG_HPI_NPU_INFER_SELFTEST)
+static int cmd_npu_selftest(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+    int rc = npu_infer_selftest();
+
+    shell_print(sh, "npu selftest %s (%d)", rc == 0 ? "queued" : "FAILED", rc);
+    return rc;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_npu,
+    SHELL_CMD(selftest, NULL, "Canned 187 B TENSOR_LOAD/RUN/READ_RESULT", cmd_npu_selftest),
+    SHELL_SUBCMD_SET_END
+);
+#endif
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_hpi,
     SHELL_CMD(sys,    &sub_sys, "System info / reboot", NULL),
     SHELL_CMD(fs,     NULL,     "Filesystem status", cmd_fs),
@@ -288,6 +308,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_hpi,
     SHELL_CMD(wifi,   &sub_wifi, "WiFi control via the ESP32 co-processor", NULL),
     SHELL_CMD(ble,    &sub_ble,  "BLE advertising on the ESP32 co-processor", NULL),
     SHELL_CMD(link,   &sub_link, "ESP32 co-processor power / link state", NULL),
+#if IS_ENABLED(CONFIG_HPI_NPU_INFER_SELFTEST)
+    SHELL_CMD(npu,    &sub_npu,  "HealthyLink Compute debug (canned infer)", NULL),
+#endif
     SHELL_SUBCMD_SET_END
 );
 

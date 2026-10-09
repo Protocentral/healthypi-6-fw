@@ -80,6 +80,8 @@ struct hp6_ppg_sample {
  * provisional. Set whenever the M4 reports low perfusion or finger-off,
  * independently of which sensor won the HR arbitration. */
 #define HP6_VIT_PPG_WEAK       0x04
+/* Board is moving (BMI323 accel). Qualifies the sample; does not hide rates. */
+#define HP6_VIT_MOTION         0x08
 
 /* HPI_CH_VITALS payload (16 B): derived metrics from the M4, ~1 Hz.
  *
@@ -92,12 +94,12 @@ struct hp6_ppg_sample {
 struct hp6_vitals {
     uint16_t hr_bpm;
     uint16_t spo2_x10;      /* SpO2 % x10                                     */
-    uint16_t rr_bpm;        /* respiration rate (0 until wired)               */
-    int16_t  temp_c_x100;   /* 0 until temp sensor wired                      */
+    uint16_t rr_bpm;        /* breaths/min; 0 = leads off / not locked        */
+    int16_t  temp_c_x100;   /* °C × 100; 0 = AS6221 unplugged / not ready     */
     uint16_t hrv_sdnn_ms;   /* SDNN, ms                                       */
     uint16_t hrv_rmssd_ms;  /* RMSSD, ms                                      */
     uint16_t hrv_lf_hf_x10; /* LF/HF ratio x10; 0 = not computed              */
-    uint8_t  flags;         /* HP6_VIT_* -- HR provenance + PPG quality       */
+    uint8_t  flags;         /* HP6_VIT_* -- HR provenance + quality           */
     uint8_t  _pad;
 } __packed;
 

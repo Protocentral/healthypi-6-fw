@@ -23,9 +23,9 @@ LOG_MODULE_REGISTER(hpi_usbd, CONFIG_HPI_APP_LOG_LEVEL);
 
 /* VID/PID + USB string descriptors are configurable: see
  * CONFIG_HPI_USB_{VID,PID,MANUFACTURER,PRODUCT} in app_m7/Kconfig. The default
- * VID 0x2FE3 is the Zephyr development pair -- NOT shippable; replace with the
- * registered pid.codes PID (VID 0x1209) before customer shipment.
- * tools/ci/check_prod_surface.sh fails a prod build still on the 0x2FE3 VID. */
+ * VID 0x2FE3 is the Zephyr development pair -- NOT shippable. Production builds
+ * use HealthyPi 6's pid.codes allocation, 0x1209:0xFF91 (app_m7/prj.prod.conf);
+ * tools/ci/check_prod_surface.sh fails a release that carries anything else. */
 
 /* CDC 0 -- the sample-stream pipe (this module). CDC 1 is bound to the
  * uart_mcumgr transport in DT and is not referenced here. We address CDC 0 by

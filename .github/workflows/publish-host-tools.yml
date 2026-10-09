@@ -1,0 +1,83 @@
+name: Publish host tools
+
+# Publishes the two host packages to PyPI, one per tag:
+#
+#   smpgroup-v<version>    -> tools/smpgroup   (PyPI: smpgroup)
+#   healthypi-v<version>   -> tools/healthypi  (PyPI: protocentral-healthypi)
+#
+# The tag's version must equal the package's pyproject.toml version, or nothing
+# is published. Publish smpgroup first: protocentral-healthypi depends on it.
+#
+# Trusted publishing -- no API token is stored anywhere. Once per project, add a
+# publisher on pypi.org (a "pending publisher" before the first release):
+#   owner Protocentral, repository healthypi-6-fw,
+#   workflow publish-host-tools.yml, environment pypi.
+# The `pypi` environment should require a reviewer, so a pushed tag alone
+# cannot publish.
+
+on:
+  push:
+    tags: ['smpgroup-v*', 'healthypi-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      dir: ${{ steps.pkg.outputs.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Resolve the package from the tag
+        id: pkg
+        run: |
+          tag="$GITHUB_REF_NAME"
+          case "$tag" in
+            smpgroup-v*)  dir=tools/smpgroup;  version="${tag#smpgroup-v}" ;;
+            healthypi-v*) dir=tools/healthypi; version="${tag#healthypi-v}" ;;
+            *) echo "::error::unexpected tag $tag"; exit 1 ;;
+          esac
+          declared=$(python -c "import sys, tomllib; print(tomllib.load(open(sys.argv[1], 'rb'))['project']['version'])" "$dir/pyproject.toml")
+          if [ "$declared" != "$version" ]; then
+            echo "::error::tag $tag says $version, but $dir/pyproject.toml says $declared"
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Test both packages
+        # The same suites as build.yml, including the catalog drift check against
+        # this commit's firmware sources -- a release is never built from a
+        # commit whose catalog disagrees with the firmware.
+        run: |
+          pip install -e tools/smpgroup -e "tools/healthypi[device,dev]"
+          pytest -q tools/smpgroup/tests
+          pytest -q tools/healthypi/tests
+
+      - name: Build and check
+        run: |
+          pip install build twine
+          python -m build --outdir dist "${{ steps.pkg.outputs.dir }}"
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

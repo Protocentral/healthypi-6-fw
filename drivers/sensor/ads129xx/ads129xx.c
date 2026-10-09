@@ -16,6 +16,14 @@ LOG_MODULE_REGISTER(sensor_ads129xx, CONFIG_SENSOR_LOG_LEVEL);
 #warning "ADS129XX driver enabled without any devices"
 #endif
 
+/* Any other value would silently fall back to gain 3 in the driver while the
+ * app's µV conversion divided by the configured value. */
+BUILD_ASSERT(CONFIG_SENSOR_ADS129XX_RESP_GAIN == 1 || CONFIG_SENSOR_ADS129XX_RESP_GAIN == 2 ||
+             CONFIG_SENSOR_ADS129XX_RESP_GAIN == 3 || CONFIG_SENSOR_ADS129XX_RESP_GAIN == 4 ||
+             CONFIG_SENSOR_ADS129XX_RESP_GAIN == 6 || CONFIG_SENSOR_ADS129XX_RESP_GAIN == 8 ||
+             CONFIG_SENSOR_ADS129XX_RESP_GAIN == 12,
+             "CONFIG_SENSOR_ADS129XX_RESP_GAIN must be 1, 2, 3, 4, 6, 8 or 12");
+
 /**
  * @brief Convert PGA gain to GAINn[2:0] register bits (ADS1294R/6R/8R).
  *
@@ -490,8 +498,8 @@ static int ads129xx_chip_init(const struct device *dev)
     _ads129xx_send_command(dev, ADS129XX_CMD_SDATAC);
     k_sleep(K_MSEC(50));
 
-    // Use internal ref
-    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG3, 0b11100000);
+    // Use internal ref (2.4 V: VREF_4V must stay 0 on the 3.3 V AFE supply)
+    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG3, PD_REFBUF | CONFIG3_const);
     k_sleep(K_MSEC(100));
 
     /* Read registers after SDATAC */
@@ -513,7 +521,17 @@ static int ads129xx_chip_init(const struct device *dev)
     k_sleep(K_MSEC(100));
     _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG2, 0b00000000); // Test signals disabled, normal ECG operation
     k_sleep(K_MSEC(100));
-    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG3, 0b11101100); // Ref buf enabled, ref 2.4V
+    /* CONFIG3 = 0xCC: ref buffer on, 2.4 V reference, RLDREF internal, RLD
+     * buffer on.
+     *
+     * WAS 0xEC, which also set VREF_4V. The datasheet allows the 4 V reference
+     * only with a 5 V analog supply (AVDD >= 4.4 V); VDD_ECG_AFE is +3V3 via a
+     * ferrite, so VREFP was out of regulation. That broke respiration outright:
+     * the internal modulator drives a square wave of VREFP - AVSS, and
+     * VREFP also sets channel full scale. The µV conversions in
+     * acquisition.c assume 2.4 V, so ECG amplitudes change with this fix. */
+    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG3,
+                        PD_REFBUF | CONFIG3_const | RLDREF_INT | PD_RLD);
     k_sleep(K_MSEC(100));
 
     /* LOFF register (0x04) = 0xC4:
@@ -610,10 +628,14 @@ static int ads129xx_chip_init(const struct device *dev)
      */
     uint8_t gain_bits = ads129xx_gain_to_bits(config->gain);
 
-    /* Channel 1 (Respiration): Use Gain=4 (0x40) for better respiration signal per TI SBAA181
-     * Higher gain can cause clipping, lower gain reduces signal amplitude
+    /* Channel 1 (Respiration): gain from CONFIG_SENSOR_ADS129XX_RESP_GAIN
+     * (default 4, per TI SBAA181). On HealthyPi 6 v5 the modulation is
+     * injected behind the 22.1k ECG input resistors, so the carrier at IN1 is
+     * much larger than in TI's reference circuit and can clip at gain 4 --
+     * drop the gain if raw CH1 sits near full scale (CONFIG_HPI_RESP_DEBUG).
      */
-    _ads129xx_reg_write(dev, ADS129XX_REG_CHnSET + 0, 0x40);  // CH1: Respiration, Gain=4, normal input
+    _ads129xx_reg_write(dev, ADS129XX_REG_CHnSET + 0,
+                        ads129xx_gain_to_bits(CONFIG_SENSOR_ADS129XX_RESP_GAIN));  // CH1: Respiration, normal input
     _ads129xx_reg_write(dev, ADS129XX_REG_CHnSET + 1, gain_bits | 0b00000000);  // CH2: Lead I  (IN2P=LA, IN2N=RA)
     _ads129xx_reg_write(dev, ADS129XX_REG_CHnSET + 2, gain_bits | 0b00000000);  // CH3: Lead II (IN3P=LL, IN3N=RA)
     _ads129xx_reg_write(dev, ADS129XX_REG_CHnSET + 3, gain_bits | 0b00000000);  // CH4: V1     (IN4P=V1, IN4N=WCT)
@@ -659,26 +681,35 @@ static int ads129xx_chip_init(const struct device *dev)
      * RESPMODP/RESPMODN via RC network per ADS1292R Figure 97; internal
      * modulation and demodulation.
      *
-     * RESP register (0x16) = 0xF2:
+     * RESP register (0x16) = 0xF2 with the default phase:
      *   Bit 7: RESP_DEMOD_EN1 = 1 (demodulation on Channel 1)
      *   Bit 6: RESP_MOD_EN1 = 1 (modulation - drives AC excitation current)
      *   Bit 5: Reserved = 1 (MUST be 1 for ADS1294R/6R/8R per datasheet)
-     *   Bits 4-2: RESP_PH[2:0] = 100 (112.5 deg phase at 32 kHz per TI
-     *             SBAA181 - reduces gain error from demodulation glitches)
+     *   Bits 4-2: RESP_PH[2:0] = CONFIG_SENSOR_ADS129XX_RESP_PHASE (default
+     *             100 = 112.5 deg, TI's figure for 32 kHz). The demodulated
+     *             output scales with cos(phase error), so a phase ~90 deg off
+     *             nulls respiration -- sweep 0..6 on the bench.
      *   Bits 1-0: RESP_CTRL = 10 (internal respiration, internal signals)
      */
-    _ads129xx_reg_write(dev, ADS129XX_REG_RESP, 0xF2);
+    _ads129xx_reg_write(dev, ADS129XX_REG_RESP,
+                        RESP_DEMOD_EN1 | RESP_MOD_EN1 | 0x20 |
+                        ((CONFIG_SENSOR_ADS129XX_RESP_PHASE & 0x07) << 2) |
+                        RESP_CTRL_INT_SIG_INT);
     k_sleep(K_MSEC(10));
 
-    /* CONFIG4 register (0x17) = 0x02:
-     *   Bit 0: RESP_FREQ = 0 (32 kHz modulation clock - lower noise)
+    /* CONFIG4 register (0x17) = 0x22:
+     *   Bits 7-5: RESP_FREQ = 001 (32 kHz modulation clock)
      *   Bit 1: PD_LOFF_COMP = 1 -> lead-off comparators POWERED ON.
      *          The name reads like a power-DOWN bit but the polarity is
      *          inverted, exactly like PD_WCTx: 0 = powered down (reset),
      *          1 = enabled.
      *   Other bits: default 0
+     *
+     * WAS 0x02. The old comment claimed "bit 0 = RESP_FREQ, 0 = 32 kHz", but
+     * RESP_FREQ is bits 7:5 and 000 is 64 kHz -- so the modulator ran at
+     * 64 kHz while the phase above was TI's 32 kHz value.
      */
-    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG4, PD_LOFF_COMP);
+    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG4, RESP_FREQ_32K | PD_LOFF_COMP);
     k_sleep(K_MSEC(10));
 
     /* Read back and LOG the respiration + lead-off config: the lead-off path
@@ -689,12 +720,22 @@ static int ads129xx_chip_init(const struct device *dev)
     uint8_t loff_reg = _ads129xx_read_reg(dev, ADS129XX_REG_LOFF);
     uint8_t loff_p = _ads129xx_read_reg(dev, ADS129XX_REG_LOFF_SENSP);
     uint8_t loff_n = _ads129xx_read_reg(dev, ADS129XX_REG_LOFF_SENSN);
+    uint8_t config1_reg = _ads129xx_read_reg(dev, ADS129XX_REG_CONFIG1);
+    uint8_t config3_reg = _ads129xx_read_reg(dev, ADS129XX_REG_CONFIG3);
+    uint8_t ch1set_reg = _ads129xx_read_reg(dev, ADS129XX_REG_CHnSET + 0);
 
     LOG_INF("ads129xx: RESP=0x%02x CONFIG4=0x%02x (loff comp %s) "
             "LOFF=0x%02x SENSP=0x%02x SENSN=0x%02x",
             resp_reg, config4_reg,
             (config4_reg & PD_LOFF_COMP) ? "on" : "OFF",
             loff_reg, loff_p, loff_n);
+    LOG_INF("ads129xx: CONFIG1=0x%02x CONFIG3=0x%02x (vref %s) CH1SET=0x%02x "
+            "resp %s kHz ph=%u",
+            config1_reg, config3_reg,
+            (config3_reg & VREF_4V) ? "4V - INVALID on 3.3V AVDD" : "2.4V",
+            ch1set_reg,
+            ((config4_reg & RESP_FREQ_MASK) == RESP_FREQ_32K) ? "32" : "64",
+            (unsigned int)((resp_reg >> 2) & 0x07));
 
     k_sleep(K_MSEC(1));
 

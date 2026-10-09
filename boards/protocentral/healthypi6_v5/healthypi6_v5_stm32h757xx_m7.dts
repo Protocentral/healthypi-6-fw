@@ -53,7 +53,7 @@
 		zephyr,shell-uart = &usart1;
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
-		zephyr,flash-controller = &w25q01jv;
+		zephyr,flash-controller = &qspi_nor;
 		/* CDC 0 (cdc_acm_uart0) carries the one-way .HP6 sample stream;
 		 * CDC 1 (cdc_acm_uart1) carries MCUmgr SMP request/response. */
 		zephyr,uart-mcumgr = &cdc_acm_uart1;
@@ -354,6 +354,15 @@
 	clock-frequency = <I2C_BITRATE_FAST>;
 	sq-size = <1024>;
 	cq-size = <1024>;
+
+	/* External AS6221 skin-temp probe. ADDR pin straps 0x48 or 0x49;
+	 * this node is 0x49 so tmp108 binds. core/temp_sensor.c probes
+	 * both addresses on this bus (I2C1 PB6/PB7). */
+	as6221: as6221@49 {
+		compatible = "ams,as6221";
+		status = "okay";
+		reg = <0x49>;
+	};
 };
 
 &i2c2 {
@@ -366,29 +375,6 @@
 		compatible = "maxim,max17048";
 		status = "okay";
 		reg = <0x36>;
-	};
-
-	/* ams AS6221 digital temperature sensor. Driven by Zephyr's tmp108
-	 * driver, which covers the TI TMP108 and the ams AS621x/AS6221 --
-	 * CONFIG_TMP108 turns itself on from this compatible.
-	 *
-	 * v5 ONLY. v2/v3/v4 keep their maxim,max30205 nodes -- those boards
-	 * carry the Maxim part, and pointing them at ams would be worse than
-	 * leaving them: the MAX30205 node was inert (no driver existed for it
-	 * anywhere in the tree), whereas this compatible pulls in a real driver
-	 * that writes a config register at init and would fail on the wrong
-	 * silicon.
-	 *
-	 * The address is carried over unchanged from the node this replaced.
-	 * CONFIRM 0x49 against the schematic -- it is set by the AS6221's ADDR
-	 * pin strapping, a different pin on a different part. Nothing answered
-	 * at 0x49 on the bench unit (2026-08-31): a full 7-bit scan of i2c2
-	 * found only 0x36 (MAX17048) and 0x69 (BMI323), and i2c1 was empty, so
-	 * no temperature sensor is fitted on that particular board. */
-	as6221: as6221@49 {
-		compatible = "ams,as6221";
-		status = "okay";
-		reg = <0x49>;
 	};
 
 	/* Bosch BMI323 6-axis IMU. SDO is strapped high on v4, so the
@@ -512,11 +498,22 @@ zephyr_udc0: &usbotg_hs {
 };
 
 /*
- * QUADSPI -- W25Q01JV in full quad (4-bit) mode; IO2/IO3 are on PF7/PF6, so
- * there is no PE2 conflict with SPI4. Quad reads are ~4x dual.
+ * QUADSPI -- 512 Mbit (64 MiB) Winbond QSPI NOR in full quad (4-bit) mode;
+ * IO2/IO3 are on PF7/PF6, so there is no PE2 conflict with SPI4. Quad reads are
+ * ~4x dual.
  *
- * writeoc MUST stay PP_1_1_4: the W25Q01JV does not implement the default
- * PP_1_4_4 (0x38) opcode, and writes through it are corrupted.
+ * 64 MiB is the part on every v5 and later board. The DTS used to declare the
+ * 1 Gbit W25Q01JV (128 MiB) and put LittleFS at 0x4000000; the fitted part's
+ * own SFDP reports 512 Mbit (the driver logged "Unexpected flash size:
+ * 67108864" on every boot and carried on with the DTS size). A 64 MiB part
+ * ignores address bit 26, so everything at or above 0x4000000 wrapped onto the
+ * start of the chip -- LittleFS aliased the M7 update slot. Keep `size` equal
+ * to what the part reports; tools/ci/check_prod_surface.sh asserts it, and that
+ * every QSPI partition ends inside it.
+ *
+ * writeoc MUST stay PP_1_1_4: the Winbond W25Q parts used here do not
+ * implement the default PP_1_4_4 (0x38) opcode, and writes through it are
+ * corrupted.
  */
 &quadspi {
 	pinctrl-0 = <&quadspi_clk_pf10 &quadspi_bk1_ncs_pg6
@@ -525,10 +522,10 @@ zephyr_udc0: &usbotg_hs {
 	pinctrl-names = "default";
 	status = "okay";
 
-	w25q01jv: qspi-nor-flash-1@90000000 {
+	qspi_nor: qspi-nor-flash-1@90000000 {
 		compatible = "st,stm32-qspi-nor";
 		reg = <0x90000000>;
-		size = <1073741824>; /* 128 MBytes */
+		size = <536870912>; /* in BITS: 512 Mbit = 64 MiB */
 		qspi-max-frequency = <48000000>;
 		spi-bus-width = <4>;
 		quad-enable-requirements = "S2B1v1";
@@ -540,22 +537,26 @@ zephyr_udc0: &usbotg_hs {
 			#address-cells = <1>;
 			#size-cells = <1>;
 
-			/* XIP (Execute In Place) partition - 56MB for code/assets */
+			/* 64 MiB total. Every partition must end at or below
+			 * 0x4000000; see the QUADSPI comment above. */
+
+			/* XIP (Execute In Place) partition - 48 MB for code/assets */
 			xip_partition: partition@0 {
 				label = "xip";
-				reg = <0x0 DT_SIZE_M(56)>;
+				reg = <0x0 DT_SIZE_M(48)>;
 			};
 
 			/* Model storage - 8 MB, XIP-addressable */
-			model_partition: partition@3800000 {
+			model_partition: partition@3000000 {
 				label = "tflite_model";
-				reg = <0x3800000 DT_SIZE_M(8)>;
+				reg = <0x3000000 DT_SIZE_M(8)>;
 			};
 
-			/* LittleFS storage - 64 MB */
-			lfs_partition: partition@4000000 {
+			/* LittleFS storage - 8 MB (settings; recordings go to SD).
+			 * Moved from 0x4000000, which is past the end of the part. */
+			lfs_partition: partition@3800000 {
 				label = "lfs_storage";
-				reg = <0x4000000 DT_SIZE_M(64)>;
+				reg = <0x3800000 DT_SIZE_M(8)>;
 			};
 		};
 	};
