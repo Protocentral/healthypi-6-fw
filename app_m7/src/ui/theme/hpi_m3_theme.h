@@ -104,7 +104,7 @@ extern "C" {
 /* Touch floor, device px on the 480x800 panel: every interactive object must
  * be at least this in both axes. Apply with hpi_m3_apply_touch() — never size
  * a control by content. Screens that stack controls must scroll to afford it. */
-#define HPI_M3_TOUCH_MIN 64
+#define HPI_M3_TOUCH_MIN 60
 
 /* Minimum clear space BETWEEN two adjacent targets, so a near-miss lands on
  * nothing rather than the neighbour. Use as pad_row/pad_column wherever
