@@ -188,6 +188,14 @@ target_sources_ifdef(CONFIG_HPI_M4_UPDATE app PRIVATE
     src/control/mcumgr_hpi/hpi_m4fw.c
 )
 
+# ESP32-C6 firmware update relayed over HealthyBridge. The service compiles
+# unconditionally and self-stubs, because the guards in conn_disable,
+# enter_recovery and the OS reset hook ask it whether an update is in flight;
+# only the group-64 adapter is gated.
+target_sources(app PRIVATE
+    src/services/esp32_update_service.c
+)
+
 # The M4 and ESP32-C6 images are verified by THIS application, not by MCUboot
 # (neither is an MCUboot image -- see m4_update_service.h and
 # esp32_update_service.h), so the app needs the public half of the release

@@ -20,6 +20,7 @@
 #include "platform/health.h"
 #include "control/security/hpi_security.h"
 #include "services/connectivity/healthybridge_service.h"
+#include "services/esp32_update_service.h"
 #include "platform/fs_mount.h"
 #include "core/sample_bus.h"
 #include "core/acquisition.h"
@@ -271,6 +272,7 @@ int main(void)
      * ESP32-C6 over the HealthyBridge UART4 link. No-op when
      * CONFIG_HPI_CONNECTIVITY=n. */
     hpi_connectivity_init();
+    hpi_esp32_update_init();
 
     /* start the health monitor now that every subsystem is registered. */
     hpi_health_start();

@@ -498,3 +498,24 @@ config HPI_M4_SIGNING_KEY
 
 	  The name predates the ESP32-C6 update path: this is the release key,
 	  and it verifies every image the application checks itself.
+
+config HPI_ESP32_UPDATE
+	bool "ESP32-C6 firmware update relayed through the M7 (group-64)"
+	default n
+	depends on HPI_CONNECTIVITY
+	select HPI_FW_RELEASE_SIG
+	help
+	  Update the ESP32-C6 network co-processor from the host over the same
+	  USB cable as everything else: group-64 espfw_* (0x00A6-0x00AA) hands
+	  the image to services/esp32_update_service.c, which relays it chunk by
+	  chunk into the C6's inactive OTA slot over the HealthyBridge link
+	  (frame types 0x80/0x81). Nothing is staged on the M7.
+
+	  The C6 does not check signatures, so this does: the image's
+	  ECDSA-P256 signature is verified with the release key (the same key
+	  and verifier as the M4 image) before anything is sent, and COMMIT is
+	  sent only once every byte has been relayed and their SHA-256 matches
+	  the signed digest. Always on -- there is no unsigned mode.
+
+	  Enabled in the signed layer (prj.signed.conf) next to the M4 update;
+	  tools/ci/check_prod_surface.sh --release requires it.

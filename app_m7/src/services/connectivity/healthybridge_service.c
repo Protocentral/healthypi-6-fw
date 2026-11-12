@@ -55,6 +55,15 @@ static volatile bool    g_req_softap;      /* open the provisioning portal */
 static uint8_t g_link_state = HPI_CONN_LINK_OFF;
 static uint8_t g_radios;                   /* radios the thread has applied */
 
+/*
+ * Firmware-update hold (hpi_connectivity_update_hold()). g_hold_req is the
+ * intent, posted by the updater; g_hold is what conn_thread has applied. While
+ * held, link_apply_request() is deferred, so nothing can power the C6 down.
+ */
+static volatile bool g_hold_req;
+static volatile bool g_hold_keep_powered;
+static bool g_hold;
+
 /* Last status the co-processor reported, and when. */
 static struct hpi_hb_wifi_status_resp g_st;
 static int64_t g_st_at;
@@ -475,6 +484,47 @@ static void link_apply_request(void)
 		(g_radios & HPI_CONN_RADIO_BLE) ? " ble" : "");
 }
 
+/*
+ * Apply a change of firmware-update hold. conn_thread only.
+ *
+ * Taking the hold powers the C6 exactly as link_apply_request() would, without
+ * touching the requested state (g_req_*), so that on release the request --
+ * possibly "off", the boot default -- is simply applied again.
+ */
+static void hold_apply(void)
+{
+	bool want = g_hold_req;
+
+	if (want) {
+		g_hold = true;
+		if (g_link_state == HPI_CONN_LINK_OFF) {
+			int rc = healthybridge_link_power(hb, true);
+
+			if (rc != 0 && rc != -ENOSYS) {
+				LOG_ERR("update hold: cannot power the ESP32: %d", rc);
+				g_link_state = HPI_CONN_LINK_FAULT;
+				return;
+			}
+			g_link_state = HPI_CONN_LINK_STARTING;
+			g_st_at = k_uptime_get();
+		}
+		LOG_INF("connectivity held for a co-processor update");
+		return;
+	}
+
+	g_hold = false;
+	if (g_hold_keep_powered && !g_req_powered) {
+		/* Outcome unconfirmed: stay powered, no radio, rather than reset
+		 * a C6 whose image may still be pending verification. */
+		g_req_radios = 0;
+		g_req_powered = true;
+		LOG_WRN("update hold released; ESP32 left powered (image state unconfirmed)");
+	} else {
+		LOG_INF("update hold released");
+	}
+	g_req_pending = true;   /* re-apply whatever is requested */
+}
+
 /* ---- bus consumer thread ---- */
 
 static void conn_thread(void *a, void *b, void *c)
@@ -488,7 +538,10 @@ static void conn_thread(void *a, void *b, void *c)
 	int64_t win = k_uptime_get();
 #endif
 	while (1) {
-		if (g_req_pending) {
+		if (g_hold_req != g_hold) {
+			hold_apply();
+		}
+		if (g_req_pending && !g_hold) {
 			link_apply_request();
 		}
 
@@ -516,7 +569,9 @@ static void conn_thread(void *a, void *b, void *c)
 			bool live = (g_link_state == HPI_CONN_LINK_UP ||
 				     g_link_state == HPI_CONN_LINK_STARTING);
 
-			if (!live) {
+			if (!live || g_hold) {
+				/* Held for a firmware update: the updater's
+				 * frames are the only traffic. */
 				g_skipped++;
 			} else if (g_radios == 0 && f.channel != HPI_CH_VITALS) {
 				/* Powered but no radio: nothing is listening, so
@@ -538,8 +593,12 @@ static void conn_thread(void *a, void *b, void *c)
 		/* Only poll a link that is meant to be powered. Polling one held
 		 * in reset would burn the driver's command timeout every window,
 		 * forever, for an answer that cannot come. */
+		/* While held, poll only until the link answers: once the update
+		 * is talking, a GET_STATUS (20 ms transmit deadline) sent while the
+		 * C6 holds RTS through a flash erase would be cut off mid-frame. */
 		bool poll_due = (g_link_state != HPI_CONN_LINK_OFF &&
-				 now - wpoll >= CONN_WIFI_POLL_MS);
+				 now - wpoll >= CONN_WIFI_POLL_MS &&
+				 !(g_hold && g_link_state == HPI_CONN_LINK_UP));
 
 		if (poll_due) {
 			link_poll();
@@ -552,10 +611,10 @@ static void conn_thread(void *a, void *b, void *c)
 		 * rides the poll cadence so retries are a window apart. */
 		if (g_link_state != HPI_CONN_LINK_OFF) {
 			peer_restart_check();
-			version_maintain(poll_due);
+			version_maintain(poll_due && !g_hold);
 		}
 		/* Cheap: a timestamp compare unless the link has been quiet. */
-		if (g_link_state == HPI_CONN_LINK_UP) {
+		if (g_link_state == HPI_CONN_LINK_UP && !g_hold) {
 			(void)healthybridge_keepalive(hb, CONN_KEEPALIVE_IDLE_MS);
 		}
 #if IS_ENABLED(CONFIG_HPI_CONN_DEBUG)
@@ -692,6 +751,30 @@ int hpi_connectivity_esp_version(char *out, size_t cap)
 	}
 }
 
+int hpi_connectivity_update_hold(void)
+{
+	if (!g_started) {
+		return -ENODEV;
+	}
+	g_hold_keep_powered = false;
+	g_hold_req = true;
+	return 0;
+}
+
+void hpi_connectivity_update_release(bool keep_powered)
+{
+	if (!g_started) {
+		return;
+	}
+	g_hold_keep_powered = keep_powered;
+	g_hold_req = false;
+}
+
+bool hpi_connectivity_update_held(void)
+{
+	return g_hold_req || g_hold;
+}
+
 bool hpi_connectivity_ready(void)
 {
 	/* "The co-processor is powered and answering", not "the service thread
@@ -814,6 +897,9 @@ int hpi_connectivity_esp_version(char *out, size_t cap)
 	return -ENOTSUP;
 }
 int hpi_connectivity_enable(uint8_t radio_mask) { ARG_UNUSED(radio_mask); return -ENOTSUP; }
+int hpi_connectivity_update_hold(void) { return -ENOTSUP; }
+void hpi_connectivity_update_release(bool keep_powered) { ARG_UNUSED(keep_powered); }
+bool hpi_connectivity_update_held(void) { return false; }
 void hpi_connectivity_disable(void) { }
 void hpi_connectivity_get_status(struct hpi_conn_status *out)
 {
