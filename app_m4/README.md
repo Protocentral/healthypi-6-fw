@@ -8,8 +8,8 @@ to test it.**
 > ⚠️ **The M4's intended scope is wider than what is validated.** It is designed for QRS
 > detection, heart rate, SpO₂, HRV and EEG band power. **The ECG→HR path is the only one
 > that has been watched producing a plausible number.** HRV is on by default since
-> 2026-08-31 and now runs on every device, but nothing has ever checked its output
-> against a known RR series; SpO₂ is compiled in and receiving data but yields nothing
+> 2026-08-31 and now runs on every device; its maths is checked on the host against a
+> reference (`tests/hrv/`), but its output has never been checked on hardware; SpO₂ is compiled in and receiving data but yields nothing
 > (it decimates its input twice — see §4 F2); EEG is a stub. Details in §4.
 
 ---
@@ -92,9 +92,9 @@ raw batches M7→M4, `*_VITALS` M4→M7, `*_CONFIG` M7→M4. Batch size 16 sampl
 
 | Capability | State | Notes |
 |------------|-------|-------|
-| **ECG → QRS → HR** | ✅ **Live** | Only fully-working path. Simplified Pan-Tompkins on Lead I |
+| **ECG → QRS → HR** | ✅ **Live** | Only fully-working path. Simplified Pan-Tompkins on Lead I. **Slow to follow a change:** `calculate_heart_rate()` averages the whole 256-interval RR history, so a step from 60 to 100 BPM takes 236 beats (~142 s) to come within 5 BPM (host-measured, `tests/hrv/`; not changed) |
 | **HRV time domain** (SDNN/RMSSD/pNN50) | 🟡 **Runs, not yet validated** | `HRV_ENABLED_DEFAULT=true` since 2026-08-31. Before that it defaulted false and nothing in either core ever called `algorithm_set_hrv_enabled(true)`, so SDNN/RMSSD were computed by no one and the fields they travel in read 0 on every device ever built. Updates every 5 s, needs ≥8 RR intervals. **Maths checked on the host** against a reference (`tests/hrv/`, §6): SDNN/RMSSD/pNN50 agree within 1 ms / 1 %. Not yet checked on hardware with real QRS timing |
-| **HRV freq domain** (LF/HF via CMSIS-DSP FFT) | 🟡 **Runs, not yet validated** | Same default; updates every 60 s, needs ≥32 RR intervals and ≥32 s. **Host test (`tests/hrv/`) finds three defects:** band powers are 1/64 of true (D1), the spectrum covers the *oldest* 64 s of the buffer (D2), and 32–64 s of data gets a truncated window (D3). LF/HF and LFnu/HFnu over a 64 s buffer are correct |
+| **HRV freq domain** (LF/HF via CMSIS-DSP FFT) | 🟡 **Runs, not yet validated** | Same default; updates every 60 s over the **newest** 64 s of RR, needs ≥32 RR intervals and ≥32 s. **Maths checked on the host** (`tests/hrv/`, §6): VLF/LF/HF in ms², LF/HF and LFnu/HFnu agree with the reference within 10 % / 3 points. Three defects the host test found are fixed (2026-11-12): band powers were 1/64 of true (D1, `df` applied twice); the spectrum covered the *oldest* 64 s of the up-to-4-minute buffer (D2); and 32–64 s of data got the first L points of a 256-point window with the full window's normalisation, 20–50 % low and unevenly weighted in time (D3; now a Hann window of the record's own length). Only the LF/HF ratio reaches `hp6_vitals`; the M7 drops the absolute powers. Not yet checked on hardware |
 | **SpO2 + PPG-HR** | 🔴 **Runs, outputs nothing** | Compiled **in** (`main.c:483` is `#if 1`), starts, and registers `PPG_RAW` itself (`spo2_module.c:1285`). Broken by the double decimation in **F2** below |
 | **EEG band power** | 🔴 **Stub** | `eeg_work_handler` only counts batches/sequence errors. `// TODO Phase 3: EEG frequency band analysis`. No FFT yet |
 | **IPC ACKs to M7** | 🔴 Disabled | All `hpi_ipc_send(STATUS, ack)` blocks are `#if 0` — were a suspected buffer-saturation source |
@@ -218,7 +218,9 @@ CMSIS-DSP from the west workspace or `$CMSIS_DSP`), feeds known RR series throug
 LFnu/HFnu with `tests/hrv/hrv_oracle.py`, a from-the-definitions Python reference.
 Known defects are expected failures with their numbers; the run fails on a new
 failure *or* on a known one starting to pass. CI runs it (`m4-hrv-host`). It does not
-exercise QRS detection — RR intervals go straight into the buffer.
+exercise QRS detection — RR intervals go straight into the buffer. The frequency-domain
+defects D1–D3 it found are fixed; the one expected failure left is the HR step
+response (whole-history average, see §4), recorded, not fixed.
 
 **Pre-commit:** `scripts/build.sh m4` builds clean; IPC callbacks stay enqueue-only;
 messages ≤512 B; plain `%u`/`%d` for `uint32_t`/`int32_t` in logs (both cores are
