@@ -63,12 +63,6 @@ CMSIS_SOURCES = [
 # Known defects. Each is referenced by the checks it breaks.
 # --------------------------------------------------------------------------
 
-DEFECT_WINDOW = (
-    "D2: the spectrum is taken over the OLDEST 64 s in the RR buffer, not the "
-    "newest. interpolate_rr_intervals() starts at the oldest of up to 256 "
-    "intervals and stops after 256 samples (64 s), so once the buffer holds "
-    "more than ~64 s the reported LF/HF describes data up to ~3 min old."
-)
 DEFECT_PARTIAL = (
     "D3: with 32-64 s of data (128-255 samples) the code multiplies the "
     "segment by the first L points of a 256-point Hann window - a truncated, "
@@ -370,11 +364,19 @@ def cases(h):
                           abs_xfail=DEFECT_PARTIAL)[0]
 
     # Window position: 128 beats of HF-only, then 128 beats of LF-only.
-    # The most recent 64 s are pure LF.
+    # The most recent 64 s are pure LF. Before D2 was fixed the firmware
+    # analysed the oldest 64 s instead and reported LF/HF 0.0, HFnu 99 %.
     rr = ref.sine_rr(128, 1000, [(30, 0.25)]) + ref.sine_rr(128, 1000, [(30, 0.10)])
     f = run_freq(h, rr)
-    checks += freq_checks("freq: HF then LF, 256 beats (window position)", rr, f,
-                          rel_xfail=DEFECT_WINDOW, check_abs=False)[0]
+    checks += freq_checks("freq: HF then LF, 256 beats (window position)", rr, f)[0]
+
+    # The same after the circular buffer has wrapped: 200 beats of LF, then
+    # 100 of HF. The buffer keeps the last 256 (156 LF + 100 HF); the newest
+    # 64 s are pure HF.
+    rr = ref.sine_rr(200, 1000, [(30, 0.10)]) + ref.sine_rr(100, 1000, [(30, 0.25)])
+    f = run_freq(h, rr)
+    checks += freq_checks("freq: LF then HF, 300 beats (wrapped, newest)",
+                          rr[-256:], f)[0]
 
     return checks
 

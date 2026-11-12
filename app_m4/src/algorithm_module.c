@@ -959,7 +959,8 @@ static void calculate_hrv_time_domain(struct hrv_time_domain *hrv)
  * @brief Linearly interpolate RR intervals to uniform sampling rate
  *
  * RR intervals are unevenly spaced - we interpolate to HRV_INTERP_RATE Hz
- * for FFT processing. Uses simple linear interpolation.
+ * for FFT processing. Uses simple linear interpolation. If the intervals span
+ * more than output_len samples, the most recent output_len are returned.
  *
  * @param rr_intervals Source RR intervals in ms (circular buffer)
  * @param rr_count Number of RR intervals
@@ -983,13 +984,21 @@ static size_t interpolate_rr_intervals(const uint16_t *rr_intervals, size_t rr_c
     }
 
     /* Calculate number of output samples based on interpolation rate */
-    size_t num_samples = (size_t)(total_time_sec * HRV_INTERP_RATE);
+    size_t total_samples = (size_t)(total_time_sec * HRV_INTERP_RATE);
+    size_t num_samples = total_samples;
     if (num_samples > output_len) {
         num_samples = output_len;
     }
     if (num_samples < 8) {
         return 0;  /* Not enough data */
     }
+
+    /* When the buffer spans more than output_len samples, keep the NEWEST
+     * ones: start the grid (total_samples - num_samples) samples in, so the
+     * output is the tail of the full interpolation, on the same grid. Starting
+     * at t = 0 here used to analyse the oldest 64 s of up to ~4 min of RR. */
+    float32_t dt = 1.0f / HRV_INTERP_RATE;
+    float32_t t_start = (float32_t)(total_samples - num_samples) * dt;
 
     /* Build cumulative time array and RR values */
     size_t rr_idx = 0;
@@ -1006,9 +1015,8 @@ static size_t interpolate_rr_intervals(const uint16_t *rr_intervals, size_t rr_c
     rr_next = (float32_t)rr_intervals[next_idx];
 
     /* Interpolate to uniform rate */
-    float32_t dt = 1.0f / HRV_INTERP_RATE;
     for (size_t i = 0; i < num_samples; i++) {
-        float32_t t = i * dt;
+        float32_t t = t_start + i * dt;
 
         /* Advance through RR intervals until we bracket current time */
         while (t >= t_next && rr_idx < rr_count - 1) {
