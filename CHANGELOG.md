@@ -32,17 +32,20 @@ Versions here are the **firmware** version reported by the device
   Band powers and LF/HF now agree with an independent reference; only LF/HF is
   carried in `hp6_vitals`, so the scale fix changes nothing a host sees; the
   other two do change the LF/HF it receives. Not yet checked on hardware.
+- **ECG heart rate follows a change in seconds, not minutes (M4).** It was the
+  mean of the whole 256-beat RR history, so a step from 60 to 100 BPM took 236
+  beats (~2.4 minutes) to be reported within 5 BPM. It is now the median of the
+  newest 8 RR intervals: the same step, either direction, settles in 5 beats,
+  and a single premature, missed or extra beat no longer moves the reading (a
+  plain mean of 8 would have swung it by up to 8 BPM). A steady rhythm reads
+  exactly as before, and the first rate still appears after 4 beats. HRV is
+  unchanged and still uses the full history. Checked on the host
+  (`app_m4/tests/hrv/`); not yet checked against real QRS detection on hardware.
 
 ### Changed
 - The release bundle is now named `hpi6-firmware-<version>.zip` instead of
   `hpi6-<version>.hpifw`. The format and signing are unchanged: it was always a
   plain zip. Tools read it by content, so existing `.hpifw` files still work.
-
-### Known limitations
-- **ECG heart rate is slow to follow a change.** The M4 averages the whole
-  256-beat RR history, so a step from 60 to 100 BPM takes about 236 beats
-  (~2.4 minutes) to be reported within 5 BPM. Measured on the host; not yet
-  changed.
 
 ## [1.0.0] — unreleased
 
