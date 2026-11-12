@@ -195,6 +195,13 @@ target_sources_ifdef(CONFIG_HPI_M4_UPDATE app PRIVATE
 target_sources(app PRIVATE
     src/services/esp32_update_service.c
 )
+target_sources_ifdef(CONFIG_HPI_ESP32_UPDATE app PRIVATE
+    src/control/mcumgr_hpi/hpi_espfw.c
+)
+# Refuse the stock os/reset while a C6 update could be lost to it.
+target_sources_ifdef(CONFIG_MCUMGR_GRP_OS_RESET_HOOK app PRIVATE
+    src/control/mcumgr_hpi/hpi_reset_hook.c
+)
 
 # The M4 and ESP32-C6 images are verified by THIS application, not by MCUboot
 # (neither is an MCUboot image -- see m4_update_service.h and

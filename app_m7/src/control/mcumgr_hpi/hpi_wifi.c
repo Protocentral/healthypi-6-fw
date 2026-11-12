@@ -22,6 +22,7 @@
 
 #include "hpi_mgmt_group.h"
 #include "services/connectivity/healthybridge_service.h"
+#include "services/esp32_update_service.h"
 #include "control/security/hpi_security.h"
 
 #include <zephyr/logging/log.h>
@@ -171,6 +172,15 @@ int hpi_conn_disable_write(struct smp_streamer *ctxt)
 {
 	zcbor_state_t *zse = ctxt->writer->zs;
 
+	/* Putting the C6 into reset mid-update, or while its new image is still
+	 * pending verification, rolls the update back. Refuse, rather than let
+	 * the service quietly defer it, so the host knows why the radio stayed
+	 * up. (The UI's toggles are deferred by the service instead.) */
+	if (hpi_esp32_update_busy()) {
+		bool e = smp_add_cmd_err(zse, HPI_MGMT_GROUP_ID,
+					 HPI_MGMT_ERR_ESP_UPDATE_ACTIVE);
+		return e ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+	}
 	hpi_connectivity_disable();
 	return zcbor_tstr_put_lit(zse, "ok") && zcbor_bool_put(zse, true)
 		       ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;

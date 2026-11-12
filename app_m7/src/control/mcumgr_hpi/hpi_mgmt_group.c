@@ -51,6 +51,14 @@ int hpi_m4fw_commit(struct smp_streamer *ctxt);
 int hpi_m4fw_status(struct smp_streamer *ctxt);
 int hpi_m4fw_abort(struct smp_streamer *ctxt);
 #endif
+#if defined(CONFIG_HPI_ESP32_UPDATE)
+/* Implemented in hpi_espfw.c. */
+int hpi_espfw_begin(struct smp_streamer *ctxt);
+int hpi_espfw_chunk(struct smp_streamer *ctxt);
+int hpi_espfw_commit(struct smp_streamer *ctxt);
+int hpi_espfw_status(struct smp_streamer *ctxt);
+int hpi_espfw_abort(struct smp_streamer *ctxt);
+#endif
 #if defined(CONFIG_HPI_RECOVERY_MODE)
 /* Implemented in hpi_recovery.c. */
 int hpi_recovery_read(struct smp_streamer *ctxt);
@@ -125,6 +133,19 @@ static const struct mgmt_handler hpi_mgmt_group_handlers[] = {
 #if defined(CONFIG_HPI_RECOVERY_MODE)
 	[HPI_MGMT_CMD_ENTER_RECOVERY] = { .mh_read = hpi_recovery_read,
 					  .mh_write = hpi_recovery_write },
+#endif
+#if defined(CONFIG_HPI_ESP32_UPDATE)
+	/* ESP32-C6 update relayed over HealthyBridge. See hpi_espfw.c. */
+	[HPI_MGMT_CMD_ESPFW_BEGIN]   = { .mh_read = NULL,
+					 .mh_write = hpi_espfw_begin },
+	[HPI_MGMT_CMD_ESPFW_CHUNK]   = { .mh_read = NULL,
+					 .mh_write = hpi_espfw_chunk },
+	[HPI_MGMT_CMD_ESPFW_COMMIT]  = { .mh_read = NULL,
+					 .mh_write = hpi_espfw_commit },
+	[HPI_MGMT_CMD_ESPFW_STATUS]  = { .mh_read = hpi_espfw_status,
+					 .mh_write = NULL },
+	[HPI_MGMT_CMD_ESPFW_ABORT]   = { .mh_read = NULL,
+					 .mh_write = hpi_espfw_abort },
 #endif
 	[HPI_MGMT_CMD_TELEMETRY]     = { .mh_read = hpi_telemetry_read,
 					 .mh_write = NULL },

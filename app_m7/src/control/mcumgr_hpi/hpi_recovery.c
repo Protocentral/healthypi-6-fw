@@ -17,6 +17,7 @@
 
 #include "hpi_mgmt_group.h"
 #include "services/dfu_service.h"
+#include "services/esp32_update_service.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -76,6 +77,15 @@ int hpi_recovery_write(struct smp_streamer *ctxt)
 
 	if (zcbor_map_decode_bulk(zsd, decoders, ARRAY_SIZE(decoders), &decoded) != 0) {
 		return MGMT_ERR_EINVAL;
+	}
+
+	/* Recovery means an M7 reset, and the M7 resetting holds the C6 in reset:
+	 * mid-update or before its new image is VALID, that rolls it back.
+	 * Disarming is always allowed. */
+	if (arm && hpi_esp32_update_busy()) {
+		LOG_WRN("enter_recovery: refused -- ESP32-C6 update in progress");
+		return smp_add_cmd_err(zse, HPI_MGMT_GROUP_ID, HPI_MGMT_ERR_ESP_UPDATE_ACTIVE)
+			? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
 	}
 
 	int rc = arm ? hpi_dfu_recovery_arm() : hpi_dfu_recovery_disarm();

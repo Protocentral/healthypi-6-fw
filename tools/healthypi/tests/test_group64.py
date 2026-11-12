@@ -271,3 +271,89 @@ def test_an_unrelated_TypeError_is_not_relabelled():
     conn = Connection(client=Client(), port="/dev/null")
     with pytest.raises(TypeError, match="genuine"):
         asyncio.run(conn.request(g.device_info()))
+
+
+# --- ESP32-C6 update (espfw_*) ------------------------------------------------
+#
+# Offline round-trips for the catalog entries the host updater will be written
+# against: the requests encode the keys the firmware decodes, and replies in the
+# shapes the firmware emits parse into the generated classes.
+
+
+def test_espfw_commands_are_generated_with_the_right_ids_and_ops():
+    want = {
+        "espfw_begin": (0x00A6, OP.WRITE),
+        "espfw_chunk": (0x00A7, OP.WRITE),
+        "espfw_commit": (0x00A8, OP.WRITE),
+        "espfw_status": (0x00A9, OP.READ),
+        "espfw_abort": (0x00AA, OP.WRITE),
+    }
+    for name, (cmd_id, op) in want.items():
+        assert name in g, name
+        assert g[name].cmd_id == cmd_id
+    assert g.espfw_status().header.op == OP.READ
+    assert g.espfw_abort().header.op == OP.WRITE
+    assert g.espfw_commit().header.command_id == 0x00A8
+
+
+def test_espfw_begin_requires_and_encodes_the_signature():
+    req = g.espfw_begin(len=1_448_640, sha=bytes(range(32)), sig=b"\x01" * 64)
+    assert req.header.op == OP.WRITE and req.header.group_id == 64
+    assert req.header.command_id == 0x00A6
+    body = cbor2.loads(req.BYTES[8:])
+    assert body == {"len": 1_448_640, "sha": bytes(range(32)), "sig": b"\x01" * 64}
+    # Unlike m4fw_begin, the signature is not optional: there is no unsigned mode.
+    assert not catalog.BY_NAME["espfw_begin"].request[2].optional
+    with pytest.raises(Exception):
+        g.espfw_begin(len=1, sha=b"\x00" * 32)
+
+
+def test_espfw_chunk_round_trip():
+    req = g.espfw_chunk(off=4096, data=b"\xe9" * 400)
+    assert cbor2.loads(req.BYTES[8:]) == {"off": 4096, "data": b"\xe9" * 400}
+    r = _reply(g.espfw_chunk.Response, {"off": 4496}, 0x00A7, op=OP.WRITE_RSP)
+    assert r.off == 4496
+
+
+def test_espfw_status_reply_parses_in_every_phase():
+    base = {
+        "st": 0, "len": 0, "rx": 0, "err": 0, "c6_err": 0, "c6_st": 255,
+        "img": 255, "other": 255, "slot": 255, "ver": "", "valid": False,
+        "pend": False, "busy": False,
+    }
+    phases = [
+        dict(base),                                                    # idle, C6 off
+        {**base, "st": 2, "len": 1_448_640, "rx": 4096, "c6_st": 1,
+         "img": 0, "other": 255, "slot": 0, "ver": "1.1.0", "valid": True,
+         "busy": True},                                                # receiving
+        {**base, "st": 5, "len": 1_448_640, "rx": 1_448_640, "c6_st": 0,
+         "img": 1, "other": 0, "slot": 1, "ver": "1.2.0", "pend": True,
+         "busy": True},                                                # verifying
+        {**base, "st": 7, "err": 14, "len": 1_448_640, "rx": 1_448_640,
+         "c6_st": 0, "img": 0, "other": 4, "slot": 0, "ver": "1.1.0",
+         "valid": True},                                               # rolled back
+        {**base, "st": 8, "err": 4, "c6_err": 6, "len": 9000, "rx": 9000,
+         "c6_st": 4, "img": 0, "slot": 0, "ver": "1.1.0", "valid": True},  # refused
+    ]
+    for p in phases:
+        r = _reply(g.espfw_status.Response, p, 0x00A9)
+        assert (r.st, r.err, r.c6_err, r.img, r.ver, r.busy) == (
+            p["st"], p["err"], p["c6_err"], p["img"], p["ver"], p["busy"]
+        )
+        assert catalog.ESPFW_STATES[r.st] and catalog.ESPFW_ERRORS[r.err]
+
+
+def test_espfw_new_error_codes_are_named():
+    from healthypi.smp.group64 import fmt_error
+
+    for code, name in (
+        (272, "ESP_NO_REPLY"),
+        (273, "ESP_REFUSED"),
+        (274, "ESP_UPDATE_ACTIVE"),
+        (275, "IMAGE_INCOMPLETE"),
+    ):
+        class E:
+            class err:
+                rc = code
+
+        assert fmt_error(E()).startswith(f"{name} ({code})")

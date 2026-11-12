@@ -27,7 +27,7 @@ extern "C" {
 /* Group-64 schema version returned by hpi/device_info.gv.
  * (major << 8) | minor — bump minor for additive changes, major for
  * breaking ones. */
-#define HPI_MGMT_SCHEMA_VERSION 0x0002U
+#define HPI_MGMT_SCHEMA_VERSION 0x0003U   /* 0x0003: espfw_* (0x00A6-0x00AA) */
 
 /* Command IDs within group 64, allocated in subranges by
  * subsystem. */
@@ -118,6 +118,15 @@ enum hpi_mgmt_cmd_id {
 	 * still runs but needs reflashing. Signed flavor only. */
 	HPI_MGMT_CMD_ENTER_RECOVERY    = 0x00A5,
 
+	/* ESP32-C6 firmware update, relayed by the M7 into the C6's inactive OTA
+	 * slot over HealthyBridge (see esp32_update_service.h). begin and commit
+	 * return at once; the host polls espfw_status. Signed flavor. */
+	HPI_MGMT_CMD_ESPFW_BEGIN       = 0x00A6,
+	HPI_MGMT_CMD_ESPFW_CHUNK       = 0x00A7,
+	HPI_MGMT_CMD_ESPFW_COMMIT      = 0x00A8,
+	HPI_MGMT_CMD_ESPFW_STATUS      = 0x00A9,
+	HPI_MGMT_CMD_ESPFW_ABORT       = 0x00AA,
+
 	/* 0x00F0 – 0x00FF  Async notifications (device-initiated) */
 	HPI_MGMT_EVT_CHARGE_STATE      = 0x00F0,
 	HPI_MGMT_EVT_BATT_LOW          = 0x00F1,
@@ -172,6 +181,10 @@ enum hpi_mgmt_err {
 	HPI_MGMT_ERR_IMAGE_TOO_LARGE       = 269,  /* exceeds staging or bank 2 */
 	HPI_MGMT_ERR_BUSY                  = 270,  /* an update is already in flight */
 	HPI_MGMT_ERR_IMAGE_NOT_M4          = 271,  /* verifies, but is not an M4 image */
+	HPI_MGMT_ERR_ESP_NO_REPLY          = 272,  /* the C6 did not answer; resend the same request */
+	HPI_MGMT_ERR_ESP_REFUSED           = 273,  /* the C6 refused; session over, see espfw_status */
+	HPI_MGMT_ERR_ESP_UPDATE_ACTIVE     = 274,  /* refused: a C6 update or its self-test is running */
+	HPI_MGMT_ERR_IMAGE_INCOMPLETE      = 275,  /* commit before every byte was sent */
 };
 
 #ifdef __cplusplus

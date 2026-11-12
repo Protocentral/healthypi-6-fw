@@ -29,7 +29,7 @@ from smpgroup import Command, Field, Group, Op, Status, T
 GROUP_ID = 64
 
 #: HPI_MGMT_SCHEMA_VERSION reported by device_info's `gv` field.
-SCHEMA_VERSION = 0x0002
+SCHEMA_VERSION = 0x0003
 
 # --- group-64 extension error codes (MGMT_ERR_USER_START = 256) -------------
 
@@ -50,6 +50,60 @@ ERRORS: dict[int, tuple[str, str]] = {
     269: ("IMAGE_TOO_LARGE", "exceeds staging or bank 2"),
     270: ("BUSY", "an update is already in flight"),
     271: ("IMAGE_NOT_M4", "verifies, but is not an M4 image"),
+    272: ("ESP_NO_REPLY", "the ESP32-C6 did not answer in time; resend the same request"),
+    273: ("ESP_REFUSED", "the ESP32-C6 refused; the update session is over -- see espfw_status"),
+    274: ("ESP_UPDATE_ACTIVE", "refused: an ESP32-C6 update is in transfer or its new "
+          "image is still proving itself; a reset now would roll it back"),
+    275: ("IMAGE_INCOMPLETE", "commit before every byte of the image was sent"),
+}
+
+# --- ESP32-C6 update (espfw_*, 0x00A6-0x00AA) -------------------------------
+#
+# The device bounds one espfw_chunk at 1.6 s: a 0.6 s transmit deadline (reached
+# only while the C6 holds RTS through a flash erase) plus a 1 s wait for its ack
+# (HPI_ESPFW_CHUNK_BOUND_MS, esp32_update_service.h). The other four answer in
+# well under that. A host must use a per-request timeout comfortably above the
+# bound for EVERY espfw_* request -- the 2.5 s transport default is too close, and
+# has bitten this project twice -- hence a stated figure, carried on each
+# command as meta["timeout_s"].
+
+#: Device-side bound on one espfw_chunk reply, seconds.
+ESPFW_CHUNK_DEVICE_BOUND_S = 1.6
+#: Per-request timeout a host must use for every espfw_* command, seconds.
+ESPFW_TIMEOUT_S = 5.0
+
+#: espfw_status `st` -- ``enum hpi_espfw_state`` (esp32_update_service.h).
+ESPFW_STATES: dict[int, str] = {
+    0: "IDLE",
+    1: "PREPARING",
+    2: "RECEIVING",
+    3: "COMMITTING",
+    4: "REBOOTING",
+    5: "VERIFYING",
+    6: "DONE",
+    7: "ROLLED_BACK",
+    8: "FAILED",
+    9: "TIMEOUT",
+}
+
+#: espfw_status `err` -- ``enum hpi_espfw_err`` (esp32_update_service.h).
+ESPFW_ERRORS: dict[int, str] = {
+    0: "NONE",
+    1: "SIG_INVALID",
+    2: "LINK",
+    3: "NO_OTA",
+    4: "C6_REFUSED",
+    5: "NO_REPLY",
+    6: "PROTOCOL",
+    7: "DIGEST",
+    8: "INCOMPLETE",
+    9: "ABORTED",
+    10: "HOST_IDLE",
+    11: "CRYPTO",
+    12: "NOT_BACK",
+    13: "NOT_VALID",
+    14: "ROLLED_BACK",
+    15: "NOT_SWITCHED",
 }
 
 # --- stock-group error codes we can also be answered with -------------------
@@ -501,7 +555,76 @@ COMMANDS: tuple[Command, ...] = (
         write_request=(Field("arm", T.BOOL), Field("rst", T.BOOL, "reset now")),
         write_response=(Field("armed", T.BOOL), Field("rst", T.BOOL, "will reset")),
         errors=(256,),
-        doc="reboots into MCUboot serial recovery; group 64 disappears until reflash",
+        doc="reboots into MCUboot serial recovery; group 64 disappears until reflash. "
+        "write refuses arm with 274 while an ESP32-C6 update is active",
+    ),
+    # -- ESP32-C6 firmware update --------------------------------------------
+    # Relayed by the M7 into the C6's inactive OTA slot; nothing is staged on
+    # the M7. Sequence and polling rules: docs/MCUMGR_COMMANDS.md §5.12.
+    Command(
+        0x00A6,
+        "espfw_begin",
+        (W,),
+        meta={"unlock": True, "signed_build": True, "timeout_s": ESPFW_TIMEOUT_S},
+        request=(
+            Field("len", T.UINT, "image size, bytes (the .bin, not the merged image)"),
+            Field("sha", T.BSTR, "SHA-256 of the image"),
+            Field("sig", T.BSTR, "ECDSA-P256 r||s over sha, release key -- REQUIRED"),
+        ),
+        errors=(256, 257, 260, 268, 269, 270),
+        doc="verifies the signature, then returns at once; poll espfw_status "
+        "until st=2 (receiving) or 8 (failed). 268 = bad signature, nothing sent",
+    ),
+    Command(
+        0x00A7,
+        "espfw_chunk",
+        (W,),
+        meta={"unlock": True, "signed_build": True, "timeout_s": ESPFW_TIMEOUT_S},
+        request=(Field("off", T.UINT), Field("data", T.BSTR, "1-1016 bytes")),
+        response=(Field("off", T.UINT, "next expected offset"),),
+        errors=(256, 257, 260, 272, 273),
+        doc="relayed to the C6 before the reply (<= 1.6 s). 272: resend the SAME "
+        "chunk; resending the last accepted chunk is harmless. 273: session over",
+    ),
+    Command(
+        0x00A8,
+        "espfw_commit",
+        (W,),
+        meta={"unlock": True, "signed_build": True, "timeout_s": ESPFW_TIMEOUT_S},
+        errors=(256, 257, 268, 275),
+        doc="checks length and digest, then returns at once; never resend it -- "
+        "poll espfw_status until st is 6 done, 7 rolled back, 8 failed or 9 timeout",
+    ),
+    Command(
+        0x00A9,
+        "espfw_status",
+        (R,),
+        meta={"signed_build": True, "timeout_s": ESPFW_TIMEOUT_S},
+        response=(
+            Field("st", T.UINT, "session state, ESPFW_STATES"),
+            Field("len", T.UINT, "image size announced at begin"),
+            Field("rx", T.UINT, "bytes relayed and acknowledged by the C6"),
+            Field("err", T.UINT, "M7 service error, ESPFW_ERRORS"),
+            Field("c6_err", T.UINT, "raw C6 OTA status code of the last refusal"),
+            Field("c6_st", T.UINT, "C6 receiver state; 255 unknown"),
+            Field("img", T.UINT, "C6 running image state; 255 unknown"),
+            Field("other", T.UINT, "C6 other slot's image state; 255 unknown"),
+            Field("slot", T.UINT, "C6 running slot; 255 unknown"),
+            Field("ver", T.TSTR, "C6 running version, '' if unknown"),
+            Field("valid", T.BOOL, "running image is VALID"),
+            Field("pend", T.BOOL, "running image is PENDING_VERIFY"),
+            Field("busy", T.BOOL, "a C6 or M7 reset now would lose the update"),
+        ),
+        doc="answered from cache; never touches the link. Safe to poll at 1 Hz",
+    ),
+    Command(
+        0x00AA,
+        "espfw_abort",
+        (W,),
+        meta={"signed_build": True, "timeout_s": ESPFW_TIMEOUT_S},
+        errors=(256, 270),
+        doc="sends ABORT before COMMIT (C6 untouched); 270 once COMMIT has gone. "
+        "On a finished session it clears the result",
     ),
 )
 

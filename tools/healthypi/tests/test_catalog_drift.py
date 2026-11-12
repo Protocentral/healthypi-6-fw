@@ -52,19 +52,19 @@ def test_catalog_matches_firmware(report):
 
 def test_firmware_actually_parsed(report):
     """Guard against a silent no-op if the C layout ever changes shape."""
-    assert len(report.declared) >= 46, report.declared
-    assert len(report.routed) == 35, sorted(report.routed)
-    assert len(report.errors) == 16, report.errors
+    assert len(report.declared) >= 51, report.declared
+    assert len(report.routed) == 40, sorted(report.routed)
+    assert len(report.errors) == 20, report.errors
 
 
 def test_surface_counts():
     """The headline numbers in GROUP64_SSOT.md."""
     g = catalog.HPI_GROUP
-    assert len(g.routed()) == 35
-    assert len(g.live()) == 34  # wifi_scan is a stub
+    assert len(g.routed()) == 40
+    assert len(g.live()) == 39  # wifi_scan is a stub
     assert len(g.unreachable()) == 11
-    assert len(g.tagged("unlock")) == 12
-    assert len(g.tagged("signed_build")) == 5
+    assert len(g.tagged("unlock")) == 15
+    assert len(g.tagged("signed_build")) == 10
 
 
 def test_stub_is_marked_not_live():
@@ -196,3 +196,36 @@ def test_stock_os_errors_match_zephyr():
     spec = {name: code for code, (name, _hint) in catalog.STOCK_ERRORS[0].items()}
     assert spec == fw
     assert fw["RTC_NOT_SET"] == catalog.OS_ERR_RTC_NOT_SET
+
+
+# --- ESP32-C6 update: the status enums and the timeout contract --------------
+
+ESPFW_H = REPO / "app_m7" / "src" / "services" / "esp32_update_service.h"
+
+
+@pytest.mark.skipif(not ESPFW_H.is_file(), reason="firmware tree not present")
+def test_espfw_state_and_error_tables_match_firmware():
+    """espfw_status `st` / `err` are numbers; the names a host prints for them
+    come from the catalog, so they are held to the C enums like everything else."""
+    text = ESPFW_H.read_text()
+    states = _parse_c_enum(text, "enum hpi_espfw_state", "HPI_ESPFW_")
+    errors = _parse_c_enum(text, "enum hpi_espfw_err", "HPI_ESPFW_ERR_")
+    assert states and errors, "parsed nothing -- the enums changed shape"
+    assert {v: k for k, v in states.items()} == catalog.ESPFW_STATES
+    assert {v: k for k, v in errors.items()} == catalog.ESPFW_ERRORS
+
+
+@pytest.mark.skipif(not ESPFW_H.is_file(), reason="firmware tree not present")
+def test_espfw_host_timeout_exceeds_the_device_bound():
+    """The chunk handler blocks for the C6's ack. A host timeout at or below that
+    bound reports a failure for a chunk the device is still relaying -- the
+    2.5 s transport default did exactly that to m4fw_commit."""
+    import re
+
+    text = ESPFW_H.read_text()
+    bound_ms = int(re.search(r"HPI_ESPFW_CHUNK_BOUND_MS\s+(\d+)U", text).group(1))
+    assert bound_ms / 1000 == catalog.ESPFW_CHUNK_DEVICE_BOUND_S
+    for cmd in catalog.HPI_GROUP:
+        if cmd.name.startswith("espfw_"):
+            assert cmd.meta.get("timeout_s") == catalog.ESPFW_TIMEOUT_S, cmd.name
+    assert catalog.ESPFW_TIMEOUT_S >= 2 * catalog.ESPFW_CHUNK_DEVICE_BOUND_S

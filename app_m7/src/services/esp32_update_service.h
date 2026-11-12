@@ -58,7 +58,7 @@ extern "C" {
  * Bound on one chunk() call, i.e. on the espfw_chunk handler: the DATA frame's
  * transmit deadline (600 ms, reached only if the C6 holds RTS) plus the reply
  * wait (1000 ms). A host's per-request timeout must exceed it; 5 s is the
- * documented requirement (docs/MCUMGR_COMMANDS.md §5.11).
+ * documented requirement (docs/MCUMGR_COMMANDS.md §5.12).
  */
 #define HPI_ESPFW_REPLY_MS        1000U
 #define HPI_ESPFW_CHUNK_BOUND_MS  1600U

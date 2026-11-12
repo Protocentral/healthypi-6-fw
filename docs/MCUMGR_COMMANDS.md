@@ -18,7 +18,7 @@ send a custom group ID — most can.
 - [8. Reserved command IDs](#8-reserved-command-ids)
 - [9. Compatibility](#9-compatibility)
 
-Firmware 1.0.0 · group schema version `0x0002`.
+Firmware 1.0.0 · group schema version `0x0003`.
 
 ---
 
@@ -148,7 +148,7 @@ These work with any MCUmgr client.
 | Group | Command | Notes |
 |---|---|---|
 | `os` (0) | `echo` | Connectivity check — the way to identify CDC 1 |
-| `os` (0) | `reset` | Reboot the device |
+| `os` (0) | `reset` | Reboot the device. **Signed builds refuse it** with group-64 **274** while an ESP32-C6 update is in flight or its new image is still pending verification (§5.12); `{"force": true}` overrides |
 | `os` (0) | `mcumgr_params` | Buffer size and count |
 | `os` (0) | `datetime` read/write | Sets the real-time clock — **do this before recording**, or recordings carry no wall-clock time |
 | `settings` (3) | read/write/delete | Device settings |
@@ -367,6 +367,8 @@ secret, and a locked device must still be able to get itself online.
 #### `0x0076` conn_disable — write
 
 `{}` → `ok` bool. Radios down and the co-processor back into reset. Idempotent.
+Refused with **274** while an ESP32-C6 update is in flight or its new image is
+still pending verification (§5.12) — a reset then would roll the update back.
 
 #### `0x0077` conn_status — read
 
@@ -562,7 +564,144 @@ Reboots into the bootloader's serial recovery mode, used to rescue a device
 whose application will not start. In recovery the device enumerates as a
 **single** CDC port named *HealthyPi 6 Recovery* and only the bootloader's `img`
 group is available — everything in this document is gone until the device is
-reflashed. Returns **256** if the mechanism is unavailable.
+reflashed. Returns **256** if the mechanism is unavailable, and refuses `arm`
+with **274** while an ESP32-C6 update is in flight or pending verification
+(§5.12).
+
+### 5.12. Network co-processor (ESP32-C6) firmware update
+
+Present only in **signed** builds; elsewhere every command returns `ENOTSUP`.
+The M7 relays the image, chunk by chunk, into the ESP32-C6's **inactive** OTA
+slot over its internal link. Nothing is staged on the M7, and the C6 keeps
+running its current image until the very end.
+
+> **Not yet run on hardware.** The device side is built and unit-tested against
+> the C6's golden frames, but no C6 has been updated through it.
+
+| ID | Command | Op | 🔒 | Request | Response |
+|---|---|---|---|---|---|
+| `0x00A6` | espfw_begin | write | 🔒 | `len` uint, `sha` bstr (32), `sig` bstr (64, **required**) | `{}` |
+| `0x00A7` | espfw_chunk | write | 🔒 | `off` uint, `data` bstr (1–1016 B) | `off` uint (next expected) |
+| `0x00A8` | espfw_commit | write | 🔒 | `{}` | `{}` |
+| `0x00A9` | espfw_status | read | | `{}` | see below |
+| `0x00AA` | espfw_abort | write | | `{}` | `{}` |
+
+**The image** is the C6 *application* binary (`build.hp6/healthybridge_esp32c6.bin`
+in healthybridge-esp32), not the merged flash image. `sha` is its SHA-256 and
+`sig` an ECDSA-P256 signature over that digest with the **release key** — the
+same key and the same raw `r||s` form as `m4fw_begin`'s `sig`. There is no
+unsigned mode: the C6 does not check signatures, so the M7 refuses to start
+without one.
+
+**Per-request timeout: 5 s for every `espfw_*` command** (the catalog carries it
+as `timeout_s`). The device bounds `espfw_chunk` at 1.6 s — a 0.6 s transmit
+deadline plus a 1 s wait for the C6's acknowledgement — and the others answer
+sooner. The 2.5 s default of some clients is too close.
+
+#### Sequence
+
+1. `espfw_status` — confirms the command set exists (a build without it answers
+   `ENOTSUP`) and that `busy` is false.
+2. `espfw_begin {len, sha, sig}`. The signature is checked **first**: **268**
+   means it did not verify and nothing was sent anywhere. On success the reply
+   is empty and immediate; the device then powers the C6 if it was off, takes
+   over its link and opens the transfer.
+3. Poll `espfw_status` about once a second until `st` = **2** (receiving), or
+   **8** (failed — read `err`). Allow ~15 s.
+4. `espfw_chunk {off, data}` in order from offset 0. Each chunk is relayed to the
+   C6 and acknowledged *before* the reply; `off` in the reply is the next offset.
+   - **272** `ESP_NO_REPLY`: the C6 did not answer in time. The session is
+     intact — resend **the same chunk**. Resending the chunk accepted last
+     (same `off`, same length) is always harmless.
+   - **260**: out of order or past `len`; read `rx` from `espfw_status` and
+     resume there.
+   - **273** `ESP_REFUSED`: the C6 refused; the session is over (`st` 8,
+     `c6_err` says why). Start again with `begin`.
+   - Do not pause more than **30 s** between chunks: the C6 abandons the
+     transfer at 30 s of silence and so does the M7.
+5. `espfw_commit`. The device checks that every byte was relayed (**275**
+   otherwise) and that their SHA-256 equals the signed `sha` (**268**
+   otherwise) — either failure sends ABORT, and the C6 never sees COMMIT.
+   On success the reply is immediate and empty. **Never send it twice.**
+6. Poll `espfw_status` about once a second until `st` is final:
+
+| `st` | Meaning | Host action |
+|---|---|---|
+| 6 `DONE` | new image running from the other slot and **VALID** | success |
+| 7 `ROLLED_BACK` | new image failed its self-test; old image running (`other` = 3/4) | report; the C6 is fine on its old firmware |
+| 8 `FAILED` | see `err`/`c6_err`; the C6's boot slot is unchanged | report; may retry from `begin` |
+| 9 `TIMEOUT` | outcome not confirmed in time; the C6 is left powered | keep polling: `st` turns 6 or 7 if the C6 reports later; treat `busy` = true as "do not reset" |
+
+Commit to `DONE` normally takes ~1 s of C6 verification, a restart of a few
+seconds and ~3 s of link self-test; the device gives the restart 10 s and the
+self-test 20 s. Allow **45 s** before treating `TIMEOUT` as final.
+
+`espfw_abort` before commit sends ABORT (the C6's running image is untouched)
+and returns `st` 0 with `err` 9; after commit it returns **270** — too late,
+the outcome is the C6's. On a finished session it clears the result.
+
+#### `espfw_status` reply
+
+| Key | Type | Meaning |
+|---|---|---|
+| `st` | uint | session state: 0 idle · 1 preparing · 2 receiving · 3 committing · 4 rebooting · 5 verifying · 6 done · 7 rolled back · 8 failed · 9 timeout |
+| `len` | uint | image size announced at `begin` |
+| `rx` | uint | bytes relayed **and acknowledged by the C6** |
+| `err` | uint | why the session ended badly — table below; 0 none |
+| `c6_err` | uint | the C6's own status code for its last refusal (HealthyBridge OTA namespace, e.g. 6 = image invalid, 8 = running image still unconfirmed) |
+| `c6_st` | uint | C6 receiver: 0 idle · 1 receiving · 2 verifying · 3 committed · 4 error · 255 unknown |
+| `img` | uint | C6 running image: 0 valid · 1 pending verify · 2 new · 3 invalid · 4 aborted · 5 undefined · 255 unknown |
+| `other` | uint | the other slot, same values; 3 or 4 after a rollback |
+| `slot` | uint | C6 running slot, 0 or 1; 255 unknown |
+| `ver` | tstr | C6 running firmware version; `""` if unknown |
+| `valid` | bool | `img` = 0 |
+| `pend` | bool | `img` = 1 — a reset now would roll it back |
+| `busy` | bool | a session is between `begin` and a final state, or the C6's image is pending: **do not reset the device or call `conn_disable`** |
+
+Answered from a cache; it never touches the C6 and is safe to poll. The C6
+fields are refreshed during a session, and otherwise once each time the C6
+boots (every 2 s while its image is pending), so they read 255 while the C6 is
+powered off. What each phase shows: idle — `st` 0, C6 fields from the last boot
+or 255; preparing — `st` 1, `rx` 0; receiving — `st` 2, `rx` climbing, `c6_st` 1,
+`busy`; committing/rebooting — `st` 3/4, `c6_st` 2→3 then the C6 goes quiet;
+verifying — `st` 5, `slot` changed, `img` 1, `ver` the new version; done —
+`st` 6, `img` 0.
+
+| `err` | Name | Meaning |
+|---|---|---|
+| 1 | `SIG_INVALID` | signature does not verify; nothing was sent |
+| 2 | `LINK` | the C6 could not be powered or never answered |
+| 3 | `NO_OTA` | the C6 answers but not the update protocol: its firmware predates it (update it over its own USB port once) |
+| 4 | `C6_REFUSED` | the C6 refused; see `c6_err` |
+| 5 | `NO_REPLY` | the C6 stopped answering mid-session |
+| 6 | `PROTOCOL` | a C6 reply disagreed with the transfer |
+| 7 | `DIGEST` | the relayed bytes do not hash to `sha` |
+| 8 | `INCOMPLETE` | commit before every byte was relayed |
+| 9 | `ABORTED` | `espfw_abort` |
+| 10 | `HOST_IDLE` | no chunk for 30 s |
+| 11 | `CRYPTO` | the device's crypto library failed |
+| 12 | `NOT_BACK` | the C6 did not come back after COMMIT within 10 s |
+| 13 | `NOT_VALID` | it came back but did not report VALID within 20 s |
+| 14 | `ROLLED_BACK` | the new image rolled itself back |
+| 15 | `NOT_SWITCHED` | the C6 restarted on its old image without recording a rollback |
+
+#### Updating all three processors
+
+The C6 keeps a new image only if, after its restart, it hears from the M7 within
+60 s; **any reset of the M7 or the C6 before `st` reaches a final state with
+`busy` false rolls it back.** So:
+
+1. Update the **M4** (`m4fw_*`) and the **M7** (stock `img` upload) first, then do
+   the one reset (and reconnect) that both need.
+2. Update the **C6 last**, on the new M7 firmware — it is the one that must keep
+   running undisturbed afterwards, and doing it last means no reset follows it.
+   This also covers a device whose current M7 firmware predates these commands
+   (`espfw_status` answers `ENOTSUP`).
+3. Do not send `os reset`, `enter_recovery` or `conn_disable` until
+   `espfw_status.busy` is false. The device refuses the first two and
+   `conn_disable` with **274** while it is true; `os reset {"force": true}` is
+   not refused, and nothing guards a reset from the device's own power menu, the
+   development shell, a watchdog or a power loss.
 
 ---
 
@@ -596,6 +735,10 @@ group code against the standard table reports a confident lie.
 | 269 | `IMAGE_TOO_LARGE` | Image exceeds the target region |
 | 270 | `BUSY` | An update is already in progress |
 | 271 | `IMAGE_NOT_M4` | Image verifies but is not valid for that core |
+| 272 | `ESP_NO_REPLY` | The ESP32-C6 did not answer in time; resend the same request |
+| 273 | `ESP_REFUSED` | The ESP32-C6 refused; the update session is over — see `espfw_status` |
+| 274 | `ESP_UPDATE_ACTIVE` | Refused: an ESP32-C6 update is in flight or its new image is still pending verification; a reset now would roll it back |
+| 275 | `IMAGE_INCOMPLETE` | Commit before every byte of the image was sent |
 
 Replies may also carry `rsn`, a human-readable string. Show it when present.
 
@@ -688,7 +831,8 @@ recordings off the device.**
 
 ## 9. Compatibility
 
-`device_info.gv` reports the group schema version, currently `0x0002`. Within a
+`device_info.gv` reports the group schema version, currently `0x0003` (`0x0003`
+added the ESP32-C6 update commands, §5.12). Within a
 major schema version:
 
 - Command IDs and their meanings do not change.

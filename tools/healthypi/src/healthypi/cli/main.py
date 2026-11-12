@@ -1207,6 +1207,8 @@ def _command_json(c, full: bool) -> dict[str, Any]:
         "unlock": bool(c.meta.get("unlock")),
         "signed_build": bool(c.meta.get("signed_build")),
     }
+    if "timeout_s" in c.meta:
+        out["timeout_s"] = c.meta["timeout_s"]
     if full:
         for key in ("request", "response", "write_request", "write_response"):
             fields = getattr(c, key)

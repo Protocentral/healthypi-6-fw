@@ -20,6 +20,8 @@
 
 #include <healthybridge_esp32_link.h>
 
+#include "services/esp32_update_service.h"
+
 #if IS_ENABLED(CONFIG_HPI_CONNECTIVITY) && defined(HEALTHYBRIDGE_LINK_NODE)
 #define HB_AVAILABLE 1
 #define HB_NODE HEALTHYBRIDGE_LINK_NODE
@@ -525,6 +527,26 @@ static void hold_apply(void)
 	g_req_pending = true;   /* re-apply whatever is requested */
 }
 
+/*
+ * A power-down request that would reset a C6 whose new image is still pending
+ * verification (or mid-update outside a hold, which should not happen) waits
+ * instead: a reset then rolls the image back. Covers every path that ends in
+ * hpi_connectivity_disable() -- the UI's toggles, wifi_forget, the shell -- not
+ * only group-64 conn_disable, which refuses outright. Re-checked every pass.
+ */
+static bool power_down_unsafe(void)
+{
+	static bool logged;
+	bool unsafe = !g_req_powered && g_link_state != HPI_CONN_LINK_OFF &&
+		      hpi_esp32_update_busy();
+
+	if (unsafe && !logged) {
+		LOG_WRN("power-down deferred: ESP32 image pending verification");
+	}
+	logged = unsafe;
+	return unsafe;
+}
+
 /* ---- bus consumer thread ---- */
 
 static void conn_thread(void *a, void *b, void *c)
@@ -541,7 +563,7 @@ static void conn_thread(void *a, void *b, void *c)
 		if (g_hold_req != g_hold) {
 			hold_apply();
 		}
-		if (g_req_pending && !g_hold) {
+		if (g_req_pending && !g_hold && !power_down_unsafe()) {
 			link_apply_request();
 		}
 
