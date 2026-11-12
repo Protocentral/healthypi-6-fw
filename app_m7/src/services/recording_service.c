@@ -13,6 +13,7 @@
 #include "core/channel_registry.h"
 #include "core/sample_formats.h"
 #include "platform/fs_mount.h"
+#include "platform/ext_ram.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
@@ -20,7 +21,6 @@
 #include <zephyr/fs/fs.h>
 #include <zephyr/drivers/rtc.h>
 #include <zephyr/drivers/hwinfo.h>
-#include <zephyr/linker/devicetree_regions.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/crc.h>
@@ -153,12 +153,7 @@ static struct k_work_q s_rec_wq;
 /* The listing index and page cache are ~24 KB together, which internal RAM
  * does not have to spare. They are only touched from s_rec_wq, so external
  * SDRAM is fine. The region is NOLOAD -- not zeroed at boot -- so
- * rec_wq_init() clears them. */
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(sdram1), okay)
-#define REC_EXT_RAM  Z_GENERIC_SECTION(LINKER_DT_NODE_REGION_NAME(DT_NODELABEL(sdram1)))
-#else
-#define REC_EXT_RAM
-#endif
+ * rec_wq_init() clears them. (HPI_EXT_RAM: platform/ext_ram.h.) */
 
 /* ---- state ---- */
 static struct hpi_bus_sub *g_sub;
@@ -1405,7 +1400,7 @@ static void read_header_summary(struct recording_summary *sm)
 
 /* ---- paginated listing (index build + page fetch, both on s_rec_wq) ---- */
 
-static REC_EXT_RAM struct recording_index_entry s_index[REC_INDEX_MAX_ENTRIES];
+static HPI_EXT_RAM struct recording_index_entry s_index[REC_INDEX_MAX_ENTRIES];
 static uint32_t s_index_n;
 static bool     s_index_cap_warned;
 static volatile int s_index_rc;
@@ -1417,7 +1412,7 @@ struct rec_page_cache_slot {
     uint32_t lru_stamp;
     struct recording_summary entries[REC_PAGE_SIZE_MAX];
 };
-static REC_EXT_RAM struct rec_page_cache_slot s_page_cache[REC_PAGE_CACHE_SLOTS];
+static HPI_EXT_RAM struct rec_page_cache_slot s_page_cache[REC_PAGE_CACHE_SLOTS];
 static uint32_t s_page_cache_clock;
 
 struct index_work_ctx {

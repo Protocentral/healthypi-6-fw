@@ -25,6 +25,7 @@
 #include "services/recording_service.h"
 #include "core/channel_registry.h"
 #include "platform/fs_mount.h"
+#include "platform/ext_ram.h"
 #include "../ui_module.h"  /* enum hpi_ui_screen, HPI_UI_SCREEN_REC */
 #include <errno.h>
 
@@ -37,7 +38,10 @@ BUILD_ASSERT(REC_PAGE_SIZE <= RECORDING_PAGE_SIZE_MAX,
 static atomic_t   s_index_ready = ATOMIC_INIT(0);
 static uint32_t   s_total_count;
 
-static struct recording_summary s_page_stage[REC_PAGE_SIZE];
+/* External SDRAM: filled by page_cb on the recording workqueue, read on the
+ * UI thread -- never an ISR or DMA. Not zeroed at boot; only the first
+ * s_page_stage_n entries are ever read. */
+static HPI_EXT_RAM struct recording_summary s_page_stage[REC_PAGE_SIZE];
 static uint32_t   s_page_stage_n;
 static atomic_t   s_page_ready = ATOMIC_INIT(0);
 static bool       s_page_pending_clear;
