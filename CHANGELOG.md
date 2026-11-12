@@ -34,8 +34,21 @@ Versions here are the **firmware** version reported by the device
   hosts must use a 5 s per-request timeout for `espfw_*`. New group-64 errors
   272 `ESP_NO_REPLY`, 273 `ESP_REFUSED`, 274 `ESP_UPDATE_ACTIVE`, 275
   `IMAGE_INCOMPLETE`. Needs healthybridge-esp32 with the OTA receiver
-  (`hp6/c6-ota-receiver`). The host updater (`healthypi fw update`) does not use
-  it yet.
+  (`hp6/c6-ota-receiver`). `healthypi fw update` uses it (next entry).
+- **`healthypi fw update` updates the ESP32-C6 -- not yet run on hardware.**
+  The host half of the path above (protocentral-healthypi 0.2.0): status
+  first, `begin`, poll to receiving, chunks in order (272: resend the same
+  chunk; 260: resume at `rx`; 273: start again), `commit` exactly once (never
+  resent, even when its reply is lost), then poll to done / rolled back /
+  failed, allowing 45 s. Every `espfw_*` request uses the 5 s timeout from the
+  command catalog, applied by the transport for any command that states one. The
+  C6's version is read while it is powered; on a unit that holds it in reset
+  (every boot) the tool powers it with no radio to ask, and puts it back. An
+  identical version is skipped and an older one refused unless `--force` (the
+  C6 has no downgrade protection). New exit codes: 5 rolled back, 6 outcome not
+  confirmed (C6 left powered), 7 C6 firmware predates the update path. New
+  verb `healthypi fw esp32c6-status`; new acceptance cases `espfw_status` and
+  `espfw rejects a bad signature` (23 cases).
 - **Resets that would roll a C6 update back are refused.** While a C6 update is
   in flight or its new image is pending verification, `os reset` (unless
   `force`), `enter_recovery` (arm) and `conn_disable` answer 274, and a
@@ -63,6 +76,23 @@ Versions here are the **firmware** version reported by the device
   not fit the declared part, or a v5+ board that declares anything but 64 MiB.
 
 ### Changed
+- **Update order is M4 → M7 → reset → ESP32-C6** (was ESP32-C6 → M4 → M7).
+  Any M7 reset holds the C6 in reset, and a C6 reset before its new image has
+  proved itself rolls it back, so the C6 goes after every reset -- which also
+  lets one run update a unit whose old M7 predates the C6 commands (the M7 goes
+  first, the C6 step runs on the new one). `healthypi device reset`, `conn
+  disable` and `fw enter-recovery` check `espfw_status.busy` first and explain,
+  instead of surfacing the device's 274.
+- **The bundle's ESP32-C6 entry is signed and applied.** Its transport is now
+  `hpi-g64-esp` with a `sig` like the M4's (ECDSA-P256 over the image's
+  SHA-256, release key), and its version is read from the image's app
+  descriptor; `fw info` and the update check every image signature against the
+  key. `format` stays 1: an older bundle's unsigned `esp-ota-http` C6 entry is
+  reported and skipped (its M4/M7 still apply), and older tools skipped the C6
+  anyway. `scripts/release.sh` now **requires** the C6 app image from
+  healthybridge-esp32's `build.hp6` -- checking target, HP6 profile, OTA receiver
+  and staleness -- and no longer builds it; `--no-esp32` makes a bundle without
+  it and says that bundle cannot update the C6.
 - **HealthyBridge vitals carry the full canonical record (wire change; flash
   the M7 together with healthybridge-esp32 1.1.0).** The vitals frame (`0x40`)
   sent to the ESP32-C6 is now the 16-byte `hp6_vitals` record as-is: heart rate,

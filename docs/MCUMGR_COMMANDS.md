@@ -703,6 +703,12 @@ The C6 keeps a new image only if, after its restart, it hears from the M7 within
    not refused, and nothing guards a reset from the device's own power menu, the
    development shell, a watchdog or a power loss.
 
+`healthypi fw update` (protocentral-healthypi 0.2.0 and later) follows this
+sequence and this order, takes the 5 s timeout from its command catalog, and
+does not send `os reset`, `enter_recovery` or `conn_disable` while `busy` is
+true; `healthypi fw esp32c6-status` prints `espfw_status`. Like the device side,
+it **has not yet run on hardware**.
+
 ---
 
 ## 6. Error codes

@@ -166,13 +166,18 @@ Each processor updates differently, because the hardware differs:
 |---|---|---|
 | **M7** | MCUboot image slot, MCUmgr over USB | MCUboot — ECDSA-P256, before boot |
 | **M4** | staged to QSPI, written to bank 2 by the M7 | the M7 — SHA-256 + ECDSA-P256 + vector-table sanity check |
-| **ESP32-C6** | its own OTA over Wi-Fi | ESP-IDF app descriptor + rollback |
+| **ESP32-C6** | relayed by the M7 over USB into the C6's spare OTA slot | the M7 — ECDSA-P256 before relaying a byte; then the C6 — image validation, and rollback unless the new image proves itself |
 
 One release key signs all of it, and a release is a single bundle:
 
 ```bash
 healthypi fw update --port <control-port> --bundle build/release/hpi6-firmware-1.0.0.zip
 ```
+
+The tool updates the M4 and the M7, resets, then updates the ESP32-C6 last — a
+reset after the C6's update but before its new image has proved itself would
+roll it back, so nothing resets the device during that window. The C6 path is
+new and **has not yet run on hardware**.
 
 If an update ever leaves a device unbootable, MCUboot's **serial recovery** takes
 over automatically: the device enumerates as a single CDC port named
