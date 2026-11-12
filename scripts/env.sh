@@ -60,13 +60,38 @@ fi
 # machinery) are imported by the updater, the MCUmgr suite and the M7 build
 # itself, so a fresh clone has to have them importable. Editable, so edits under
 # tools/ take effect without reinstalling.
+#
+# "Importable" is not enough: protocentral-healthypi is also on PyPI, and a venv
+# holding that release (or an editable install of another checkout/worktree)
+# imports fine, so release.sh would run a CLI that is not this tree's. So check
+# WHERE each package resolves, and reinstall editable from here when it is not
+# under $HPI_ROOT/tools/<pkg>/src. -I so a PYTHONPATH workaround cannot mask a
+# stale venv. find_spec locates the package without
+# executing it, which keeps the no-op path to one short python3 start-up.
 if command -v python3 >/dev/null 2>&1 && [ -n "${VIRTUAL_ENV:-}" ]; then
-    if ! python3 -c "import healthypi, smpgroup" >/dev/null 2>&1; then
-        echo "installing host tool packages (editable)…" >&2
+    _hpi_stale="$(python3 -I - "$HPI_ROOT" <<'PY' 2>/dev/null
+import importlib.util, os, sys
+root = os.path.realpath(sys.argv[1])
+bad = []
+for pkg in ("smpgroup", "healthypi"):
+    want = os.path.join(root, "tools", pkg, "src", pkg) + os.sep
+    try:
+        spec = importlib.util.find_spec(pkg)
+    except Exception:
+        spec = None
+    origin = spec.origin if spec and spec.origin else ""
+    if not origin or not os.path.realpath(origin).startswith(want):
+        bad.append(f"{pkg} -> {origin or 'missing'}")
+print("; ".join(bad))
+PY
+)" || _hpi_stale="python3 failed"
+    if [ -n "$_hpi_stale" ]; then
+        echo "env.sh: host tools not from this tree ($_hpi_stale); reinstalling editable from $HPI_ROOT/tools" >&2
         python3 -m pip install -q -e "$HPI_ROOT/tools/smpgroup" \
                                   -e "$HPI_ROOT/tools/healthypi" \
             || echo "⚠️  could not install tools/healthypi -- the updater and MCUmgr suite will not run" >&2
     fi
+    unset _hpi_stale
 fi
 
 # --- build acceleration ----------------------------------------------------
