@@ -634,7 +634,9 @@ sooner. The 2.5 s default of some clients is too close.
 
 Commit to `DONE` normally takes ~1 s of C6 verification, a restart of a few
 seconds and ~3 s of link self-test; the device gives the restart 10 s and the
-self-test 20 s. Allow **45 s** before treating `TIMEOUT` as final.
+self-test 75 s, which is longer than the C6's own 60 s self-test window, so an
+image that fails it ends as `ROLLED_BACK` rather than `TIMEOUT`. Allow **95 s**
+before treating `TIMEOUT` as final.
 
 `espfw_abort` before commit sends ABORT (the C6's running image is untouched)
 and returns `st` 0 with `err` 9; after commit it returns **270** — too late,
@@ -681,7 +683,7 @@ verifying — `st` 5, `slot` changed, `img` 1, `ver` the new version; done —
 | 10 | `HOST_IDLE` | no chunk for 30 s |
 | 11 | `CRYPTO` | the device's crypto library failed |
 | 12 | `NOT_BACK` | the C6 did not come back after COMMIT within 10 s |
-| 13 | `NOT_VALID` | it came back but did not report VALID within 20 s |
+| 13 | `NOT_VALID` | it came back but did not report VALID within 75 s |
 | 14 | `ROLLED_BACK` | the new image rolled itself back |
 | 15 | `NOT_SWITCHED` | the C6 restarted on its old image without recording a rollback |
 

@@ -58,6 +58,23 @@ Versions here are the **firmware** version reported by the device
   from the host.
 
 ### Fixed
+- **A C6 image that fails its link self-test is now reported as rolled back.**
+  The M7 waited 20 s for the new image to report VALID, but the C6 allows
+  itself 60 s before rolling back, so the M7 gave up first and its status
+  stayed at `TIMEOUT` / `NOT_VALID` after the C6 had returned to its old image;
+  `healthypi fw update` waited only 45 s and exited 6 ("unconfirmed"). The M7
+  now waits 75 s and the tool 95 s, so the same case ends as `ROLLED_BACK`
+  and exit 5. Found and re-checked on hardware.
+- `healthypi fw update` / `fw info` on a corrupt or unreadable bundle exited 1,
+  which the exit-code table defines as "applied, but not as expected". It
+  exits 2 (refused): nothing is written.
+- After a C6 rollback the tool no longer says the new image "could not hold
+  the link" as if that were the only cause: a reset or power loss before the
+  image confirmed itself rolls it back too.
+- Serial writes to the device now time out after 5 s and are handled as a
+  request timeout. A write the OS would not complete could hang
+  `fw update` for as long as the OS allowed (about 30 minutes on the bench),
+  because the per-request timeout cannot interrupt a blocking write.
 - **The C6's radios come back after it restarts on its own.** A C6 restart the
   M7 did not cause (panic, watchdog, the restart after a firmware update) left
   both radios off while the M7 believed them on, so Wi-Fi/BLE streaming stopped

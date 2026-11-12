@@ -155,7 +155,8 @@ int hpi_esp32_update_chunk(uint32_t offset, const uint8_t *data, size_t len,
  * Check (a) and (b) -- (c) was checked at begin() -- and hand COMMIT to the
  * service thread. Returns promptly; poll status for the outcome, which takes
  * ~1 s of C6 verification, a restart, and up to 3 s of link self-test (allow
- * ~45 s in all before treating TIMEOUT as final).
+ * ~95 s in all before treating TIMEOUT as final: the device waits up to 75 s
+ * for VALID, past the C6's own 60 s self-test window).
  *
  * Returns 0; -ENOTSUP when not receiving; -EINVAL when fewer than `size` bytes
  * were relayed and -EBADMSG when their digest differs (both send ABORT and end

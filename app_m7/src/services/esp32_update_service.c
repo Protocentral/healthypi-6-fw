@@ -52,14 +52,20 @@ static const struct device *const hb = DEVICE_DT_GET(HEALTHYBRIDGE_LINK_NODE);
  *   BEGIN / DATA / ABORT / STATUS reply   bound ~0.45 s, wait HPI_ESPFW_REPLY_MS
  *   COMMIT reply                          ~1 s typical,  wait 10 s
  *   restart to link up                    allow 10 s
- *   link up to VALID                      3 host frames; allow 20 s (the C6
- *                                         rolls back by itself at 60 s)
+ *   link up to VALID                      3 host frames; allow 75 s
+ *
+ * The VALID budget must OUTLAST the C6's own self-test window
+ * (CONFIG_HB_OTA_SELFTEST_TIMEOUT_S, 60 s in healthybridge-esp32): only then
+ * does a failing image end this watch as ROLLED_BACK, seen by evaluate(),
+ * instead of a TIMEOUT that hides the C6's verdict. At 20 s the M7 gave up
+ * while the C6 was still deciding (bench 2026-11-12: status stuck at
+ * TIMEOUT/NOT_VALID after the C6 had rolled back by itself).
  */
 #define ESPFW_COMMIT_REPLY_MS  10000U
 #define ESPFW_LINK_UP_MS        8000U   /* power-up (0.8 s) + first answer */
 #define ESPFW_HOST_IDLE_MS     30000U   /* = the C6's own inactivity abort */
 #define ESPFW_REBOOT_MS        10000U
-#define ESPFW_VALID_MS         20000U
+#define ESPFW_VALID_MS         75000U   /* > the C6's 60 s self-test window */
 #define ESPFW_TICK_MS           1000U   /* STATUS poll cadence while watching */
 #define ESPFW_PENDING_POLL_MS   2000U   /* idle re-poll of a PENDING image */
 #define ESPFW_TRIES                3    /* STATUS / BEGIN attempts in PREPARING */

@@ -587,7 +587,10 @@ def _bundle_or_fail(args):
     try:
         return Bundle(args.bundle), None
     except BundleError as exc:
-        return None, _fail(str(exc))
+        # 2 = refused (healthypi.fw.errors): a corrupt or unreadable bundle is
+        # refused before anything is written. It returned 1, which the same
+        # table defines as "applied, but not as expected".
+        return None, _fail(str(exc), 2)
 
 
 def cmd_fw_keys(args) -> int:

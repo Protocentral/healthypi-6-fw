@@ -14,7 +14,7 @@ The host half of ``docs/MCUMGR_COMMANDS.md`` §5.12, followed step for step:
    pause 30 s (the C6 and the M7 both give up).
 5. ``espfw_commit`` exactly once. A lost reply is NOT a reason to resend it.
 6. poll ``espfw_status`` ~1 Hz until ``st`` is 6 done / 7 rolled back /
-   8 failed; 9 timeout is final only after 45 s, and may still turn into 6/7.
+   8 failed; 9 timeout is final only after 95 s, and may still turn into 6/7.
 
 Every ``espfw_*`` request runs with the catalog's 5 s timeout, which
 :class:`~healthypi.transport.serial_smp.Connection` applies by itself -- nothing
@@ -70,8 +70,11 @@ POLL_S = 1.0
 #: begin -> st 2 receiving: the M7 powers the C6 and opens the transfer.
 PREPARE_BUDGET_S = 15.0
 #: commit -> a final state. The device gives the restart 10 s and the self-test
-#: 20 s; 45 s is the documented host budget.
-OUTCOME_BUDGET_S = 45.0
+#: 75 s (longer than the C6's own 60 s window, so a failing image is reported as
+#: rolled back, not timed out); 95 s is the documented host budget. At 45 s this
+#: tool gave up before the C6 had decided, and exited 6 for an image the C6 then
+#: rolled back (bench 2026-11-12).
+OUTCOME_BUDGET_S = 95.0
 #: How long to wait for a C6 we powered to report its version.
 VERSION_PROBE_S = 10.0
 #: Consecutive no-answer retries of ONE chunk (272, or no reply at all) before
@@ -712,10 +715,11 @@ async def update_c6(
             return C6Result(applied=True, exit_code=EXIT_OK if ok else EXIT_UNVERIFIED,
                             version_after=final.ver)
         if final is not None and final.st == ROLLED_BACK:
-            msg = (f"esp32c6: the new image ({want}) failed its self-test after "
+            msg = (f"esp32c6: the new image ({want}) was not confirmed after "
                    f"restarting and the C6 ROLLED BACK to {final.ver or cur or 'its previous image'}.\n"
-                   "  The C6 is fine on its old firmware. The new image could not hold "
-                   "the link to the M7 -- report it with this output.")
+                   "  The C6 is fine on its old firmware. Either the new image could not "
+                   "hold the link to the M7, or the C6 was reset or lost power before it "
+                   "confirmed itself. If nothing reset it, report this with the output.")
             log(msg)
             return C6Result(applied=False, exit_code=EXIT_C6_ROLLED_BACK,
                             version_after=final.ver, message=msg)

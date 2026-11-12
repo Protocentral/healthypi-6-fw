@@ -18,6 +18,7 @@ import sys
 from dataclasses import dataclass
 
 try:
+    from serial import SerialTimeoutException
     from smpclient import SMPClient
     from smpclient.requests.os_management import EchoWrite
     from smpclient.transport.serial import SMPSerialTransport
@@ -100,6 +101,10 @@ def catalog_timeout(req) -> float | None:
     return float(t) if t is not None else None
 
 
+#: A single serial write that has not completed in this long is a stalled
+#: endpoint, not a slow one: an SMP frame is at most a few hundred bytes.
+WRITE_TIMEOUT_S = 5.0
+
 @dataclass(slots=True)
 class Connection:
     """A live CDC 1 session."""
@@ -123,6 +128,10 @@ class Connection:
             timeout_s = catalog_timeout(req)
         try:
             return await self.client.request(req, timeout_s=timeout_s)
+        except SerialTimeoutException as exc:
+            # A write the OS would not complete. Report it the way every caller
+            # already handles "no answer": as a timeout, so retry logic applies.
+            raise TimeoutError(f"serial write did not complete in {WRITE_TIMEOUT_S:.0f} s") from exc
         except (TypeError, ValueError) as exc:
             # smpclient raises these out of its own error handling when a reply
             # matches none of a request's models. Re-raise as something that
@@ -188,6 +197,11 @@ def make_transport(
         max_smp_encoded_frame_size=frame_size,
         line_length=frame_size // 2,
         line_buffers=2,
+        # Without this a write blocks for as long as the OS lets it: the request
+        # timeout is an asyncio one and cannot interrupt a blocking write, so a
+        # stalled USB endpoint hung `fw update` for ~30 min on the bench
+        # (2026-11-12) while the device gave up on the session after 30 s.
+        write_timeout=WRITE_TIMEOUT_S,
     )
 
 
