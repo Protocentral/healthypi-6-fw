@@ -64,9 +64,9 @@ static void decoder_tests(void)
 {
 	static struct hpi_hb_parser P;
 	static uint8_t F[4096];
-	struct hpi_hb_vitals_payload v = { .timestamp_ms = 7, .heart_rate_bpm = 60,
-					    .spo2_percent = 97, .resp_rate_bpm = 12,
-					    .temp_celsius_x10 = 365, .status_flags = 1 };
+	struct hpi_hb_vitals_payload v = { .hr_bpm = 60, .spo2_x10 = 970,
+					    .rr_bpm = 12, .temp_c_x100 = 3650,
+					    .flags = HPI_HB_VIT_HR_FROM_PPG };
 
 	int n = hpi_hb_encode(F, sizeof(F), HPI_HB_MSG_TYPE_VITALS, 0, 0x2222,
 			      (uint8_t *)&v, sizeof(v));
@@ -125,13 +125,85 @@ static void decoder_tests(void)
 	       seen_n == 1 && seen_len == 8 + sizeof(e) && n == 530);
 }
 
-/* Frozen wire vector: a vitals frame, byte for byte. If the header layout, the
- * field order or the CRC coverage moves, this fails here instead of silently
- * mis-decoding on the far end. */
-static const uint8_t VEC_VITALS[] = {
-	0x55,0xAA,0x40,0x00,0x0C,0x00,0x2A,0x00,0x63,0x00,0x00,0x00,
-	0x48,0x62,0x0E,0x00,0x74,0x01,0x00,0x00,0x99,0xB3,
+/*
+ * Frozen wire vectors, byte for byte, shared with the ESP side
+ * (test/test_hp6_vitals.c and docs/PROTOCOL.md in healthybridge-esp32, 1.1.0).
+ * If the header layout, a field order or the CRC coverage moves, these fail
+ * here instead of silently mis-decoding on the far end.
+ */
+
+/* Vitals record A, seq 0: ECG HR 72, SpO2 98.5 %, RR 14, 36.85 degC,
+ * SDNN 300 ms, RMSSD 38 ms, LF/HF 1.5, no flags. */
+static const uint8_t VEC_VITALS_A[] = {
+	0x55,0xAA,0x40,0x00,0x10,0x00,0x00,0x00,
+	0x48,0x00,0xD9,0x03,0x0E,0x00,0x65,0x0E,0x2C,0x01,0x26,0x00,0x0F,0x00,0x00,0x00,
+	0xE4,0x7D,
 };
+
+/* Vitals record B, seq 0: PPG pulse rate 71, SpO2 96.2 %, everything else
+ * unavailable, all four flags set. */
+static const uint8_t VEC_VITALS_B[] = {
+	0x55,0xAA,0x40,0x00,0x10,0x00,0x00,0x00,
+	0x47,0x00,0xC2,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0F,0x00,
+	0x84,0x2C,
+};
+
+/* GET_VERSION request (CONTROL_CMD 0x50, cmd 0x31, no params), seq 0. */
+static const uint8_t VEC_GET_VERSION_REQ[] = {
+	0x55,0xAA,0x50,0x00,0x04,0x00,0x00,0x00,
+	0x31,0x00,0x00,0x00,
+	0x39,0x59,
+};
+
+/* GET_VERSION reply for "1.1.0" (CONTROL_RESP 0x51, status 0, 36 data bytes),
+ * seq 0. */
+static const uint8_t VEC_GET_VERSION_RESP[] = {
+	0x55,0xAA,0x51,0x00,0x28,0x00,0x00,0x00,
+	0x31,0x00,0x24,0x00,
+	0x01,0x01,0x00,0x00,
+	0x31,0x2E,0x31,0x2E,0x30,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	0xA1,0x9B,
+};
+
+static void get_version_tests(void)
+{
+	static uint8_t B[64];
+	static struct hpi_hb_parser P;
+
+	/* Request, encoded the way the driver's hb_uart_command() builds it. */
+	struct hpi_hb_control_cmd c = { .cmd_id = HPI_HB_CMD_GET_VERSION,
+					.reserved = 0, .param_len = 0 };
+	int n = hpi_hb_encode(B, sizeof(B), HPI_HB_MSG_TYPE_CONTROL_CMD, 0, 0,
+			      (const uint8_t *)&c, sizeof(c));
+	cmp("GET_VERSION request matches the frozen wire vector",
+	    VEC_GET_VERSION_REQ, (int)sizeof(VEC_GET_VERSION_REQ), B, n);
+	expect("GET_VERSION is 0x31", HPI_HB_CMD_GET_VERSION == 0x31);
+
+	/* Reply: decode the golden frame and walk it the way hb_uart_on_frame()
+	 * and hb_uart_api_get_version() do. */
+	hpi_hb_parser_reset(&P); seen_n = 0;
+	hpi_hb_parser_feed(&P, VEC_GET_VERSION_RESP, sizeof(VEC_GET_VERSION_RESP),
+			   on_frame, NULL);
+	expect("GET_VERSION reply decodes (CRC ok, type 0x51, 40 B)",
+	       seen_n == 1 && P.crc_errors == 0 &&
+	       seen_type == HPI_HB_MSG_TYPE_CONTROL_RESP && seen_seq == 0 &&
+	       seen_len == sizeof(struct hpi_hb_control_resp) +
+			   sizeof(struct hpi_hb_version_resp));
+
+	struct hpi_hb_control_resp r;
+	struct hpi_hb_version_resp v;
+
+	memcpy(&r, seen_pl, sizeof(r));
+	memcpy(&v, seen_pl + sizeof(r), sizeof(v));
+	expect("GET_VERSION reply header: cmd 0x31, status OK, data_len 36",
+	       r.cmd_id == HPI_HB_CMD_GET_VERSION && r.status == HPI_HB_RESP_OK &&
+	       r.data_len == sizeof(struct hpi_hb_version_resp));
+	expect("GET_VERSION reply body: 1.1.0, string \"1.1.0\", zero-padded",
+	       v.major == 1 && v.minor == 1 && v.patch == 0 && v.reserved == 0 &&
+	       strcmp(v.version_string, "1.1.0") == 0 &&
+	       v.version_string[sizeof(v.version_string) - 1] == '\0');
+}
 
 int main(void)
 {
@@ -159,13 +231,26 @@ int main(void)
 				    12345678, 250, ppg, 16, sizeof(ppg[0]));
 	expect("ppg x16 is 146 B on the wire", m == 146);
 
-	/* 3. Vitals, pinned byte for byte against the frozen vector. */
-	struct hpi_hb_vitals_payload v = { .timestamp_ms = 99, .heart_rate_bpm = 72,
-					   .spo2_percent = 98, .resp_rate_bpm = 14,
-					   .temp_celsius_x10 = 372, .status_flags = 0 };
-	int k = hpi_hb_encode(B, sizeof(B), HPI_HB_MSG_TYPE_VITALS, 0, 42,
+	/* 3. Vitals, pinned byte for byte against the frozen vectors. The
+	 *    payload is the 16-byte hp6_vitals record, sent as-is. */
+	expect("vitals payload is 16 B", sizeof(struct hpi_hb_vitals_payload) == 16);
+	struct hpi_hb_vitals_payload v = { .hr_bpm = 72, .spo2_x10 = 985,
+					   .rr_bpm = 14, .temp_c_x100 = 3685,
+					   .hrv_sdnn_ms = 300, .hrv_rmssd_ms = 38,
+					   .hrv_lf_hf_x10 = 15, .flags = 0 };
+	int k = hpi_hb_encode(B, sizeof(B), HPI_HB_MSG_TYPE_VITALS, 0, 0,
 			      (uint8_t *)&v, sizeof(v));
-	cmp("vitals matches the frozen wire vector", VEC_VITALS, (int)sizeof(VEC_VITALS), B, k);
+	cmp("vitals A matches the frozen wire vector",
+	    VEC_VITALS_A, (int)sizeof(VEC_VITALS_A), B, k);
+
+	struct hpi_hb_vitals_payload vb = {
+		.hr_bpm = 71, .spo2_x10 = 962,
+		.flags = HPI_HB_VIT_HR_FROM_PPG | HPI_HB_VIT_ECG_LEAD_OFF |
+			 HPI_HB_VIT_PPG_WEAK | HPI_HB_VIT_MOTION };
+	k = hpi_hb_encode(B, sizeof(B), HPI_HB_MSG_TYPE_VITALS, 0, 0,
+			  (uint8_t *)&vb, sizeof(vb));
+	cmp("vitals B (PPG rate, all flags) matches the frozen wire vector",
+	    VEC_VITALS_B, (int)sizeof(VEC_VITALS_B), B, k);
 
 	/* 4. CRC check value, independent of any frame. */
 	expect("crc-16 check value 0x6F91",
@@ -181,6 +266,7 @@ int main(void)
 	       hpi_hb_encode_batch(B, 32, 0x20, 0, 0, 500, ecg, 16, sizeof(ecg[0])) < 0);
 
 	decoder_tests();
+	get_version_tests();
 
 	printf(fails ? "\n%d FAILURE(S)\n" : "\nall passed\n", fails);
 	return fails ? 1 : 0;

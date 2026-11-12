@@ -44,6 +44,15 @@ struct healthybridge_rx_stats {
 	uint32_t resync;   /**< decoder sync-hunt restarts */
 	uint32_t ovf;      /**< bytes dropped because the staging ring was full */
 	uint32_t stopped;  /**< receiver error events (framing/parity/overrun) */
+	/**
+	 * Times the co-processor was seen to restart: every release from reset
+	 * by link_power(true), plus every in-place reboot (panic, watchdog,
+	 * esp_restart after an OTA or provisioning) detected by its frame
+	 * sequence number running backwards. Monotonic; a caller holding state
+	 * learned from the peer (e.g. its firmware version) compares this
+	 * against the value it saw when it learned it.
+	 */
+	uint32_t peer_restarts;
 };
 
 /**
@@ -77,6 +86,16 @@ struct healthybridge_link_api {
 
 	int (*wifi_status)(const struct device *dev,
 			   struct hpi_hb_wifi_status_resp *out);
+
+	/**
+	 * Ask the co-processor for its firmware version (HB 0x31 GET_VERSION).
+	 * A round-trip: blocks up to the transport's command timeout. -EIO when
+	 * the peer acks with an error (an image older than HealthyBridge 1.1.0,
+	 * which has no such command); -ETIMEDOUT when it does not answer.
+	 */
+	int (*get_version)(const struct device *dev,
+			   struct hpi_hb_version_resp *out);
+
 	int (*wifi_enable)(const struct device *dev, bool on);
 
 	/** Start/stop BLE advertising on the co-processor (HB 0x10 / 0x11). */
@@ -149,6 +168,12 @@ static inline int healthybridge_wifi_status(const struct device *dev,
 					    struct hpi_hb_wifi_status_resp *out)
 {
 	return HB_LINK_CALL(dev, wifi_status, out);
+}
+
+static inline int healthybridge_get_version(const struct device *dev,
+					    struct hpi_hb_version_resp *out)
+{
+	return HB_LINK_CALL(dev, get_version, out);
 }
 
 static inline int healthybridge_wifi_enable(const struct device *dev, bool on)

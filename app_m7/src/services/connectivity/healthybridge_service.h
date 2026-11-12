@@ -26,6 +26,7 @@
 #ifndef HPI_CONNECTIVITY_HEALTHYBRIDGE_SERVICE_H
 #define HPI_CONNECTIVITY_HEALTHYBRIDGE_SERVICE_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -102,6 +103,23 @@ void hpi_connectivity_disable(void);
 
 /* Cached; never blocks and never issues a round-trip. */
 void hpi_connectivity_get_status(struct hpi_conn_status *out);
+
+/*
+ * The co-processor's firmware version string (e.g. "1.1.0"), from the cache
+ * conn_thread fills over HealthyBridge GET_VERSION once the link comes up.
+ * Never blocks and never touches the UART -- safe from SMP handlers and the
+ * LVGL thread.
+ *
+ * @p out is always NUL-terminated, and is "" unless the return is 0:
+ *   0           known
+ *   -EHOSTDOWN  co-processor held in reset (the boot default)
+ *   -EAGAIN     powered but has not answered yet (starting, or restarted)
+ *   -ENOTSUP    its firmware predates GET_VERSION, or connectivity is
+ *               compiled out
+ *   -ENODEV     service not running
+ * The cache is dropped on power-down, link fault and any C6 restart.
+ */
+int hpi_connectivity_esp_version(char *out, size_t cap);
 
 /* True when the co-processor is powered and answering -- not merely that the
  * service thread started. Drives the status-bar link glyph. */

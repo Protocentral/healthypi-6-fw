@@ -175,7 +175,7 @@ Liveness is served by stock `os/echo`. Normal reboot is served by stock `os/rese
   - `br` : tstr — board revision (`"v3"`, `"v4"`, ...)
   - `hw` : bstr[16] — raw STM32 unique device ID
   - `m4fw` : tstr — M4 firmware semver (empty if unavailable)
-  - `espfw` : tstr — ESP32-C6 firmware semver (empty if no bridge)
+  - `espfw` : tstr — ESP32-C6 firmware semver (empty while the C6 is in reset, before it has answered, or on firmware older than HealthyBridge 1.1.0; see `MCUMGR_COMMANDS.md`)
   - `up` : uint — uptime in seconds
 - Rationale: stock `os/info` returns a single free-form string; we need structured fields for multi-core firmware versions, board revision, and group-64 schema version.
 
@@ -1019,6 +1019,6 @@ healthypi device info --port <CDC1>
 - ❌ Use CDC 0 for control — it's one-way; anything written to it is silently discarded
 - ❌ Mix MCUmgr and stream framing on a single port — they live on separate CDCs by design
 - ❌ Hold CDC 1 open across a `mcumgr reset` without re-enumerating — the USB stack tears down on reboot
-- ❌ Assume `m4fw` / `espfw` / `mod_*_fw` strings in `device_info` are populated in Phase 2 — they're empty placeholders until Phases 4/6/10 wire them in
+- ❌ Assume `m4fw` / `espfw` / `mod_*_fw` strings in `device_info` are always populated — `m4fw` is empty until the M4 binds, `espfw` until the ESP32-C6 is powered (`conn_enable`) and has answered, and `mod_*_fw` until the HealthyLink contract carries a version
 
 ---

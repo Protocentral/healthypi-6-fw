@@ -10,6 +10,17 @@ Versions here are the **firmware** version reported by the device
 
 ## [Unreleased]
 
+### Added
+- **The ESP32-C6 firmware version is reported.** `device_info` and
+  `fw_versions` now fill `espfw` (it was always empty). The connectivity
+  service asks the C6 over HealthyBridge (new control command `0x31`
+  GET_VERSION) once the link comes up and caches the answer, so a group-64 read
+  never waits on the co-processor. The cache is dropped when the C6 is powered
+  down, its link faults, or it restarts (including an in-place reboot after its
+  own OTA). `espfw` is `""` while the C6 is in reset -- the boot default, until
+  `conn_enable` -- before it has answered, and on C6 firmware older than
+  HealthyBridge 1.1.0.
+
 ### Fixed
 - **QSPI flash is 64 MiB on HealthyPi 6 v5 and later.** The board definition
   declared the 1 Gbit (128 MiB) W25Q01JV and placed the `/lfs` LittleFS at
@@ -24,6 +35,15 @@ Versions here are the **firmware** version reported by the device
   not fit the declared part, or a v5+ board that declares anything but 64 MiB.
 
 ### Changed
+- **HealthyBridge vitals carry the full canonical record (wire change; flash
+  the M7 together with healthybridge-esp32 1.1.0).** The vitals frame (`0x40`)
+  sent to the ESP32-C6 is now the 16-byte `hp6_vitals` record as-is: heart rate,
+  SpO₂ ×10, respiration rate, temperature ×100, SDNN, RMSSD, LF/HF ×10 and the
+  `HP6_VIT_*` flags. It used to be a 12-byte form that clamped every rate to a
+  byte, rounded SpO₂ to whole percent and temperature to tenths, dropped HRV,
+  and sent the flags as 0 -- so the co-processor could not tell an ECG heart
+  rate from a PPG pulse rate, nor show lead-off, weak PPG or motion. A C6 on
+  1.1.0 rejects the old payload and an older C6 misreads the new one.
 - The release bundle is now named `hpi6-firmware-<version>.zip` instead of
   `hpi6-<version>.hpifw`. The format and signing are unchanged: it was always a
   plain zip. Tools read it by content, so existing `.hpifw` files still work.

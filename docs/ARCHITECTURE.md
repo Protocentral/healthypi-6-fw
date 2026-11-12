@@ -177,7 +177,21 @@ UART touched no service code.
 |---|---|
 | `hp6_ecg_sample` resp/lead_i/lead_ii/v1 | `hpi_ecg_sample_multi` ch0/ch1/ch2/ch3 |
 | `hp6_ppg_sample` red/ir | `hpi_ppg_sample` red/ir |
-| `hp6_vitals` hr/spo2_x10/rr/temp_c_x100 | vitals payload hr/spo2/resp/temp_x10 |
+| `hp6_vitals` (all 16 bytes) | vitals payload `0x40` — the same record, verbatim |
+
+The vitals frame carries the canonical `hp6_vitals` record unchanged — HR,
+SpO₂ ×10, RR, temperature ×100, SDNN, RMSSD, LF/HF ×10 and the `HP6_VIT_*`
+flags — with no scaling, clamping or timestamp, so the co-processor can tell an
+ECG heart rate from a PPG pulse rate (`HR_FROM_PPG`) and show lead-off, weak-PPG
+and motion. This layout is HealthyBridge **1.1.0**: the C6 rejects the 12-byte
+payload older M7 images sent, and an older C6 cannot read this one, so the M7
+and the C6 must be updated together.
+
+The C6 reports its firmware version over the link (control command `0x31`
+GET_VERSION). The connectivity service asks once the link comes up, caches the
+answer and drops it whenever the C6 is powered down, faults or restarts; group-64
+`device_info` / `fw_versions` report it as `espfw`, which is empty while the C6
+is held in reset, before it has answered, or when its firmware predates 1.1.0.
 
 ### Control
 

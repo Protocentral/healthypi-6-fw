@@ -27,6 +27,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <errno.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "healthybridge_esp32_codec.h"
@@ -114,6 +115,14 @@ struct healthybridge_uart_data {
 	struct hpi_hb_wifi_status_resp wifi;
 	bool wifi_valid;
 	int64_t wifi_at;
+
+	/* Peer restart detection. The C6 numbers every frame it sends from one
+	 * counter that starts at 0 when it boots, so a sequence number that runs
+	 * backwards means it rebooted underneath us (panic, watchdog, esp_restart
+	 * after an OTA or provisioning) without the reset line moving. */
+	bool rx_seq_valid;
+	uint16_t rx_seq_last;
+	atomic_t peer_restarts;
 };
 
 /* ---- transmit ---------------------------------------------------------- */
@@ -191,7 +200,21 @@ static void hb_uart_on_frame(uint8_t type, uint8_t flags, uint16_t seq,
 	struct healthybridge_uart_data *data = user;
 
 	ARG_UNUSED(flags);
-	ARG_UNUSED(seq);
+
+	/*
+	 * Backwards = restarted. The one forward step that looks backwards is
+	 * the u16 wrap, which the C6 reaches after ~18 h at its 1 Hz status
+	 * push; a jump from the top 256 values into the bottom 256 is read as
+	 * that wrap, so a reboot landing exactly there goes unnoticed. Cheap
+	 * enough to accept: what this guards is a cached version string.
+	 */
+	if (data->rx_seq_valid && seq < data->rx_seq_last &&
+	    !(data->rx_seq_last >= 0xFF00U && seq < 0x0100U)) {
+		atomic_inc(&data->peer_restarts);
+		LOG_INF("ESP32 restarted (rx seq %u -> %u)", data->rx_seq_last, seq);
+	}
+	data->rx_seq_last = seq;
+	data->rx_seq_valid = true;
 
 	switch (type) {
 	case HPI_HB_MSG_TYPE_CONTROL_RESP: {
@@ -522,7 +545,10 @@ static int hb_uart_api_link_power(const struct device *dev, bool on)
 		return ret;
 	}
 
+	/* A release from reset is a fresh boot: new sequence numbering. */
+	data->rx_seq_valid = false;
 	if (on) {
+		atomic_inc(&data->peer_restarts);
 		k_msleep(CONFIG_HEALTHYBRIDGE_ESP32_BOOT_DELAY_MS);
 		data->powered = true;
 		LOG_INF("ESP32 powered up (boot wait %d ms)",
@@ -592,6 +618,32 @@ static int hb_uart_api_wifi_status(const struct device *dev,
 			       (uint8_t *)out, sizeof(*out), NULL);
 }
 
+static int hb_uart_api_get_version(const struct device *dev,
+				   struct hpi_hb_version_resp *out)
+{
+	struct hpi_hb_version_resp v;
+	uint16_t n = 0;
+	int rc;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	memset(&v, 0, sizeof(v));
+	rc = hb_uart_command(dev, HPI_HB_CMD_GET_VERSION, NULL, 0,
+			     (uint8_t *)&v, sizeof(v), &n);
+	if (rc != 0) {
+		return rc;
+	}
+	/* Fixed 36-byte reply. Anything that does not even reach the string
+	 * is not a version, whatever the status byte said. */
+	if (n <= offsetof(struct hpi_hb_version_resp, version_string)) {
+		return -EBADMSG;
+	}
+	v.version_string[sizeof(v.version_string) - 1] = '\0';
+	*out = v;
+	return 0;
+}
+
 static int hb_uart_api_wifi_enable(const struct device *dev, bool on)
 {
 	int rc = hb_uart_command(dev, on ? HPI_HB_CMD_WIFI_ENABLE : HPI_HB_CMD_WIFI_DISABLE,
@@ -644,6 +696,7 @@ static int hb_uart_api_rx_stats(const struct device *dev,
 	out->resync = data->parser.resyncs;
 	out->ovf = data->stats.rx_ovf;
 	out->stopped = data->stats.rx_stopped;
+	out->peer_restarts = (uint32_t)atomic_get(&data->peer_restarts);
 	return 0;
 }
 
@@ -656,6 +709,7 @@ static const struct healthybridge_link_api hb_uart_api = {
 	.ble_adv = hb_uart_api_ble_adv,
 	.ble_set_name = hb_uart_api_ble_set_name,
 	.wifi_status = hb_uart_api_wifi_status,
+	.get_version = hb_uart_api_get_version,
 	.wifi_enable = hb_uart_api_wifi_enable,
 	.wifi_connect = hb_uart_api_wifi_connect,
 	.wifi_disconnect = hb_uart_api_wifi_disconnect,

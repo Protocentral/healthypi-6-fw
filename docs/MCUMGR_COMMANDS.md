@@ -188,12 +188,20 @@ Request `{}` →
 | `br` | tstr | Board revision |
 | `hw` | **bstr** | Hardware identifier (byte string, not text) |
 | `m4fw` | tstr | Algorithm-core firmware version |
-| `espfw` | tstr | Wi-Fi co-processor firmware version |
+| `espfw` | tstr | Wi-Fi co-processor (ESP32-C6) firmware version, e.g. `"1.1.0"` — see below |
 | `up` | uint | Uptime, seconds |
 
 #### `0x0031` fw_versions — read
 
 Request `{}` → `m7fw`, `m4fw`, `espfw`, `mod_a_fw`, `mod_b_fw` — all tstr.
+
+`espfw` is read from a cache, never from the co-processor while the request
+waits. It is the **empty string** while the ESP32-C6 is held in reset — the
+state every boot starts in, until `conn_enable` (`0x0075`) — for the first
+moments after it is powered, until it answers, after it restarts until it
+answers again, and permanently when its firmware is older than HealthyBridge
+1.1.0 (which cannot report a version). An empty `espfw` therefore means "not
+known right now", not "no co-processor".
 
 ### 5.2. Telemetry
 

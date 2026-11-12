@@ -160,20 +160,53 @@ struct hpi_hb_ppg_payload {
     struct hpi_ppg_sample samples[];  /* PPG sample pairs */
 } __attribute__((packed));
 
+/*
+ * Compile-time size check usable from both Zephyr and the host-compiled codec
+ * test (BUILD_ASSERT is Zephyr-only; this is what it expands to in C11).
+ */
+#ifdef __cplusplus
+#define HPI_HB_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define HPI_HB_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
 /**
- * @brief Vitals payload (TYPE = 0x40)
+ * @brief Vitals payload (TYPE = 0x40), M7 -> C6, ~1 Hz.
  *
- * Computed vital signs transmitted at low rate (~1 Hz).
+ * Exactly the 16 bytes of the M7's canonical `struct hp6_vitals`
+ * (app_m7/src/core/sample_formats.h) -- the same record that rides the sample
+ * bus, the .HP6 recording and the USB stream -- sent as-is: no scaling, no
+ * clamping, flags copied. A driver must not include app headers, so the layout
+ * is mirrored here; the connectivity service asserts the two sizes agree.
+ *
+ * Must equal the ESP side's `struct hb_vitals_payload_hp6` byte for byte. The
+ * C6 rejects a payload shorter than 16 bytes (including the 12-byte
+ * {timestamp, u8 rates, temp x10, flags} form used before HealthyBridge 1.1.0)
+ * and ignores bytes beyond 16, so fields may only ever be APPENDED.
+ *
+ * A zero in any measurement field means "not available", never a measured 0.
  */
 struct hpi_hb_vitals_payload {
-    uint32_t timestamp_ms;      /* M7 uptime */
-    uint8_t heart_rate_bpm;     /* Heart rate (0-255 BPM) */
-    uint8_t spo2_percent;       /* SpO2 (0-100 %) */
-    uint8_t resp_rate_bpm;      /* Respiration rate (0-255 breaths/min) */
-    uint8_t reserved;
-    int16_t temp_celsius_x10;   /* Temperature * 10 (e.g., 372 = 37.2°C) */
-    uint16_t status_flags;      /* Validity flags for each vital */
+    uint16_t hr_bpm;            /* beats/min; source sensor is HPI_HB_VIT_HR_FROM_PPG */
+    uint16_t spo2_x10;          /* SpO2 % x10 (985 = 98.5 %) */
+    uint16_t rr_bpm;            /* respiration rate, breaths/min */
+    int16_t  temp_c_x100;       /* temperature, degC x100, signed */
+    uint16_t hrv_sdnn_ms;       /* SDNN, ms */
+    uint16_t hrv_rmssd_ms;      /* RMSSD, ms */
+    uint16_t hrv_lf_hf_x10;     /* LF/HF ratio x10 */
+    uint8_t  flags;             /* HPI_HB_VIT_* (= HP6_VIT_*) */
+    uint8_t  reserved;          /* 0 */
 } __attribute__((packed));
+
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_vitals_payload) == 16,
+                     "HealthyBridge vitals payload must be exactly 16 bytes");
+
+/* hpi_hb_vitals_payload.flags -- numerically identical to the M7's HP6_VIT_*
+ * and the ESP's HB_VIT_*. */
+#define HPI_HB_VIT_HR_FROM_PPG   0x01  /* hr_bpm is a PPG pulse rate, not ECG */
+#define HPI_HB_VIT_ECG_LEAD_OFF  0x02  /* >=1 ECG electrode off */
+#define HPI_HB_VIT_PPG_WEAK      0x04  /* SpO2 / PPG rate provisional */
+#define HPI_HB_VIT_MOTION        0x08  /* board is moving */
 
 /**
  * @brief HRV payload (TYPE = 0x41)
@@ -227,6 +260,10 @@ struct hpi_hb_control_cmd {
 #define HPI_HB_CMD_WIFI_DISABLE         0x21  /* = HB_CMD_WIFI_DISABLE (stop STA / AP) */
 #define HPI_HB_CMD_WIFI_SOFTAP          0x22  /* = HB_CMD_WIFI_SOFTAP  (captive portal) */
 #define HPI_HB_CMD_GET_STATUS           0x30  /* = HB_CMD_GET_STATUS -> HB_TYPE_STATUS reply */
+/* = HB_CMD_GET_VERSION -> CONTROL_RESP, data = struct hpi_hb_version_resp
+ * (36 B). Added in HealthyBridge 1.1.0: an older C6 image answers with a bare
+ * HPI_HB_RESP_ERROR ack, and an HP5-profile image does not answer at all. */
+#define HPI_HB_CMD_GET_VERSION          0x31
 
 /*
  * Any command not listed above is NOT IMPLEMENTED by the external ESP firmware
@@ -298,15 +335,23 @@ struct hpi_hb_mqtt_status_resp {
 } __attribute__((packed));
 
 /**
- * @brief Version response data
+ * @brief Version response data -- the CONTROL_RESP data[] answering
+ *        HPI_HB_CMD_GET_VERSION (0x31).
+ *
+ * Must equal the ESP side's `struct hb_version_resp_hp6` byte for byte.
+ * major/minor/patch are parsed by the C6 from the leading "MAJOR.MINOR.PATCH"
+ * of version_string (all 0 if it does not start that way).
  */
 struct hpi_hb_version_resp {
     uint8_t major;
     uint8_t minor;
     uint8_t patch;
     uint8_t reserved;
-    char version_string[32];    /* Human-readable version */
+    char version_string[32];    /* image version, NUL-terminated, zero-padded */
 } __attribute__((packed));
+
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_version_resp) == 36,
+                     "HealthyBridge version reply must be exactly 36 bytes");
 
 /**
  * @brief Control response payload (TYPE = 0x51)
