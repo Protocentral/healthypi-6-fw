@@ -40,8 +40,8 @@ A few structural decisions explain most of the codebase.
 - Acquisition uses dedicated analog front ends: a TI ADS1294R for ECG and
   thoracic respiration, a TI AFE4400 for PPG.
 - The two cores are split by job. The Cortex-M7 samples and never stops; the
-  Cortex-M4 does calculation only — QRS detection, heart rate and HRV on
-  CMSIS-DSP — and owns no hardware.
+  Cortex-M4 does calculation only — QRS detection, heart rate, HRV and SpO₂,
+  on CMSIS-DSP — and owns no hardware.
 - Acquisition publishes to a sample bus rather than calling consumers. Each
   consumer holds its own ring and drops on its own terms, keeping a count of
   what it dropped, so a slow consumer cannot back-pressure the ADC and losses
@@ -278,8 +278,9 @@ As of firmware 1.0.0:
   a reference oximeter on this hardware. Treat the number as uncalibrated.
 - **HRV** (SDNN, RMSSD, LF/HF) is computed, but has never been validated against
   a known RR series.
-- **Lead-off** detects the RA, LA and LL electrodes. **V1 is not detected**, so
-  absence of a V1 lead-off warning does not mean the V1 electrode is attached.
+- **Lead-off** detects the RA, LA and LL electrodes. **V1 is not detected on
+  v5** (a board-level limitation, not a firmware one), so absence of a V1
+  lead-off warning does not mean the V1 electrode is attached.
 - **Temperature** is the external AS6221 skin probe (`temp_c_x100`). Unplugged
   reads 0. **Respiration rate** is thoracic impedance (`rr_bpm`); 0 until the
   detector locks, and while RA/LA/LL are off. Zero means "not available"
