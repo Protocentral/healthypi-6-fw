@@ -154,7 +154,17 @@ only ever be updated over SWD, with the case open.
 scripts/flash.sh all        # M7 + M4 over SWD
 scripts/flash.sh signed     # bootloader + signed application
 scripts/flash.sh factory    # full production programming sequence
+scripts/flash.sh esp32 --full [PORT]      # ESP32-C6 over its own USB: first flash
+scripts/flash.sh esp32 --app-only [PORT]  # ESP32-C6 re-flash, keeps Wi-Fi settings
 ```
+
+The ESP32-C6 is flashed with healthybridge-esp32's `flash_hp6.sh`, from its
+`build.hp6` (`scripts/build.sh esp32`). The M7 holds the C6 in reset from boot,
+so its USB port only appears after `healthypi conn enable --radios none` (or
+`hpi link on` on the dev shell). `--full` erases the whole chip and is required
+the first time a unit gets the C6's A/B partition layout; it also erases the
+Wi-Fi credentials stored on the C6. `--app-only` keeps them and refuses a unit
+that is not on the A/B layout yet.
 
 ---
 

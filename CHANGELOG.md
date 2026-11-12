@@ -76,6 +76,16 @@ Versions here are the **firmware** version reported by the device
   not fit the declared part, or a v5+ board that declares anything but 64 MiB.
 
 ### Changed
+- **`scripts/flash.sh esp32` takes `--full` or `--app-only`.** It ran the C6
+  repo's `./hp6.sh flash`, which does not erase, so it could not perform the
+  first flash onto the C6's A/B partition layout. It now runs healthybridge-esp32's
+  `flash_hp6.sh` on its `build.hp6` and makes the choice explicit: `--full`
+  (erase the chip, write the merged image; the first flash of every unit;
+  erases stored Wi-Fi credentials) or `--app-only` (keeps them). It refuses a
+  C6 checkout without A/B support or without an A/B HP6 build, says the C6 must
+  first be released from reset (`healthypi conn enable --radios none`), and
+  lists the boot log lines to expect instead of the old `hb_spi` tag.
+  `scripts/flash.sh factory` points at `esp32 --full`.
 - **Update order is M4 → M7 → reset → ESP32-C6** (was ESP32-C6 → M4 → M7).
   Any M7 reset holds the C6 in reset, and a C6 reset before its new image has
   proved itself rolls it back, so the C6 goes after every reset -- which also

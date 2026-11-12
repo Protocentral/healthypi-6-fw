@@ -25,7 +25,8 @@ be updated independently of the M7.
 The ESP32-C6 firmware is **not in this repository**. It is a separate,
 dual-target project shared with HealthyPi 5:
 [`protocentral/healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32).
-`scripts/build.sh esp32` and `scripts/flash.sh esp32` delegate to it.
+`scripts/build.sh esp32` and `scripts/flash.sh esp32` delegate to it
+(see [§7](#7-the-esp32-c6-link)).
 
 ## 2. Data flow
 
@@ -260,9 +261,15 @@ because a C6 held in reset cannot be flashed over its own USB port.
 
 The ESP32-C6 firmware is **not in this repository**. It lives in
 [`protocentral/healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32),
-a dual-target project shared with HealthyPi 5. `scripts/build.sh esp32` and
-`scripts/flash.sh esp32` delegate to it (over the C6's own USB port — bench and
-factory).
+a dual-target project shared with HealthyPi 5. `scripts/build.sh esp32` builds
+it (`hp6.sh`); `scripts/flash.sh esp32` flashes that build over the C6's own USB
+port with its `flash_hp6.sh` — bench and factory. The C6 uses an A/B OTA
+partition layout, so the mode is explicit: `--full` erases the whole chip and
+writes the merged image — the first flash of every unit, the only way onto the
+A/B table, and it erases the Wi-Fi credentials stored on the C6 — while
+`--app-only` rewrites the app and keeps them. Because the M7 holds the C6 in
+reset from boot, its USB port only enumerates after `healthypi conn enable
+--radios none` (or `hpi link on` on the dev shell).
 
 In the field the C6 is updated **through the M7**, over this link: group-64
 `espfw_*` (`0x00A6`–`0x00AA`) hands the image to
@@ -314,7 +321,7 @@ their hardware genuinely differs.
 |---|---|---|---|
 | **STM32H757 M7** | application | MCUboot image 0, stock MCUmgr **img group** over USB CDC1 | **MCUboot**, ECDSA-P256, before boot |
 | **STM32H757 M4** | algorithm core | group-64 `0x00A0-0x00A4` → QSPI staging → M7 writes bank 2 | **the M7 app**: SHA-256 + ECDSA-P256 + vector-table sanity |
-| **ESP32-C6** | network coprocessor | group-64 `0x00A6-0x00AA` → the M7 relays each chunk over the HealthyBridge UART into the C6's **inactive** OTA slot (nothing staged on the M7); the C6 switches slots on COMMIT and keeps the new image only after its link self-test. **Not yet run on hardware.** Bench/factory: `esptool` over its own USB port (`scripts/flash.sh esp32`) | **the M7 app**: ECDSA-P256 over the image's SHA-256 (same key and verifier as the M4), checked before anything is sent, plus the relayed bytes' SHA-256 before COMMIT; then **the C6**: SHA-256 of its flash, `esp_ota_end()` validation, project name, bootloader rollback |
+| **ESP32-C6** | network coprocessor | group-64 `0x00A6-0x00AA` → the M7 relays each chunk over the HealthyBridge UART into the C6's **inactive** OTA slot (nothing staged on the M7); the C6 switches slots on COMMIT and keeps the new image only after its link self-test. **Not yet run on hardware.** Bench/factory: `esptool` over its own USB port (`scripts/flash.sh esp32 --full` / `--app-only`) | **the M7 app**: ECDSA-P256 over the image's SHA-256 (same key and verifier as the M4), checked before anything is sent, plus the relayed bytes' SHA-256 before COMMIT; then **the C6**: SHA-256 of its flash, `esp_ota_end()` validation, project name, bootloader rollback |
 
 The M7 image, the M4 image, the C6 image and the release manifest are signed
 with **one** ECDSA-P256 release key — see [Keys](#keys).
