@@ -451,9 +451,7 @@ if HPI_M4_UPDATE
 config HPI_M4_UPDATE_REQUIRE_SIGNATURE
 	bool "Require an ECDSA-P256 signature on M4 images"
 	default y
-	select PSA_WANT_ALG_ECDSA
-	select PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY
-	select PSA_WANT_ECC_SECP_R1_256
+	select HPI_FW_RELEASE_SIG
 	help
 	  Verify the uploaded M4 image's signature against the release signing key
 	  (the same key MCUboot verifies the M7 against; its public half is
@@ -469,14 +467,34 @@ config HPI_M4_UPDATE_REQUIRE_SIGNATURE
 	  build/m4/zephyr/zephyr.bin without signing it). A build with it off is
 	  not a shippable build.
 
+endif # HPI_M4_UPDATE
+
+config HPI_FW_RELEASE_SIG
+	bool
+	select MBEDTLS
+	select MBEDTLS_PSA_CRYPTO_C
+	select PSA_WANT_ALG_SHA_256
+	select PSA_WANT_ALG_ECDSA
+	select PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY
+	select PSA_WANT_ECC_SECP_R1_256
+	help
+	  The application-side release-signature verifier
+	  (services/fw_release_sig.c): ECDSA-P256 over an image's SHA-256,
+	  against the public half of the release signing key compiled in by
+	  tools/build/gen_m4_pubkey.py. One verifier and one key for every image
+	  the M7 application checks itself -- the M4 image and the ESP32-C6
+	  image. (The M7 image is verified by MCUboot, with the same key.)
+	  Selected by the features that need it; not user-settable.
+
 config HPI_M4_SIGNING_KEY
-	string "PEM key whose public half verifies M4 images"
+	string "PEM key whose public half verifies M4 and ESP32-C6 images"
 	default ""
-	depends on HPI_M4_UPDATE_REQUIRE_SIGNATURE
+	depends on HPI_FW_RELEASE_SIG
 	help
 	  Absolute path. Empty means "use the same default as the signed build"
 	  (keys/hp6_dev_ec256.pem), which is what a local developer wants.
 	  Release builds pass the real key here. Relative paths are a known trap —
 	  they resolve against the west topdir, not this repo.
 
-endif # HPI_M4_UPDATE
+	  The name predates the ESP32-C6 update path: this is the release key,
+	  and it verifies every image the application checks itself.

@@ -188,18 +188,22 @@ target_sources_ifdef(CONFIG_HPI_M4_UPDATE app PRIVATE
     src/control/mcumgr_hpi/hpi_m4fw.c
 )
 
-# The M4 image is verified by THIS application, not by MCUboot (the M4 is not an
-# MCUboot image -- see m4_update_service.h), so the app needs the public half of
-# the release signing key compiled in. Generate it from the same PEM the
-# bootloader signing uses, so there is one key for the whole device.
-if(CONFIG_HPI_M4_UPDATE_REQUIRE_SIGNATURE)
+# The M4 and ESP32-C6 images are verified by THIS application, not by MCUboot
+# (neither is an MCUboot image -- see m4_update_service.h and
+# esp32_update_service.h), so the app needs the public half of the release
+# signing key compiled in. Generate it from the same PEM the bootloader signing
+# uses, so there is one key for the whole device, and one verifier.
+target_sources_ifdef(CONFIG_HPI_FW_RELEASE_SIG app PRIVATE
+    src/services/fw_release_sig.c
+)
+if(CONFIG_HPI_FW_RELEASE_SIG)
     set(m4_key "${CONFIG_HPI_M4_SIGNING_KEY}")
     if(m4_key STREQUAL "")
         set(m4_key "${CMAKE_CURRENT_SOURCE_DIR}/../keys/hp6_dev_ec256.pem")
     endif()
     if(NOT EXISTS "${m4_key}")
         message(FATAL_ERROR
-            "CONFIG_HPI_M4_UPDATE_REQUIRE_SIGNATURE is set but the signing key "
+            "CONFIG_HPI_FW_RELEASE_SIG is set but the signing key "
             "'${m4_key}' does not exist. scripts/build.sh signed generates the dev "
             "key on first run; release builds pass HP6_SIGNING_KEY.")
     endif()

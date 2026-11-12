@@ -76,9 +76,10 @@ static struct {
 };
 
 #if IS_ENABLED(CONFIG_HPI_M4_UPDATE_REQUIRE_SIGNATURE)
-/* Generated at build time from the release signing key by
- * tools/build/gen_m4_pubkey.py -- raw uncompressed EC point. */
-extern const uint8_t hpi_m4fw_pubkey[65];
+#include "fw_release_sig.h"
+BUILD_ASSERT(HPI_M4FW_SIG_LEN == HPI_FW_SIG_LEN &&
+	     HPI_M4FW_SHA256_LEN == HPI_FW_SHA256_LEN,
+	     "M4 update and the release verifier must agree on the scheme");
 #endif
 
 /* ---- helpers ---- */
@@ -154,35 +155,13 @@ static int verify_signature(const uint8_t digest[HPI_M4FW_SHA256_LEN])
 		return -EBADMSG;
 	}
 
-	psa_status_t ps = psa_crypto_init();
-	if (ps != PSA_SUCCESS) {
-		LOG_ERR("psa_crypto_init failed (%d)", (int)ps);
-		return -EIO;
-	}
+	/* The digest is already computed and checked, so the verifier works on
+	 * it directly; there is no need to re-hash the staged image. */
+	int rc = hpi_fw_release_sig_verify(digest, m4fw.sig);
 
-	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_VERIFY_HASH);
-	psa_set_key_algorithm(&attr, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
-	psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
-	psa_set_key_bits(&attr, 256);
-
-	psa_key_id_t key = PSA_KEY_ID_NULL;
-	ps = psa_import_key(&attr, hpi_m4fw_pubkey, sizeof(hpi_m4fw_pubkey), &key);
-	if (ps != PSA_SUCCESS) {
-		LOG_ERR("M4 update: public key import failed (%d)", (int)ps);
-		return -EIO;
-	}
-
-	/* verify_HASH, not verify_message: the digest is already computed and
-	 * checked, so there is no need to re-hash the staged image. */
-	ps = psa_verify_hash(key, PSA_ALG_ECDSA(PSA_ALG_SHA_256),
-			     digest, HPI_M4FW_SHA256_LEN,
-			     m4fw.sig, HPI_M4FW_SIG_LEN);
-	psa_destroy_key(key);
-
-	if (ps != PSA_SUCCESS) {
-		LOG_ERR("M4 update: signature INVALID (%d) -- bank 2 not touched", (int)ps);
-		return -EBADMSG;
+	if (rc != 0) {
+		LOG_ERR("M4 update: signature check failed (%d) -- bank 2 not touched", rc);
+		return rc;
 	}
 	LOG_INF("M4 update: signature OK");
 	return 0;
