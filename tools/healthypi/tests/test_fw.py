@@ -117,10 +117,11 @@ def test_manifest_is_reproducible(tmp_path, key):
             == zipfile.ZipFile(two).read("manifest.json"))
 
 
-def test_apply_order_puts_m7_last():
-    """The M7 applies the other images, so it must not be replaced first."""
-    assert fw.APPLY_ORDER[-1] == "m7"
-    assert set(fw.APPLY_ORDER) == {"esp32c6", "m4", "m7"}
+def test_apply_order_puts_the_c6_last():
+    """Any M7 reset holds the C6 in reset, and a C6 reset before its new image
+    has proved itself rolls it back -- so the C6 goes after every reset. The M4
+    still precedes the M7: both share the one reset (two with an M7 install)."""
+    assert fw.APPLY_ORDER == ("m4", "m7", "esp32c6")
 
 
 def test_describe_lists_every_image(bundle_path):
@@ -439,3 +440,228 @@ def test_a_folder_manifest_cannot_reach_outside_the_folder(bundle_path, tmp_path
     (folder / "manifest.json").write_text(json.dumps(man))
     with pytest.raises(fw.BundleError, match="outside the bundle"):
         fw.Bundle(folder).read_image("m7")
+
+
+# --- the ESP32-C6 entry -------------------------------------------------------
+
+
+def fake_c6_image(version="1.1.0", size=6000, *, chip=13,
+                  project=b"healthybridge_esp32c6", desc_magic=0xABCD5432):
+    """An ESP-IDF app image as far as the header and app descriptor go: the
+    0xE9 image header (chip id at 12), one segment header, esp_app_desc_t at 32.
+    Same layout healthybridge_esp32c6.bin has (checked against a real build)."""
+    head = bytearray(24)
+    head[0] = 0xE9
+    head[1] = 1
+    head[12:14] = chip.to_bytes(2, "little")
+    seg = bytes(8)
+    desc = bytearray(256)
+    desc[0:4] = desc_magic.to_bytes(4, "little")
+    desc[16:16 + len(version)] = version.encode()
+    desc[48:48 + len(project)] = project
+    desc[112:118] = b"v6.0.1"
+    body = bytes(head) + seg + bytes(desc)
+    # a deterministic, non-repeating payload so a misplaced chunk changes the hash
+    filler = bytes((i * 7 + 3) & 0xFF for i in range(max(0, size - len(body))))
+    return body + filler
+
+
+@pytest.fixture
+def c6_bundle(tmp_path, key):
+    m7 = tmp_path / "m7.bin"
+    m7.write_bytes(b"\xa5" * 4096)
+    m4 = tmp_path / "m4.bin"
+    m4.write_bytes(b"\x5a" * 2048)
+    c6 = tmp_path / "c6.bin"
+    c6.write_bytes(fake_c6_image("1.1.0"))
+    return fw.create(
+        tmp_path / "hpi6-firmware-1.0.1.zip",
+        [
+            fw.ImageSpec("m7", m7, "1.0.1", "mcumgr-img"),
+            fw.ImageSpec("m4", m4, "1.0.1", "hpi-g64", sign=True),
+            fw.ImageSpec("esp32c6", c6, "", "hpi-g64-esp", sign=True),
+        ],
+        release="1.0.1",
+        hw_rev=["v5"],
+        key_path=key,
+        created="2026-11-12T00:00:00Z",
+    )
+
+
+def test_c6_entry_is_signed_and_versioned_from_the_image(c6_bundle, key):
+    b = fw.Bundle(c6_bundle)
+    b.verify(key)
+    e = b.images()["esp32c6"]
+    assert e["transport"] == "hpi-g64-esp"
+    assert e["version"] == "1.1.0"            # read from the app descriptor
+    assert len(b.image_sig("esp32c6")) == 64
+    assert b.unusable("esp32c6") is None
+    assert "esp32c6" in b.describe() and "signed" in b.describe()
+
+
+def test_c6_signature_verifies_exactly_as_the_m7_checks_it(c6_bundle, key):
+    """Byte-exact against fw_release_sig.c: psa_verify_hash(key, ECDSA(SHA-256),
+    digest = SHA-256 of the image FILE, 64-byte raw r||s), with the key the M7
+    compiles in -- the raw uncompressed point gen_m4_pubkey.py emits.
+
+    Re-derived here from first principles with `cryptography`, not through
+    healthypi's own verifier, in both encodings: raw r||s split and re-encoded
+    as DER, and the DER form verified directly.
+    """
+    import hashlib
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import (
+        Prehashed,
+        encode_dss_signature,
+    )
+
+    b = fw.Bundle(c6_bundle)
+    image = b.read_image("esp32c6")
+    digest = hashlib.sha256(image).digest()
+    assert b.images()["esp32c6"]["sha256"] == digest.hex()   # `sha` sent at begin
+
+    sig = b.image_sig("esp32c6")
+    assert len(sig) == 64
+    r, s = int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")
+    n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+    assert 0 < r < n and 0 < s < n
+
+    priv = serialization.load_pem_private_key(key.read_bytes(), password=None)
+    point = priv.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+    )
+    assert len(point) == 65 and point[0] == 0x04          # what the M7 imports
+    pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point)
+
+    der = encode_dss_signature(r, s)
+    # verify_HASH semantics: the 32-byte digest is the input, not hashed again
+    pub.verify(der, digest, ec.ECDSA(Prehashed(hashes.SHA256())))
+    # ... which is the same statement as verifying the message with SHA-256
+    pub.verify(der, image, ec.ECDSA(hashes.SHA256()))
+    # and NOT a signature over the digest-as-message (a double hash)
+    with pytest.raises(Exception):
+        pub.verify(der, digest, ec.ECDSA(hashes.SHA256()))
+
+
+def test_c6_image_tamper_is_caught(tmp_path, c6_bundle, key):
+    bad = _rebuild(c6_bundle, tmp_path / "bad.zip",
+                   lambda m: m.__setitem__("esp32c6.bin", fake_c6_image("1.1.0", 6001)))
+    with pytest.raises(fw.BundleError, match="digest mismatch|size mismatch"):
+        fw.Bundle(bad).verify(key)
+
+
+def test_c6_sig_edit_fails_the_manifest_signature(tmp_path, c6_bundle, key):
+    def flip(members):
+        d = json.loads(members["manifest.json"])
+        sig = bytearray.fromhex(d["images"]["esp32c6"]["sig"])
+        sig[10] ^= 1
+        d["images"]["esp32c6"]["sig"] = sig.hex()
+        members["manifest.json"] = json.dumps(d, indent=2, sort_keys=True).encode()
+
+    bad = _rebuild(c6_bundle, tmp_path / "flip.zip", flip)
+    with pytest.raises(fw.BundleError, match="signature does NOT verify"):
+        fw.Bundle(bad).verify(key)
+
+
+def test_c6_sig_from_another_key_is_caught_even_in_a_resigned_manifest(
+    tmp_path, c6_bundle, key, other_key
+):
+    """A manifest signed by the right key but carrying an image signature the
+    device would refuse: caught on the host, before a 1.4 MB transfer."""
+    import hashlib
+
+    def swap(members):
+        d = json.loads(members["manifest.json"])
+        digest = bytes.fromhex(d["images"]["esp32c6"]["sha256"])
+        d["images"]["esp32c6"]["sig"] = fw.sign_digest_raw(digest, other_key).hex()
+        blob = json.dumps(d, indent=2, sort_keys=True).encode()
+        members["manifest.json"] = blob
+        members["manifest.sig"] = fw.sign_digest_raw(hashlib.sha256(blob).digest(), key)
+
+    bad = _rebuild(c6_bundle, tmp_path / "swap.zip", swap)
+    with pytest.raises(fw.BundleError, match="esp32c6: image signature does NOT verify"):
+        fw.Bundle(bad).verify(key)
+
+
+def test_c6_entry_without_a_signature_is_refused_without_a_key(tmp_path, c6_bundle):
+    def strip(members):
+        d = json.loads(members["manifest.json"])
+        del d["images"]["esp32c6"]["sig"]
+        members["manifest.json"] = json.dumps(d, indent=2, sort_keys=True).encode()
+
+    bad = _rebuild(c6_bundle, tmp_path / "nosig.zip", strip)
+    with pytest.raises(fw.BundleError, match="requires a 64-byte signature"):
+        fw.Bundle(bad).verify(None)
+
+
+def test_old_esp_ota_http_entry_is_named_and_not_applied(tmp_path, c6_bundle, key):
+    """A bundle made before 2026-11: still a valid bundle (its M4/M7 apply), but
+    the C6 entry is unsigned and for a transport that never existed."""
+    import hashlib
+
+    def legacy(members):
+        d = json.loads(members["manifest.json"])
+        e = d["images"]["esp32c6"]
+        e["transport"] = "esp-ota-http"
+        e["version"] = "unknown"
+        del e["sig"]
+        blob = json.dumps(d, indent=2, sort_keys=True).encode()
+        members["manifest.json"] = blob
+        members["manifest.sig"] = fw.sign_digest_raw(hashlib.sha256(blob).digest(), key)
+
+    old = fw.Bundle(_rebuild(c6_bundle, tmp_path / "old.zip", legacy))
+    old.verify(key)                              # nothing wrong with the bundle
+    why = old.unusable("esp32c6")
+    assert why and "predates the USB update path" in why
+    assert "cannot be applied" in old.describe()
+    assert old.unusable("m4") is None and old.unusable("m7") is None
+
+
+def test_a_bundle_without_a_c6_says_so(bundle_path):
+    assert "does not update the C6" in fw.Bundle(bundle_path).describe()
+
+
+@pytest.mark.parametrize(
+    "image, match",
+    [
+        (fake_c6_image(chip=5), "chip id 5"),                    # ESP32-C3 (HP5)
+        (fake_c6_image(desc_magic=0x50), "MERGED flash image"),  # bootloader desc
+        (fake_c6_image(project=b"something_else"), "project"),
+        (b"\x00" * 4096, "not an ESP-IDF application image"),
+        (fake_c6_image(size=0x1F0001), "OTA slot holds at most"),
+    ],
+)
+def test_create_refuses_a_wrong_c6_image(tmp_path, key, image, match):
+    c6 = tmp_path / "c6.bin"
+    c6.write_bytes(image)
+    with pytest.raises(fw.BundleError, match=match):
+        fw.create(tmp_path / "x.zip", [fw.ImageSpec("esp32c6", c6, "", "hpi-g64-esp", sign=True)],
+                  release="1", hw_rev=["v5"], key_path=key, created="t")
+
+
+def test_create_refuses_a_version_that_disagrees_with_the_image(tmp_path, key):
+    c6 = tmp_path / "c6.bin"
+    c6.write_bytes(fake_c6_image("1.1.0"))
+    with pytest.raises(fw.BundleError, match="disagrees"):
+        fw.create(tmp_path / "x.zip", [fw.ImageSpec("esp32c6", c6, "1.2.0", "hpi-g64-esp", sign=True)],
+                  release="1", hw_rev=["v5"], key_path=key, created="t")
+
+
+@pytest.mark.parametrize("transport, sign, match", [
+    ("hpi-g64-esp", False, "must be signed"),
+    ("esp-ota-http", False, "retired"),
+])
+def test_create_refuses_an_unsigned_or_retired_c6_entry(tmp_path, key, transport, sign, match):
+    c6 = tmp_path / "c6.bin"
+    c6.write_bytes(fake_c6_image())
+    with pytest.raises(fw.BundleError, match=match):
+        fw.create(tmp_path / "x.zip", [fw.ImageSpec("esp32c6", c6, "", transport, sign=sign)],
+                  release="1", hw_rev=["v5"], key_path=key, created="t")
+
+
+def test_esp_app_info_reads_a_real_layout():
+    info = fw.esp_app_info(fake_c6_image("2.3.4"))
+    assert (info.chip_id, info.version, info.project_name, info.idf_version) == (
+        13, "2.3.4", "healthybridge_esp32c6", "v6.0.1")

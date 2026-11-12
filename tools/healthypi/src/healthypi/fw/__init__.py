@@ -5,8 +5,8 @@
 
 ``bundle`` is stdlib-only apart from ``cryptography`` for signing, so a bundle
 can be inspected and its digests checked on a machine with no device stack.
-``update`` and ``recovery`` need ``smpclient`` and are imported lazily by the
-CLI, which is why they are not re-exported here.
+``update``, ``esp32c6`` and ``recovery`` need ``smpclient`` and are imported
+lazily by the CLI, which is why they are not re-exported here.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from .bundle import (
     BundleError,
     ImageSpec,
     create,
+    esp_app_info,
     sha256_file,
 )
 from .keys import sign_digest_raw, verify_digest_raw
@@ -27,6 +28,7 @@ __all__ = [
     "BundleError",
     "ImageSpec",
     "create",
+    "esp_app_info",
     "sha256_file",
     "sign_digest_raw",
     "verify_digest_raw",

@@ -3,10 +3,12 @@
 
 """Apply a firmware bundle (zip) to a device -- the supported way to update.
 
-One bundle, all three processors, in :data:`~healthypi.fw.bundle.APPLY_ORDER`.
-The M7 goes through the stock MCUmgr img group; the M4 through group-64
-``0x00A0-0x00A4``, staged in QSPI and written to bank 2 by the M7; the C6
-updates itself over WiFi and is skipped here.
+One bundle, all three processors, in :data:`~healthypi.fw.bundle.APPLY_ORDER`:
+the M4 (group-64 ``0x00A0-0x00A4``, staged in QSPI and written to bank 2 by the
+M7) and the M7 (stock MCUmgr img group), then the reset -- two when the M7
+changed -- then the ESP32-C6 (group-64 ``0x00A6-0x00AA``, relayed by the M7 into
+the C6's inactive OTA slot; :mod:`healthypi.fw.esp32c6`). The C6 is last because
+any later reset would roll its new image back.
 
 The port is CDC 1, the control port. CDC 0 carries the ``.HP6`` sample stream
 and is never used for updates.
@@ -17,6 +19,7 @@ Operational guide, including the recovery ladder: ``docs/ARCHITECTURE.md`` §9.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import tempfile
 import time
@@ -26,6 +29,9 @@ from typing import Callable
 
 from ..transport import serial_smp
 from .bundle import APPLY_ORDER, Bundle
+from .errors import EXIT_OK, EXIT_UNVERIFIED, UpdateError
+
+__all__ = ["Result", "Target", "UpdateError", "apply_bundle", "same_version"]
 
 # Bytes an m4fw_chunk request spends on framing before any payload: the 8-byte
 # SMP header plus CBOR for {"off": <uint>, "data": <bstr>}. ~34 in practice; 48
@@ -56,10 +62,6 @@ def _stdout(msg: str) -> None:
     print(msg, flush=True)
 
 
-class UpdateError(Exception):
-    """The update could not proceed. The message says what the device state is."""
-
-
 @dataclass
 class Target:
     """Where the device is and how to talk to it."""
@@ -82,6 +84,8 @@ class Result:
     skipped: list[str] = field(default_factory=list)
     ok: bool = True
     versions_after: dict[str, str] = field(default_factory=dict)
+    #: process exit status for the CLI -- see :mod:`healthypi.fw.errors`
+    exit_code: int = EXIT_OK
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +100,7 @@ def _ver_tuple(v: str) -> tuple:
     older than 2.0.1 would make the updater reflash on every run during
     development, which trains people to ignore it.
     """
-    core = v.split("-")[0].split("+")[0]
+    core = v.strip().lstrip("vV").split("-")[0].split("+")[0]
     parts = []
     for piece in core.split("."):
         try:
@@ -400,11 +404,30 @@ async def _apply_m4(
 # ---------------------------------------------------------------------------
 
 
-async def _reset_and_reconnect(conn, target: Target, log: Log):
+async def _reset_and_reconnect(conn, target: Target, log: Log, g=None, is_error=None):
     from smpclient.requests.os_management import ResetWrite
 
+    from . import esp32c6
+
+    # A reset while a C6 update is in flight or its new image is pending would
+    # roll that update back; the device refuses (274), and this tool does not
+    # even ask. Only an update started elsewhere can be in that state here --
+    # this tool's own C6 step always runs after its last reset.
+    if g is not None:
+        why = await esp32c6.busy_reason(conn, g, is_error)
+        if why:
+            raise UpdateError(
+                "cannot reset to install the new image(s): " + why + "\n"
+                "  What was uploaded stays staged. Once busy: no, run "
+                "`healthypi device reset`, then this update again to verify."
+            )
     log("  resetting…")
-    await conn.request(ResetWrite())
+    try:
+        resp = await conn.request(ResetWrite())
+    except (TimeoutError, asyncio.TimeoutError):
+        resp = None  # rebooted before the reply got out
+    if resp is not None and is_error is not None and esp32c6.is_update_active(resp, is_error):
+        raise UpdateError("cannot reset: " + esp32c6.EXPLAIN_274)
     try:
         await conn.client.__aexit__(None, None, None)
     except Exception:  # noqa: BLE001 -- already gone
@@ -414,7 +437,8 @@ async def _reset_and_reconnect(conn, target: Target, log: Log):
     # Pin the port for reconnection. Autodetect would probe every candidate on
     # each of 30 attempts, and on a machine with other serial devices it can
     # settle on the wrong one while the HealthyPi is still enumerating.
-    resolved = Target(port=conn.port, baud=target.baud, frame_size=target.frame_size)
+    resolved = copy.copy(target)
+    resolved.port = conn.port
     for attempt in range(_RECONNECT_TRIES):
         try:
             new = await resolved.connect()
@@ -435,6 +459,32 @@ async def _reset_and_reconnect(conn, target: Target, log: Log):
 # ---------------------------------------------------------------------------
 
 
+
+
+def _c6_plan_line(bundle: Bundle, conn, cur: str, espst, m7_planned: bool) -> str:
+    """What the C6 step will do, for the plan and --dry-run."""
+    from . import esp32c6
+
+    entry = bundle.images()["esp32c6"]
+    size = int(entry["size"])
+    chunk = esp32c6.chunk_size(conn)
+    lines = [
+        f"  esp32c6: {size} B in {-(-size // chunk)} chunks of {chunk} B, relayed by "
+        "the M7; the C6 then restarts into it and must report VALID"
+    ]
+    if espst is None and m7_planned:
+        lines.append(
+            "           this M7 has no ESP32-C6 update commands yet: the step runs on "
+            "the M7 this bundle installs"
+        )
+    if not cur:
+        lines.append(
+            "           running version unknown (the C6 is held in reset, the boot "
+            "default): a real run powers it, radios off, to read it first"
+        )
+    return "\n".join(x for x in lines if x)
+
+
 async def apply_bundle(
     bundle: Bundle,
     target: Target,
@@ -444,19 +494,31 @@ async def apply_bundle(
     force: bool = False,
     dry_run: bool = False,
     log: Log = _stdout,
+    progress=None,
 ) -> Result:
     """Verify a bundle, then bring the device up to it.
 
-    Returns a :class:`Result`; raises :class:`UpdateError` if the device refuses
-    at a point where continuing would be unsafe or misleading.
+    Order: M4, M7, the reset(s) they need, then the ESP32-C6 -- see
+    :data:`~healthypi.fw.bundle.APPLY_ORDER` for why the C6 is last.
+
+    Returns a :class:`Result` whose ``exit_code`` the CLI uses; raises
+    :class:`UpdateError` (with its own ``code``) if the device refuses at a
+    point where continuing would be unsafe or misleading.
     """
     from ..smp.group64 import fmt_error, g, is_error
+    from . import esp32c6
 
     checked = bundle.authenticate(pubkey)
     log(bundle.describe())
     log(f"  {checked}")
 
     result = Result()
+    images = bundle.images()
+    if only and only not in images:
+        raise UpdateError(
+            f"this bundle carries no {only} image"
+            + (" -- it cannot update the ESP32-C6" if only == "esp32c6" else "")
+        )
 
     # Managed by hand rather than `async with`, because the mid-flow reset
     # replaces the connection: a context manager would still try to close the
@@ -464,27 +526,69 @@ async def apply_bundle(
     conn = await target.connect()
     try:
         installed = await _fw_versions(conn, g, is_error, fmt_error)
+        # None: this M7 firmware has no espfw_* (older, or a development build).
+        espst = await esp32c6.read_status(conn, g, is_error)
+        if espst is not None and espst.ver:
+            installed["esp32c6"] = espst.ver
         log("\ndevice:")
         for name in APPLY_ORDER:
-            entry = bundle.images().get(name)
+            entry = images.get(name)
             if entry:
-                cur = installed.get(name) or "?"
-                log(f"  {name:<8} installed {cur:<14} bundle {entry['version']}")
+                cur = installed.get(name) or (
+                    "? (held in reset)" if name == "esp32c6" else "?"
+                )
+                log(f"  {name:<8} installed {cur:<17} bundle {entry['version']}")
 
-        wanted = [
-            n for n in APPLY_ORDER if bundle.images().get(n) and (not only or n == only)
-        ]
-        why = unsupported(await _update_support(conn, g, is_error), wanted)
+        # Nothing may reset the device while a C6 update is in flight or its new
+        # image is still proving itself -- and every M4/M7 install ends in one.
+        if espst is not None and espst.busy:
+            raise UpdateError(esp32c6.explain_busy(espst))
+
+        wanted = [n for n in APPLY_ORDER if images.get(n) and (not only or n == only)]
+        for name in list(wanted):
+            why = bundle.unusable(name)
+            if why:
+                if only == name:
+                    raise UpdateError(f"{name}: {why}")
+                log(f"  {name}: skipped -- {why}")
+                result.skipped.append(name)
+                wanted.remove(name)
+        if "esp32c6" not in images and not only:
+            log("  esp32c6: this bundle carries no C6 image -- the C6 is left as it is")
+
+        why = unsupported(
+            await _update_support(conn, g, is_error), [n for n in wanted if n != "esp32c6"]
+        )
         if why:
             raise UpdateError(why)
 
         plan: list[str] = []
         for name in wanted:
-            entry = bundle.images()[name]
+            entry = images[name]
             if name == "m7":
                 refusal = m7_downgrade(installed.get("m7", ""), entry["version"])
                 if refusal:
                     raise UpdateError(refusal)
+            if name == "esp32c6":
+                # Decided up front whenever it can be, so a refusal costs nothing.
+                if espst is None and "m7" not in plan:
+                    raise UpdateError(
+                        esp32c6.no_espfw_message(installed.get("m7", ""), False)
+                    )
+                cur = installed.get("esp32c6", "")
+                if cur and not force and same_version(cur, entry["version"]):
+                    log(f"  {name}: already at {entry['version']} — skipping (force to reapply)")
+                    result.skipped.append(name)
+                    continue
+                if cur and not force and _ver_tuple(entry["version"]) < _ver_tuple(cur):
+                    raise UpdateError(
+                        f"esp32c6: the bundle's C6 {entry['version']} is OLDER than the "
+                        f"installed {cur}.\n"
+                        "  The C6 has no downgrade protection of its own, so this tool "
+                        "refuses instead. Pass --force to install it anyway."
+                    )
+                plan.append(name)
+                continue
             if not force and same_version(installed.get(name, ""), entry["version"]):
                 log(f"  {name}: already at {entry['version']} — skipping (force to reapply)")
                 result.skipped.append(name)
@@ -494,7 +598,14 @@ async def apply_bundle(
         if not plan:
             log("\nnothing to do.")
             return result
-        log(f"\nplan: {' → '.join(plan)}")
+        steps = [n for n in plan if n != "esp32c6"]
+        if steps:
+            steps.append("reset" + (" ×2 (M7 install, then pair the cores)" if "m7" in plan else ""))
+        if "esp32c6" in plan:
+            steps.append("esp32c6")
+        log(f"\nplan: {' → '.join(steps)}")
+        if "esp32c6" in plan:
+            log(_c6_plan_line(bundle, conn, installed.get("esp32c6", ""), espst, "m7" in plan))
         if dry_run:
             log("dry run: nothing written.")
             return result
@@ -504,12 +615,7 @@ async def apply_bundle(
         needs_reset = False
         for name in plan:
             if name == "esp32c6":
-                log(
-                    "esp32c6: skipped — this tool cannot update the C6 yet. "
-                    "Program it over its own USB port: scripts/flash.sh esp32."
-                )
-                result.skipped.append(name)
-                continue
+                continue  # last, after the reset -- below
             image = bundle.read_image(name)
             if name == "m4":
                 needs_reset |= await _apply_m4(
@@ -527,88 +633,128 @@ async def apply_bundle(
                 )
             result.applied.append(name)
 
-        if not needs_reset:
-            return result
-
-        conn = await _reset_and_reconnect(conn, target, log)
-        after = await _fw_versions(conn, g, is_error, fmt_error)
-
-        # Installing a new M7 costs the M4 its IPC bind, and it takes a second
-        # reset to get it back -- whether or not the M4 was updated too.
-        #
-        # Why: the M4 has no bootloader. It self-delays ~7 s after a chip reset and
-        # binds RPMSG exactly once, because static vrings cannot re-bind against an
-        # already-running host (see app_m7/src/platform/ipc.c). That handshake
-        # assumes both cores boot together. When the M7 is also updated, MCUboot
-        # first copies ~646 KB secondary→primary before the M7 app starts at all,
-        # so the M7 arrives late, the M4's one attempt has already gone, and the M7
-        # reports "M4 IPC bind timeout -- no vitals". The device runs, but produces
-        # no HR/SpO2 until it is reset again.
-        #
-        # The second reset has no image to copy (slot 1 is already consumed, swap
-        # type none), so the cores boot together and bind normally. Reproduced and
-        # verified on v5, F8 2026-07-25 (both cores) and 2026-10-01 (M7 only --
-        # the cause is the M7 install, so the M4 being in the plan is irrelevant).
-        # An M4-only update has no MCUboot copy and never hits this.
-        if "m7" in plan:
-            m4_want = (
-                (bundle.images().get("m4") or {}).get("version", "")
-                if "m4" in plan
-                else installed.get("m4") or ""
-            )
-            m4_now = after.get("m4") or ""
-            # An empty m4 version is the unbound case itself: the M7 learns it
-            # from the M4 over IPC. A device with no M4 version before the
-            # update either had no M4 image or was already unbound -- reset
-            # anyway; a second reset is harmless.
-            if not m4_now or (m4_want and not same_version(m4_now, m4_want)):
-                log(
-                    "\nM4 did not bind after the M7 install (expected — "
-                    "MCUboot's image copy delayed the M7 past the M4's one-shot "
-                    "RPMSG bind). Resetting once more to re-pair the cores…"
-                )
-                conn = await _reset_and_reconnect(conn, target, log)
-                after = await _fw_versions(conn, g, is_error, fmt_error)
-
-        result.versions_after = after
-        log("\nafter reset:")
         ok = True
-        for name in plan:
-            entry = bundle.images().get(name)
-            if not entry or name == "esp32c6":
-                continue
-            got = after.get(name) or "?"
-            match = same_version(got, entry["version"])
-            ok &= match
-            log(
-                f"  {name:<8} {got:<14} "
-                f"{'OK' if match else 'MISMATCH — expected ' + entry['version']}"
-            )
+        after = dict(installed)
+        if needs_reset:
+            conn = await _reset_and_reconnect(conn, target, log, g, is_error)
+            after = await _fw_versions(conn, g, is_error, fmt_error)
 
-        # A matching version string does NOT prove an install: reapplying the
-        # running image, or an upload MCUboot declined, leaves the old version
-        # reported and "OK" printed. For the M7 the hash settles it -- slot 0 must
-        # now hold the image we shipped.
-        if "m7" in plan:
-            want = mcuboot_image_hash(bundle.read_image("m7"))
-            live = (await _m7_slot_hashes(conn, is_error)).get(0)
-            if want and live:
-                if live == want:
+            # Installing a new M7 costs the M4 its IPC bind, and it takes a second
+            # reset to get it back -- whether or not the M4 was updated too.
+            #
+            # Why: the M4 has no bootloader. It self-delays ~7 s after a chip reset and
+            # binds RPMSG exactly once, because static vrings cannot re-bind against an
+            # already-running host (see app_m7/src/platform/ipc.c). That handshake
+            # assumes both cores boot together. When the M7 is also updated, MCUboot
+            # first copies ~646 KB secondary→primary before the M7 app starts at all,
+            # so the M7 arrives late, the M4's one attempt has already gone, and the M7
+            # reports "M4 IPC bind timeout -- no vitals". The device runs, but produces
+            # no HR/SpO2 until it is reset again.
+            #
+            # The second reset has no image to copy (slot 1 is already consumed, swap
+            # type none), so the cores boot together and bind normally. Reproduced and
+            # verified on v5, F8 2026-07-25 (both cores) and 2026-10-01 (M7 only --
+            # the cause is the M7 install, so the M4 being in the plan is irrelevant).
+            # An M4-only update has no MCUboot copy and never hits this.
+            if "m7" in plan:
+                m4_want = (
+                    (images.get("m4") or {}).get("version", "")
+                    if "m4" in plan
+                    else installed.get("m4") or ""
+                )
+                m4_now = after.get("m4") or ""
+                # An empty m4 version is the unbound case itself: the M7 learns it
+                # from the M4 over IPC. A device with no M4 version before the
+                # update either had no M4 image or was already unbound -- reset
+                # anyway; a second reset is harmless.
+                if not m4_now or (m4_want and not same_version(m4_now, m4_want)):
                     log(
-                        f"  m7 slot0 hash {live.hex()[:16]}… matches the bundle "
-                        "— image is installed and running"
+                        "\nM4 did not bind after the M7 install (expected — "
+                        "MCUboot's image copy delayed the M7 past the M4's one-shot "
+                        "RPMSG bind). Resetting once more to re-pair the cores…"
                     )
-                else:
-                    ok = False
-                    log(
-                        f"  m7 slot0 hash {live.hex()[:16]}… does NOT match the "
-                        f"bundle's {want.hex()[:16]}… — MCUboot did not install "
-                        "the uploaded image (not newer? not marked pending?)"
-                    )
-        result.ok = ok
+                    conn = await _reset_and_reconnect(conn, target, log, g, is_error)
+                    after = await _fw_versions(conn, g, is_error, fmt_error)
+
+            result.versions_after = dict(after)
+            log("\nafter reset:")
+            for name in plan:
+                entry = images.get(name)
+                if not entry or name == "esp32c6":
+                    continue
+                got = after.get(name) or "?"
+                match = same_version(got, entry["version"])
+                ok &= match
+                log(
+                    f"  {name:<8} {got:<14} "
+                    f"{'OK' if match else 'MISMATCH — expected ' + entry['version']}"
+                )
+
+            # A matching version string does NOT prove an install: reapplying the
+            # running image, or an upload MCUboot declined, leaves the old version
+            # reported and "OK" printed. For the M7 the hash settles it -- slot 0 must
+            # now hold the image we shipped.
+            if "m7" in plan:
+                want = mcuboot_image_hash(bundle.read_image("m7"))
+                live = (await _m7_slot_hashes(conn, is_error)).get(0)
+                if want and live:
+                    if live == want:
+                        log(
+                            f"  m7 slot0 hash {live.hex()[:16]}… matches the bundle "
+                            "— image is installed and running"
+                        )
+                    else:
+                        ok = False
+                        log(
+                            f"  m7 slot0 hash {live.hex()[:16]}… does NOT match the "
+                            f"bundle's {want.hex()[:16]}… — MCUboot did not install "
+                            "the uploaded image (not newer? not marked pending?)"
+                        )
+
+        exit_code = EXIT_OK if ok else EXIT_UNVERIFIED
+        if "esp32c6" in plan:
+            if result.applied:
+                log("")
+            await _quiet_the_stream(conn, g, is_error, fmt_error, log)
+            try:
+                c6 = await esp32c6.update_c6(
+                    conn,
+                    bundle.read_image("esp32c6"),
+                    bundle.image_sig("esp32c6") or b"",
+                    images["esp32c6"]["version"],
+                    g=g,
+                    is_error=is_error,
+                    fmt_error=fmt_error,
+                    force=force,
+                    m7_version=after.get("m7", ""),
+                    m7_just_installed="m7" in plan,
+                    log=log,
+                    **({"progress": progress} if progress else {}),
+                )
+            except UpdateError as exc:
+                if result.applied:
+                    done = " and ".join(n.upper() for n in result.applied)
+                    raise UpdateError(
+                        f"{done} updated above; the ESP32-C6 step did not complete:\n"
+                        f"{exc}",
+                        exc.code,
+                    ) from None
+                raise
+            if c6.applied:
+                result.applied.append("esp32c6")
+            elif c6.skipped:
+                result.skipped.append("esp32c6")
+            if c6.version_after:
+                result.versions_after["esp32c6"] = c6.version_after
+            if c6.exit_code != EXIT_OK:
+                exit_code = c6.exit_code
+
+        result.exit_code = exit_code
+        result.ok = exit_code == EXIT_OK
         return result
     finally:
         try:
             await conn.client.__aexit__(None, None, None)
         except Exception:  # noqa: BLE001 -- already gone after a reset
             pass
+
