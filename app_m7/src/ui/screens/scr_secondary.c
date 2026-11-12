@@ -491,7 +491,9 @@ static void build_setup(lv_obj_t *parent)
 	lv_obj_set_style_border_width(s_rec.setup, 0, 0);
 	lv_obj_set_style_pad_all(s_rec.setup, HPI_M3_SPACE_3, 0);
 	lv_obj_set_style_pad_row(s_rec.setup, HPI_M3_SPACE_3, 0);
-	lv_obj_clear_flag(s_rec.setup, LV_OBJ_FLAG_SCROLLABLE);
+	/* Scrolls: at the 64 px touch floor the stack is ~672 of 680 px, and the
+	 * error line below pushes it past the end (pitfall 15). */
+	hpi_m3_apply_scroll_v(s_rec.setup);
 	lv_obj_set_flex_flow(s_rec.setup, LV_FLEX_FLOW_COLUMN);
 
 	/* Channels. */
