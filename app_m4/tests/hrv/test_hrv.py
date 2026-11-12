@@ -65,6 +65,15 @@ CMSIS_SOURCES = [
 
 
 
+OBS_HR_LAG = (
+    "HR lag (observed, not fixed): calculate_heart_rate() averages every RR "
+    "interval in the 256-entry history, so the heart rate sent to the M7 in "
+    "ECG_VITALS (and BEAT_NOTIFY) follows a change over up to 256 beats. A "
+    "step from 60 to 100 BPM with a full buffer takes 236 beats (~142 s) to "
+    "come within 5 BPM."
+)
+
+
 # --------------------------------------------------------------------------
 # Build + run
 # --------------------------------------------------------------------------
@@ -298,6 +307,34 @@ def cases(h):
                    (1000, 2000), (1001, 0), (0, 0)):
         checks.append(Check("gate: %d samples @500 Hz" % d, "RR ms (0=rejected)",
                             exp, got[d], 0))
+
+    # ---- heart rate step response ------------------------------------------
+    # Not HRV, but the same RR buffer. RR steps from 1000 ms (60 BPM) to 600 ms
+    # (100 BPM); count the beats until the reported HR is within 5 BPM of 100.
+    # "model" is a whole-history integer mean over the last <= 256 intervals:
+    # matching it confirms the mechanism; the 10-beat check is the defect.
+    def hr_model(rr):
+        win = rr[-256:]
+        return max(30, min(200, 60000 // (sum(win) // len(win))))
+
+    for pre in (300, 30):
+        name = "HR step 1000->600 ms after %d beats" % pre
+        rr = [1000] * pre
+        cmds = feed(rr)
+        for _ in range(300):
+            cmds += ["rr 600", "hr"]
+        hrs = [int(l.split()[1]) for l in h.run(cmds) if l.startswith("HR ")]
+        settle = next((k + 1 for k, v in enumerate(hrs) if abs(v - 100) <= 5), None)
+        model = [hr_model(rr + [600] * (k + 1)) for k in range(len(hrs))]
+        m_settle = next(k + 1 for k, v in enumerate(model) if abs(v - 100) <= 5)
+        checks.append(Check(name, "beats to +-5 BPM vs model", m_settle,
+                            settle if settle is not None else 9999, 0,
+                            note="settles after %s beats = %.1f s at 600 ms; "
+                                 "HR after 10 beats %d BPM, after 60 s (100 "
+                                 "beats) %d BPM" % (settle, (settle or 0) * 0.6,
+                                                    hrs[9], hrs[99])))
+        checks.append(Check(name, "HR after 10 beats (6 s)", 100, hrs[9], 5,
+                            OBS_HR_LAG))
 
     # ---- frequency domain -------------------------------------------------
 
