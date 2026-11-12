@@ -89,6 +89,9 @@ class Report:
 REQ_UNLOCK = "unlock"
 REQ_SIGNED = "signed_build"
 REQ_SD = "sd"
+#: The ESP32-C6 update commands (espfw_*, CONFIG_HPI_ESP32_UPDATE): signed
+#: builds of firmware from November 2026 on.
+REQ_ESPFW = "espfw"
 
 CaseFn = Callable[..., Awaitable[Result]]
 
@@ -160,6 +163,7 @@ class Capabilities:
     unlocked: bool = False
     signed_build: bool = False
     sd_present: bool = False
+    espfw: bool = False
     notes: list[str] = field(default_factory=list)
 
     def unmet(self, requires: tuple[str, ...]) -> str | None:
@@ -169,6 +173,9 @@ class Capabilities:
             return "not a signed build (no M4-update/recovery support)"
         if REQ_SD in requires and not self.sd_present:
             return "no SD card present"
+        if REQ_ESPFW in requires and not self.espfw:
+            return ("no ESP32-C6 update commands (espfw_status: ENOTSUP) -- M7 "
+                    "firmware older than them, or built without CONFIG_HPI_ESP32_UPDATE")
         return None
 
 
@@ -195,6 +202,14 @@ async def probe(conn, g, is_error) -> Capabilities:
         caps.signed_build = not is_error(m4)
     except Exception:  # noqa: BLE001
         caps.signed_build = False
+
+    # espfw_status answers wherever the ESP32-C6 update commands are built in
+    # and ENOTSUP everywhere else. Not lock-gated, so the reply is the answer.
+    try:
+        st = await conn.request(g.espfw_status())
+        caps.espfw = not is_error(st)
+    except Exception:  # noqa: BLE001
+        caps.espfw = False
 
     # There is no "is a card present" command in 1.0.0. sd_status reports the
     # *recording* state and answers fine with no card. The self-test's `sd`
