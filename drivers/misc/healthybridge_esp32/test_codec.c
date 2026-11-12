@@ -205,6 +205,194 @@ static void get_version_tests(void)
 	       v.version_string[sizeof(v.version_string) - 1] == '\0');
 }
 
+/*
+ * Firmware update (0x80 / 0x81). Every frame below is copied byte for byte from
+ * test/test_hb_ota.c in healthybridge-esp32 (branch hp6/c6-ota-receiver), where
+ * the C6 receiver produces or consumes it -- so a byte that moves on either
+ * side fails one of the two tests. All seq 0.
+ */
+
+/* BEGIN: image_size 1,448,640 (0x00161AC0), sha256 = 00 01 .. 1F. */
+static const uint8_t G_OTA_BEGIN[] = {
+	0x55,0xAA,0x80,0x00,0x28,0x00,0x00,0x00, 0x01,0x00,0x24,0x00, 0xC0,0x1A,0x16,0x00,
+	0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+	0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,
+	0xCE,0xA8 };
+/* DATA: offset 0, bytes E9 06 02 20. */
+static const uint8_t G_OTA_DATA[] = {
+	0x55,0xAA,0x80,0x00,0x0C,0x00,0x00,0x00, 0x02,0x00,0x08,0x00, 0x00,0x00,0x00,0x00,
+	0xE9,0x06,0x02,0x20, 0x1B,0xC3 };
+static const uint8_t G_OTA_COMMIT[] = { 0x55,0xAA,0x80,0x00,0x04,0x00,0x00,0x00, 0x03,0x00,0x00,0x00, 0x62,0x0D };
+static const uint8_t G_OTA_ABORT[]  = { 0x55,0xAA,0x80,0x00,0x04,0x00,0x00,0x00, 0x04,0x00,0x00,0x00, 0x43,0x5A };
+static const uint8_t G_OTA_STATUS[] = { 0x55,0xAA,0x80,0x00,0x04,0x00,0x00,0x00, 0x05,0x00,0x00,0x00, 0xF8,0x46 };
+
+/* Replies. */
+static const uint8_t G_OTA_BEGIN_OK[] = {
+	0x55,0xAA,0x81,0x00,0x10,0x00,0x00,0x00, 0x01,0x00,0x0C,0x00,
+	0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0xC0,0x1A,0x16,0x00, 0x12,0x9C };
+static const uint8_t G_OTA_DATA_OK[] = {
+	0x55,0xAA,0x81,0x00,0x10,0x00,0x00,0x00, 0x02,0x00,0x0C,0x00,
+	0x00,0x00,0x00,0x00, 0x04,0x00,0x00,0x00, 0xC0,0x1A,0x16,0x00, 0xED,0x10 };
+/* DATA at offset 0x1000 when 4 is expected. */
+static const uint8_t G_OTA_DATA_BAD_OFFSET[] = {
+	0x55,0xAA,0x81,0x00,0x10,0x00,0x00,0x00, 0x02,0x03,0x0C,0x00,
+	0x00,0x10,0x00,0x00, 0x04,0x00,0x00,0x00, 0xC0,0x1A,0x16,0x00, 0xD6,0xB9 };
+/* COMMIT while 4 of 0x161AC0 bytes have arrived. */
+static const uint8_t G_OTA_COMMIT_INCOMPLETE[] = {
+	0x55,0xAA,0x81,0x00,0x10,0x00,0x00,0x00, 0x03,0x09,0x0C,0x00,
+	0x00,0x00,0x00,0x00, 0x04,0x00,0x00,0x00, 0xC0,0x1A,0x16,0x00, 0xA5,0x87 };
+static const uint8_t G_OTA_ABORT_OK[] = {
+	0x55,0xAA,0x81,0x00,0x10,0x00,0x00,0x00, 0x04,0x00,0x0C,0x00,
+	0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x17,0x36 };
+/* COMMIT accepted, for an image of 9000 (0x2328) bytes. */
+static const uint8_t G_OTA_COMMIT_OK[] = {
+	0x55,0xAA,0x81,0x00,0x10,0x00,0x00,0x00, 0x03,0x00,0x0C,0x00,
+	0x00,0x00,0x00,0x00, 0x28,0x23,0x00,0x00, 0x28,0x23,0x00,0x00, 0x21,0x52 };
+/* STATUS: receiving, 4096 of 1,448,640 B, slot 2,031,616 B; running ota_0
+ * VALID, ota_1 UNKNOWN, "1.1.0". */
+static const uint8_t G_OTA_STATUS_RSP[] = {
+	0x55,0xAA,0x81,0x00,0x38,0x00,0x00,0x00, 0x05,0x00,0x34,0x00,
+	0x01,0x01,0x00,0x00,0x00,0xFF,0xF8,0x03, 0x00,0x10,0x00,0x00, 0xC0,0x1A,0x16,0x00,
+	0x00,0x00,0x1F,0x00, '1','.','1','.','0',0,0,0, 0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0x52,0x84 };
+
+/* Decode one golden reply frame through the streaming parser (CRC checked),
+ * then through hpi_hb_ota_parse_reply(), the way hb_uart_on_frame() does. */
+static int ota_decode(const uint8_t *frame, size_t n, struct hpi_hb_ota_reply *r)
+{
+	static struct hpi_hb_parser P;
+
+	hpi_hb_parser_reset(&P); seen_n = 0;
+	hpi_hb_parser_feed(&P, frame, n, on_frame, NULL);
+	if (seen_n != 1 || P.crc_errors != 0 || seen_type != HPI_HB_MSG_TYPE_OTA_RSP) {
+		return -1;
+	}
+	return hpi_hb_ota_parse_reply(seen_pl, seen_len, r);
+}
+
+static void ota_tests(void)
+{
+	static uint8_t B[HPI_HB_MAX_FRAME_SIZE];
+	struct hpi_hb_ota_reply r;
+	int n;
+
+	/* -- sizes the contract fixes (also _Static_assert'ed in the header) -- */
+	expect("ota req/rsp headers are 4 B",
+	       sizeof(struct hpi_hb_ota_req) == 4 && sizeof(struct hpi_hb_ota_rsp) == 4);
+	expect("ota BEGIN params 36 B, ack 12 B, status 52 B",
+	       sizeof(struct hpi_hb_ota_begin) == 36 && sizeof(struct hpi_hb_ota_ack) == 12 &&
+	       sizeof(struct hpi_hb_ota_status) == 52);
+	expect("ota type ids 0x80 / 0x81",
+	       HPI_HB_MSG_TYPE_OTA_REQ == 0x80 && HPI_HB_MSG_TYPE_OTA_RSP == 0x81);
+
+	/* -- requests, built the way the driver builds them -- */
+	struct hpi_hb_ota_begin b = { .image_size = 0x00161AC0 };
+
+	for (int i = 0; i < 32; i++) b.sha256[i] = (uint8_t)i;
+	n = hpi_hb_encode_ota_req(B, sizeof(B), 0, HPI_HB_OTA_OP_BEGIN, &b, sizeof(b), NULL, 0);
+	cmp("OTA BEGIN request", G_OTA_BEGIN, (int)sizeof(G_OTA_BEGIN), B, n);
+
+	const uint8_t off0[4] = { 0, 0, 0, 0 };
+	const uint8_t img[4] = { 0xE9, 0x06, 0x02, 0x20 };
+
+	n = hpi_hb_encode_ota_req(B, sizeof(B), 0, HPI_HB_OTA_OP_DATA, off0, 4, img, 4);
+	cmp("OTA DATA request", G_OTA_DATA, (int)sizeof(G_OTA_DATA), B, n);
+	n = hpi_hb_encode_ota_req(B, sizeof(B), 0, HPI_HB_OTA_OP_COMMIT, NULL, 0, NULL, 0);
+	cmp("OTA COMMIT request", G_OTA_COMMIT, (int)sizeof(G_OTA_COMMIT), B, n);
+	n = hpi_hb_encode_ota_req(B, sizeof(B), 0, HPI_HB_OTA_OP_ABORT, NULL, 0, NULL, 0);
+	cmp("OTA ABORT request", G_OTA_ABORT, (int)sizeof(G_OTA_ABORT), B, n);
+	n = hpi_hb_encode_ota_req(B, sizeof(B), 0, HPI_HB_OTA_OP_STATUS, NULL, 0, NULL, 0);
+	cmp("OTA STATUS request", G_OTA_STATUS, (int)sizeof(G_OTA_STATUS), B, n);
+
+	/* A full chunk fills the C6's 1024-byte payload cap exactly; one byte
+	 * more, or an empty chunk, is refused here rather than by the C6. */
+	static uint8_t big[HPI_HB_OTA_MAX_CHUNK + 1];
+	n = hpi_hb_encode_ota_req(B, sizeof(B), 7, HPI_HB_OTA_OP_DATA, off0, 4,
+				  big, HPI_HB_OTA_MAX_CHUNK);
+	expect("OTA DATA of 1016 B is a 1034 B frame (1024 B payload)",
+	       n == HPI_HB_HEADER_SIZE + 1024 + HPI_HB_CRC_SIZE &&
+	       B[4] == 0x00 && B[5] == 0x04 && B[10] == 0xFC && B[11] == 0x03);
+	expect("OTA DATA of 1017 B refused",
+	       hpi_hb_encode_ota_req(B, sizeof(B), 0, HPI_HB_OTA_OP_DATA, off0, 4,
+				     big, HPI_HB_OTA_MAX_CHUNK + 1) < 0);
+	expect("OTA DATA of 0 B refused",
+	       hpi_hb_encode_ota_req(B, sizeof(B), 0, HPI_HB_OTA_OP_DATA, off0, 4,
+				     big, 0) < 0);
+	expect("OTA DATA without its offset refused",
+	       hpi_hb_encode_ota_req(B, sizeof(B), 0, HPI_HB_OTA_OP_DATA, NULL, 0,
+				     big, 4) < 0);
+
+	/* -- replies -- */
+	expect("BEGIN OK decodes: next 0, size 0x161AC0",
+	       ota_decode(G_OTA_BEGIN_OK, sizeof(G_OTA_BEGIN_OK), &r) == 0 &&
+	       r.op == HPI_HB_OTA_OP_BEGIN && r.status == HPI_HB_OTA_OK &&
+	       r.u.ack.req_offset == 0 && r.u.ack.next_offset == 0 &&
+	       r.u.ack.image_size == 0x161AC0);
+	expect("BEGIN reply answers BEGIN, not DATA",
+	       hpi_hb_ota_reply_matches(&r, HPI_HB_OTA_OP_BEGIN, 0) &&
+	       !hpi_hb_ota_reply_matches(&r, HPI_HB_OTA_OP_DATA, 0));
+
+	expect("DATA OK decodes: req 0, next 4",
+	       ota_decode(G_OTA_DATA_OK, sizeof(G_OTA_DATA_OK), &r) == 0 &&
+	       r.op == HPI_HB_OTA_OP_DATA && r.status == HPI_HB_OTA_OK &&
+	       r.u.ack.req_offset == 0 && r.u.ack.next_offset == 4 &&
+	       r.u.ack.image_size == 0x161AC0);
+	expect("DATA reply matches its own offset only",
+	       hpi_hb_ota_reply_matches(&r, HPI_HB_OTA_OP_DATA, 0) &&
+	       !hpi_hb_ota_reply_matches(&r, HPI_HB_OTA_OP_DATA, 4));
+
+	expect("DATA BAD_OFFSET decodes: req 0x1000, next 4, status 3",
+	       ota_decode(G_OTA_DATA_BAD_OFFSET, sizeof(G_OTA_DATA_BAD_OFFSET), &r) == 0 &&
+	       r.status == HPI_HB_OTA_ERR_BAD_OFFSET && r.u.ack.req_offset == 0x1000 &&
+	       r.u.ack.next_offset == 4);
+	expect("a stale reply (offset 0x1000) does not answer DATA@4",
+	       !hpi_hb_ota_reply_matches(&r, HPI_HB_OTA_OP_DATA, 4));
+
+	expect("COMMIT INCOMPLETE decodes: status 9, next 4",
+	       ota_decode(G_OTA_COMMIT_INCOMPLETE, sizeof(G_OTA_COMMIT_INCOMPLETE), &r) == 0 &&
+	       r.op == HPI_HB_OTA_OP_COMMIT && r.status == HPI_HB_OTA_ERR_INCOMPLETE &&
+	       r.u.ack.next_offset == 4 && r.u.ack.image_size == 0x161AC0);
+	expect("COMMIT OK decodes: next = size = 9000",
+	       ota_decode(G_OTA_COMMIT_OK, sizeof(G_OTA_COMMIT_OK), &r) == 0 &&
+	       r.op == HPI_HB_OTA_OP_COMMIT && r.status == HPI_HB_OTA_OK &&
+	       r.u.ack.next_offset == 9000 && r.u.ack.image_size == 9000);
+	expect("ABORT OK decodes: no active transfer",
+	       ota_decode(G_OTA_ABORT_OK, sizeof(G_OTA_ABORT_OK), &r) == 0 &&
+	       r.op == HPI_HB_OTA_OP_ABORT && r.status == HPI_HB_OTA_OK &&
+	       r.u.ack.next_offset == 0 && r.u.ack.image_size == 0);
+
+	expect("STATUS reply decodes: receiving, ota_0 VALID, ota_1 UNKNOWN, 1.1.0",
+	       ota_decode(G_OTA_STATUS_RSP, sizeof(G_OTA_STATUS_RSP), &r) == 0 &&
+	       r.op == HPI_HB_OTA_OP_STATUS && r.status == HPI_HB_OTA_OK &&
+	       r.u.st.proto_version == HPI_HB_OTA_PROTO_VERSION &&
+	       r.u.st.state == HPI_HB_OTA_STATE_RECEIVING && r.u.st.last_error == 0 &&
+	       r.u.st.running_slot == 0 && r.u.st.running_img_state == HPI_HB_OTA_IMG_VALID &&
+	       r.u.st.other_img_state == HPI_HB_OTA_IMG_UNKNOWN &&
+	       r.u.st.max_chunk == HPI_HB_OTA_MAX_CHUNK &&
+	       r.u.st.bytes_received == 4096 && r.u.st.image_size == 0x161AC0 &&
+	       r.u.st.slot_size == 0x1F0000 && strcmp(r.u.st.version, "1.1.0") == 0);
+
+	/* -- malformed replies are rejected, never half-trusted -- */
+	uint8_t bad[64];
+
+	memcpy(bad, G_OTA_DATA_OK + HPI_HB_HEADER_SIZE, 16);
+	bad[2] = 11;   /* data_len 11 instead of 12 */
+	expect("ack with data_len 11 rejected", hpi_hb_ota_parse_reply(bad, 16, &r) != 0);
+	memcpy(bad, G_OTA_DATA_OK + HPI_HB_HEADER_SIZE, 16);
+	expect("ack truncated to 15 B rejected", hpi_hb_ota_parse_reply(bad, 15, &r) != 0);
+	memcpy(bad, G_OTA_STATUS_RSP + HPI_HB_HEADER_SIZE, 56);
+	expect("status truncated to 55 B rejected", hpi_hb_ota_parse_reply(bad, 55, &r) != 0);
+	bad[0] = HPI_HB_OTA_OP_DATA;   /* a 52-byte body under a non-STATUS op */
+	expect("52-byte body under DATA rejected", hpi_hb_ota_parse_reply(bad, 56, &r) != 0);
+	expect("3-byte reply rejected", hpi_hb_ota_parse_reply(bad, 3, &r) != 0);
+
+	/* A version string with no NUL is cut at 31 characters. */
+	memcpy(bad, G_OTA_STATUS_RSP + HPI_HB_HEADER_SIZE, 56);
+	memset(bad + 4 + 20, 'x', 32);
+	expect("unterminated version is forced NUL-terminated",
+	       hpi_hb_ota_parse_reply(bad, 56, &r) == 0 && strlen(r.u.st.version) == 31);
+}
+
 int main(void)
 {
 	static uint8_t B[4096];
@@ -267,6 +455,7 @@ int main(void)
 
 	decoder_tests();
 	get_version_tests();
+	ota_tests();
 
 	printf(fails ? "\n%d FAILURE(S)\n" : "\nall passed\n", fails);
 	return fails ? 1 : 0;

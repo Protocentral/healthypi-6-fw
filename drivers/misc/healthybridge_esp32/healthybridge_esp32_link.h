@@ -113,6 +113,36 @@ struct healthybridge_link_api {
 	 *  no receive path worth reporting. */
 	int (*get_rx_stats)(const struct device *dev, struct healthybridge_rx_stats *out);
 
+	/**
+	 * Send one firmware-update request (HealthyBridge 0x80) and wait for the
+	 * reply that answers it: a 0x81 with the same op and, for DATA, the same
+	 * req_offset. Stale and duplicate replies -- answers to an earlier
+	 * request that arrive late -- are discarded, never handed back.
+	 *
+	 * @p begin is the BEGIN params (NULL for every other op); @p offset and
+	 * @p data / @p len are the DATA params (ignored for every other op).
+	 * @p timeout_ms runs from the moment the frame has left the UART.
+	 *
+	 * The frame is transmitted with a deadline of at least
+	 * HB_UART_OTA_TX_DEADLINE_US: the C6 de-asserts RTS while it erases a
+	 * flash sector (~0.4 s), and the ordinary short deadline would cut the
+	 * frame mid-way.
+	 *
+	 * Returns 0 when a matching reply arrived -- whatever its status, which
+	 * the caller interprets -- with @p out filled; -ETIMEDOUT with none;
+	 * -EHOSTDOWN when the co-processor is held in reset; -EINVAL for a
+	 * request the contract does not allow (e.g. a DATA chunk over
+	 * HPI_HB_OTA_MAX_CHUNK); or a transmit error. One request at a time per
+	 * link: a second caller blocks until the first has its answer.
+	 *
+	 * Blocking: never call it from the system workqueue (the receive path
+	 * runs there, so the reply could never be delivered) or the LVGL thread.
+	 */
+	int (*ota_request)(const struct device *dev, uint8_t op,
+			   const struct hpi_hb_ota_begin *begin, uint32_t offset,
+			   const uint8_t *data, uint16_t len, uint32_t timeout_ms,
+			   struct hpi_hb_ota_reply *out);
+
 	/** Human-readable transport name for logs ("spi" / "uart"). */
 	const char *name;
 };
@@ -211,6 +241,16 @@ static inline int healthybridge_get_rx_stats(const struct device *dev,
 					     struct healthybridge_rx_stats *out)
 {
 	return HB_LINK_CALL(dev, get_rx_stats, out);
+}
+
+static inline int healthybridge_ota_request(const struct device *dev, uint8_t op,
+					    const struct hpi_hb_ota_begin *begin,
+					    uint32_t offset, const uint8_t *data,
+					    uint16_t len, uint32_t timeout_ms,
+					    struct hpi_hb_ota_reply *out)
+{
+	return HB_LINK_CALL(dev, ota_request, op, begin, offset, data, len,
+			    timeout_ms, out);
 }
 
 static inline const char *healthybridge_link_name(const struct device *dev)

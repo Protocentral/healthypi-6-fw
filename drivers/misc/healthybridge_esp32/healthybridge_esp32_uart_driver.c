@@ -78,6 +78,16 @@ struct hb_uart_pending {
 	uint8_t data[64];
 };
 
+/* Pending firmware-update request (0x80). Matched on op and, for DATA, the
+ * request's offset -- see hpi_hb_ota_reply_matches(). */
+struct hb_uart_ota_pending {
+	struct k_sem done;
+	bool armed;           /* a requester is waiting */
+	uint8_t op;
+	uint32_t req_offset;
+	struct hpi_hb_ota_reply reply;
+};
+
 struct healthybridge_uart_config {
 	const struct device *uart_dev;
 	struct gpio_dt_spec reset_gpio;
@@ -110,6 +120,12 @@ struct healthybridge_uart_data {
 	struct k_mutex cmd_lock;         /* one outstanding command at a time */
 	struct hb_uart_pending pending;
 
+	/* firmware-update request/response (stop-and-wait, own lock so a slow
+	 * flash erase on the C6 never holds up a control command) */
+	struct k_mutex ota_lock;
+	struct hb_uart_ota_pending ota;
+	uint32_t ota_stale;              /* replies that matched no request */
+
 	/* last unsolicited status frame from the co-processor, with the uptime
 	 * it arrived at -- a cache with no age is indistinguishable from a lie */
 	struct hpi_hb_wifi_status_resp wifi;
@@ -128,7 +144,25 @@ struct healthybridge_uart_data {
 /* ---- transmit ---------------------------------------------------------- */
 
 static int hb_uart_transmit(const struct healthybridge_uart_config *cfg,
-			    struct healthybridge_uart_data *data, size_t len);
+			    struct healthybridge_uart_data *data, size_t len,
+			    uint32_t floor_us);
+
+/*
+ * Transmit-deadline floors. The deadline for a frame is its own wire time x4,
+ * floored here.
+ *
+ * 20 ms for streaming and control frames: short, so a stalled link drops a
+ * frame early instead of blocking the connectivity thread.
+ *
+ * 600 ms for firmware-update frames: the C6 de-asserts RTS while it erases a
+ * 4 KB flash sector (up to ~0.4 s, docs/PROTOCOL.md "Timing"), and the
+ * transmitter halts at a byte boundary for exactly that long. A 20 ms deadline
+ * would abort the frame part-way; the C6 resyncs and the request gets no reply.
+ * The timeout-and-resend rule recovers that, but at a cost of a whole reply
+ * timeout per erase. Scoped to OTA frames only, so nothing else waits longer.
+ */
+#define HB_UART_TX_DEADLINE_FLOOR_US 20000U
+#define HB_UART_OTA_TX_DEADLINE_US   600000U
 
 static void hb_uart_cb(const struct device *uart, struct uart_event *evt, void *user)
 {
@@ -247,6 +281,28 @@ static void hb_uart_on_frame(uint8_t type, uint8_t flags, uint16_t seq,
 		k_sem_give(&data->pending.done);
 		break;
 	}
+	case HPI_HB_MSG_TYPE_OTA_RSP: {
+		struct hpi_hb_ota_reply r;
+
+		if (hpi_hb_ota_parse_reply(payload, len, &r) != 0) {
+			data->ota_stale++;
+			return;
+		}
+		/* Same rule as control replies, tighter: only the request that is
+		 * waiting, and for DATA only the chunk it sent. A late reply to a
+		 * request that already timed out is exactly what a resend
+		 * produces, and handing it to the next request would ack the
+		 * wrong chunk. */
+		if (!data->ota.armed ||
+		    !hpi_hb_ota_reply_matches(&r, data->ota.op, data->ota.req_offset)) {
+			data->ota_stale++;
+			return;
+		}
+		data->ota.reply = r;
+		data->ota.armed = false;
+		k_sem_give(&data->ota.done);
+		break;
+	}
 	case HPI_HB_MSG_TYPE_STATUS_RESP:
 		/* Unsolicited status; cached here and served from cache by
 		 * wifi_status(). */
@@ -311,7 +367,7 @@ static int hb_uart_send_frame(const struct device *dev, uint8_t type,
 	}
 	data->seq++;
 
-	ret = hb_uart_transmit(cfg, data, (size_t)len);
+	ret = hb_uart_transmit(cfg, data, (size_t)len, HB_UART_TX_DEADLINE_FLOOR_US);
 
 	k_mutex_unlock(&data->tx_lock);
 	return ret;
@@ -320,18 +376,20 @@ static int hb_uart_send_frame(const struct device *dev, uint8_t type,
 /* Common tail: hand tx_buf[0..len) to the UART and wait for completion.
  * Caller holds tx_lock. */
 static int hb_uart_transmit(const struct healthybridge_uart_config *cfg,
-			    struct healthybridge_uart_data *data, size_t len)
+			    struct healthybridge_uart_data *data, size_t len,
+			    uint32_t floor_us)
 {
 	/*
-	 * Deadline for THIS transfer: its own wire time x4, floored at 20 ms.
+	 * Deadline for THIS transfer: its own wire time x4, floored at
+	 * floor_us (see HB_UART_TX_DEADLINE_FLOOR_US / HB_UART_OTA_TX_DEADLINE_US).
 	 * Per-transfer, not max-frame, so a stalled link drops early instead of
 	 * blocking the connectivity thread. x4 tolerates a co-processor stall of
-	 * a few frame periods; the 20 ms floor keeps short control frames from
-	 * timing out on scheduling jitter alone.
+	 * a few frame periods; the floor keeps short control frames from timing
+	 * out on scheduling jitter alone.
 	 */
 	int32_t deadline = (int32_t)MAX((uint32_t)((len * 10U * 4U * 1000000ULL) /
 						   (cfg->baud ? cfg->baud : 921600U)),
-					20000U);
+					floor_us);
 
 	k_sem_reset(&data->tx_done);
 	data->tx_result = -EIO;
@@ -393,7 +451,7 @@ static int hb_uart_send_batch(const struct device *dev, uint8_t type,
 	}
 	data->seq++;
 
-	ret = hb_uart_transmit(cfg, data, (size_t)len);
+	ret = hb_uart_transmit(cfg, data, (size_t)len, HB_UART_TX_DEADLINE_FLOOR_US);
 
 	k_mutex_unlock(&data->tx_lock);
 	return ret;
@@ -700,6 +758,92 @@ static int hb_uart_api_rx_stats(const struct device *dev,
 	return 0;
 }
 
+/* ---- firmware update (0x80 / 0x81) ------------------------------------- */
+
+static int hb_uart_api_ota_request(const struct device *dev, uint8_t op,
+				   const struct hpi_hb_ota_begin *begin, uint32_t offset,
+				   const uint8_t *chunk, uint16_t chunk_len,
+				   uint32_t timeout_ms, struct hpi_hb_ota_reply *out)
+{
+	const struct healthybridge_uart_config *cfg = dev->config;
+	struct healthybridge_uart_data *data = dev->data;
+	uint8_t off_le[4];
+	const void *params = NULL;
+	uint16_t params_len = 0;
+	int len;
+	int ret;
+
+	if (!data->initialized) {
+		return -ENODEV;
+	}
+	if (!data->powered) {
+		return -EHOSTDOWN;
+	}
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	switch (op) {
+	case HPI_HB_OTA_OP_BEGIN:
+		if (begin == NULL) {
+			return -EINVAL;
+		}
+		params = begin;
+		params_len = sizeof(*begin);
+		chunk = NULL;
+		chunk_len = 0;
+		break;
+	case HPI_HB_OTA_OP_DATA:
+		off_le[0] = (uint8_t)offset;
+		off_le[1] = (uint8_t)(offset >> 8);
+		off_le[2] = (uint8_t)(offset >> 16);
+		off_le[3] = (uint8_t)(offset >> 24);
+		params = off_le;
+		params_len = sizeof(off_le);
+		break;
+	case HPI_HB_OTA_OP_COMMIT:
+	case HPI_HB_OTA_OP_ABORT:
+	case HPI_HB_OTA_OP_STATUS:
+		chunk = NULL;
+		chunk_len = 0;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&data->ota_lock, K_FOREVER);
+
+	/* Arm before sending, not after: a fast reply must find it armed. */
+	k_sem_reset(&data->ota.done);
+	data->ota.op = op;
+	data->ota.req_offset = (op == HPI_HB_OTA_OP_DATA) ? offset : 0U;
+	data->ota.armed = true;
+
+	k_mutex_lock(&data->tx_lock, K_FOREVER);
+	len = hpi_hb_encode_ota_req(data->tx_buf, HB_UART_FRAME_MAX, data->seq, op,
+				    params, params_len, chunk, chunk_len);
+	if (len < 0) {
+		data->stats.tx_error++;
+		ret = len;
+	} else {
+		data->seq++;
+		ret = hb_uart_transmit(cfg, data, (size_t)len, HB_UART_OTA_TX_DEADLINE_US);
+	}
+	k_mutex_unlock(&data->tx_lock);
+
+	if (ret == 0) {
+		if (k_sem_take(&data->ota.done, K_MSEC(timeout_ms)) != 0) {
+			ret = -ETIMEDOUT;
+		} else {
+			*out = data->ota.reply;
+		}
+	}
+
+	data->ota.armed = false;
+	k_mutex_unlock(&data->ota_lock);
+	return ret;
+}
+
 static const struct healthybridge_link_api hb_uart_api = {
 	.send_ecg_multi = hb_uart_api_send_ecg_multi,
 	.send_ppg = hb_uart_api_send_ppg,
@@ -715,6 +859,7 @@ static const struct healthybridge_link_api hb_uart_api = {
 	.wifi_disconnect = hb_uart_api_wifi_disconnect,
 	.wifi_softap = hb_uart_api_wifi_softap,
 	.get_rx_stats = hb_uart_api_rx_stats,
+	.ota_request = hb_uart_api_ota_request,
 	.name = "uart",
 };
 
@@ -751,6 +896,8 @@ static int hb_uart_init(const struct device *dev)
 	data->dev = dev;
 	k_mutex_init(&data->tx_lock);
 	k_mutex_init(&data->cmd_lock);
+	k_mutex_init(&data->ota_lock);
+	k_sem_init(&data->ota.done, 0, 1);
 	k_sem_init(&data->tx_done, 0, 1);
 	k_sem_init(&data->pending.done, 0, 1);
 	k_work_init(&data->rx_work, hb_uart_rx_work);
