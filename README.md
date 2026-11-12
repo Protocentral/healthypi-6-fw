@@ -137,12 +137,15 @@ scripts/build.sh all                # m7 + m4
 ### What ships
 
 ```bash
-scripts/release.sh        # -> build/release/hpi6-firmware-<version>.zip
+scripts/release.sh --port <CDC1>   # -> build/release/hpi6-firmware-<version>.zip
 ```
 
-`release.sh` is the only supported production path. It builds the signed prod
-image, packages it with the M4 image into a firmware bundle (zip), and refuses to emit
-one that fails the shippability check. A plain `scripts/build.sh m7` image has no
+`release.sh` is the only supported production path. It first runs the group-64
+acceptance suite on the attached unit and refuses to continue on any failure
+(`--no-hw-gate` skips this, with a warning that the bundle was not
+hardware-gated). It then builds the signed prod image, packages it with the M4
+image into a firmware bundle (zip), and refuses to emit one that fails the
+shippability check. A plain `scripts/build.sh m7` image has no
 bootloader, no update path and no recovery entry — a unit flashed with it can
 only ever be updated over SWD, with the case open.
 

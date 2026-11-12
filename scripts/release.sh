@@ -3,13 +3,24 @@
 # SPDX-License-Identifier: MIT
 # HealthyPi 6 — build a shippable release: production images + a firmware bundle (zip).
 #
-#   scripts/release.sh                        dev key, for rehearsing the flow
-#   HP6_SIGNING_KEY=/abs/release.pem scripts/release.sh
-#   HP6_SIGNING_KEY=/abs/my_key.pem scripts/release.sh --own-key   (a re-keyed unit)
+#   scripts/release.sh --port <CDC1>          dev key, for rehearsing the flow
+#   HP6_SIGNING_KEY=/abs/release.pem scripts/release.sh --port <CDC1>
+#   HP6_SIGNING_KEY=/abs/my_key.pem scripts/release.sh --port <CDC1> --own-key
+#                                             (a re-keyed unit)
+#   scripts/release.sh --no-hw-gate           no unit attached: NOT hardware-gated
+#
+# Hardware gate: --port <CDC1> (or HP6_RELEASE_PORT=<CDC1>) runs the group-64
+# acceptance suite (`healthypi test run`, read-only cases) against the attached
+# unit before anything is built, and refuses to emit a bundle on any FAIL, or if
+# the suite cannot run. SKIPs are listed and do not fail the gate. Without a
+# port the script refuses unless --no-hw-gate is passed, and then says loudly
+# that the bundle was not hardware-gated. The gate checks the unit as it is; it
+# does not flash it, so put the candidate build on it first.
 #
 # Output: build/release/
 #   m7s/                       the sysbuild tree (MCUboot + signed app)
 #   hpi6-firmware-<version>.zip  the bundle a customer or Studio applies
+#   hw-gate.json               the suite report the bundle was gated on
 #
 # This is the ONLY supported way to produce firmware for a unit that leaves the
 # building. It exists because "which build ships" was previously undefined: the
@@ -28,14 +39,34 @@ cd "$HPI_ROOT"
 
 SKIP_ESP32=0
 OWN_KEY=0
-for arg in "$@"; do
-    case "$arg" in
+NO_HW_GATE=0
+HW_PORT="${HP6_RELEASE_PORT:-}"
+while [ $# -gt 0 ]; do
+    case "$1" in
         --no-esp32)       SKIP_ESP32=1 ;;
         --own-key)        OWN_KEY=1 ;;
-        -h|--help)        sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown option $arg" >&2; exit 1 ;;
+        --no-hw-gate)     NO_HW_GATE=1 ;;
+        --port)           [ $# -ge 2 ] || { echo "--port needs a CDC1 device" >&2; exit 1; }
+                          HW_PORT="$2"; shift ;;
+        --port=*)         HW_PORT="${1#--port=}" ;;
+        -h|--help)        sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown option $1" >&2; exit 1 ;;
     esac
+    shift
 done
+
+# Decide about the hardware gate before spending minutes on a build.
+if [ -n "$HW_PORT" ] && [ "$NO_HW_GATE" = 1 ]; then
+    echo "--port and --no-hw-gate contradict each other; pick one." >&2
+    exit 1
+fi
+if [ -z "$HW_PORT" ] && [ "$NO_HW_GATE" = 0 ]; then
+    echo "❌ no unit to gate on. A release bundle must pass the group-64 acceptance" >&2
+    echo "   suite on hardware: pass --port <CDC1> (or HP6_RELEASE_PORT=<CDC1>)." >&2
+    echo "   To build without a unit, pass --no-hw-gate; the bundle is then NOT" >&2
+    echo "   hardware-gated." >&2
+    exit 1
+fi
 
 OUT="build/release"
 M7S="$OUT/m7s"
@@ -62,6 +93,69 @@ if [ "$HP6_SIGNING_KEY" = "$HPI_ROOT/keys/hp6_dev_ec256.pem" ]; then
     echo "     same key. A real release passes HP6_SIGNING_KEY=/abs/path."
 fi
 echo ""
+
+# --- 0. hardware gate --------------------------------------------------------
+# The group-64 acceptance suite against the attached unit, read-only cases only.
+# The verdict is the CLI's exit code (0 = no FAIL, 1 = at least one FAIL, other
+# = the suite could not run); its --json report is kept next to the bundle and
+# rendered here so every SKIP is visible. A report with no PASS at all is not a
+# pass: it would mean nothing was checked.
+hw_gate_report() {   # <report.json> <expected M7 version> -> prints; rc 1 = refuse
+    python3 - "$1" "$2" <<'PY'
+import json, pathlib, sys
+try:
+    r = json.loads(pathlib.Path(sys.argv[1]).read_text())
+    res = r["results"]
+except Exception as exc:  # noqa: BLE001
+    sys.exit(f"  unreadable suite report: {exc}")
+by = {o: [x for x in res if x["outcome"] == o] for o in ("PASS", "FAIL", "SKIP")}
+print(f"  {len(by['PASS'])}/{len(by['FAIL'])}/{len(by['SKIP'])} (pass/fail/skip)")
+for x in by["FAIL"]:
+    print(f"  FAIL  {x['name']}: {x['detail']}")
+for x in by["SKIP"]:
+    print(f"  skip  {x['name']}: {x['detail']}")
+for x in res:
+    if x["name"] == "fw_versions" and x["outcome"] == "PASS":
+        print(f"  unit reports {x['detail']}")
+        if f"m7={sys.argv[2]} " not in x["detail"] + " ":
+            print(f"  ⚠️  the unit is not running M7 {sys.argv[2]}: the gate tested "
+                  "different firmware from the one being released.")
+if by["FAIL"] or not by["PASS"] or r.get("failed", 0):
+    sys.exit(1)
+PY
+}
+
+HW_REPORT="$OUT/hw-gate.json"
+if [ "$NO_HW_GATE" = 1 ]; then
+    echo "################################################################"
+    echo "##  ⚠️  --no-hw-gate: THIS BUNDLE WILL NOT BE HARDWARE-GATED.    ##"
+    echo "##  The group-64 acceptance suite was not run on a unit. Do not ##"
+    echo "##  publish it without a gated re-run (--port <CDC1>).          ##"
+    echo "################################################################"
+    echo ""
+else
+    echo "--- hardware gate: healthypi test run on $HW_PORT ---"
+    HW_RC=0
+    healthypi test run --port "$HW_PORT" --json > "$HW_REPORT" || HW_RC=$?
+    case "$HW_RC" in
+        0|1)
+            if ! hw_gate_report "$HW_REPORT" "$M7_VER" || [ "$HW_RC" != 0 ]; then
+                echo ""
+                echo "❌ refusing to build a release bundle: the acceptance suite failed"
+                echo "   on $HW_PORT (report: $HW_REPORT)."
+                exit 1
+            fi
+            ;;
+        *)
+            echo ""
+            echo "❌ refusing to build a release bundle: the acceptance suite could not"
+            echo "   run on $HW_PORT (healthypi test run exited $HW_RC; message above)."
+            exit 1
+            ;;
+    esac
+    echo "  ✅ hardware gate passed"
+    echo ""
+fi
 
 # --- 1. build ---------------------------------------------------------------
 FLAVOR=prod HPI_SIGNED_OUT="$M7S" "$HPI_ROOT/scripts/build.sh" signed prod
@@ -164,6 +258,12 @@ elif [ "$HP6_SIGNING_KEY" != "$HPI_ROOT/keys/hp6_dev_ec256.pem" ]; then
 fi
 
 echo ""
-echo "✅ release ready: $BUNDLE"
+if [ "$NO_HW_GATE" = 1 ]; then
+    echo "⚠️  NOT HARDWARE-GATED (--no-hw-gate): the acceptance suite was not run."
+    echo "✅ release built (ungated): $BUNDLE"
+else
+    echo "  hardware gate: $HW_REPORT ($HW_PORT)"
+    echo "✅ release ready: $BUNDLE"
+fi
 echo "   apply : healthypi fw update --port <CDC1> --bundle $BUNDLE"
 echo "   factory programming: scripts/flash.sh factory"
