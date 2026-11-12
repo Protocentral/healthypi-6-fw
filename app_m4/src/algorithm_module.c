@@ -191,6 +191,7 @@ static int calculate_derivative(const int32_t *input, int32_t *output, size_t co
 static int square_signal(const int32_t *input, int32_t *output, size_t count);
 static int moving_window_integration(const int32_t *input, int32_t *output, size_t count);
 static uint8_t assess_signal_quality(const int32_t *samples, size_t count);
+static uint16_t rr_ms_from_sample_delta(uint64_t d);
 static void update_rr_interval(uint16_t interval_ms);
 static void calculate_hrv_time_domain(struct hrv_time_domain *hrv);
 static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq);
@@ -513,12 +514,9 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
         uint16_t rr_ms = 0;
 
         if (ecg_state.last_qrs_sample > 0) {
-            uint64_t d = qrs_sample - ecg_state.last_qrs_sample;
-            uint32_t ms = (uint32_t)((d * 1000U) / HPI_ECG_M4_RATE_HZ);
+            rr_ms = rr_ms_from_sample_delta(qrs_sample - ecg_state.last_qrs_sample);
 
-            /* Validate physiological range for HR calculation (300-2000ms = 30-200 BPM) */
-            if (ms >= 300U && ms <= 2000U) {
-                rr_ms = (uint16_t)ms;
+            if (rr_ms != 0) {
                 update_rr_interval(rr_ms);
                 results->rr_interval_ms = rr_ms;
                 ecg_state.current_rr_ms = rr_ms;
@@ -795,6 +793,20 @@ static uint8_t assess_signal_quality(const int32_t *samples, size_t count)
 /*----------------------------------------------------------------------------*/
 /* Heart Rate Calculation                                                     */
 /*----------------------------------------------------------------------------*/
+
+/* RR interval in ms from the distance, in samples, between two QRS detections.
+ * Returns 0 when it falls outside the physiological range accepted for HR and
+ * HRV (300-2000 ms = 30-200 BPM). Pulled out of ecg_process_batch() unchanged
+ * so the host test (app_m4/tests/hrv) can exercise the gate directly. */
+static uint16_t rr_ms_from_sample_delta(uint64_t d)
+{
+    uint32_t ms = (uint32_t)((d * 1000U) / HPI_ECG_M4_RATE_HZ);
+
+    if (ms >= 300U && ms <= 2000U) {
+        return (uint16_t)ms;
+    }
+    return 0;
+}
 
 static void update_rr_interval(uint16_t interval_ms)
 {
