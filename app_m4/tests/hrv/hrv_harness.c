@@ -26,6 +26,16 @@
  *                print the BPM it reports, its confidence and current_hr
  *   interp       print how many 4 Hz samples interpolate_rr_intervals() makes
  *   vitals       send_ecg_vitals() and print the HRV fields of the IPC payload
+ *   hrv <0|1>    algorithm_set_hrv_enabled()
+ *   batch [i]    one 16-sample ECG batch through the path that follows the QRS
+ *                detector, as the algorithm thread runs it: advance the sample
+ *                count by 16, set the uptime to sample time, track_rhythm()
+ *                (RR, rate expiry, heart rate) with a QRS at index i of the
+ *                batch if i is given, then ecg_report() (HRV passes + the
+ *                decision to send ECG_VITALS). Prints the rate and, when an
+ *                ECG_VITALS went out, the fields the M7 reads from it. The
+ *                QRS detector itself is not run: beats are placed at exact
+ *                sample indices.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -132,6 +142,39 @@ int main(void)
 			       captured_vitals.hrv_lf_nu, captured_vitals.hrv_hf_nu,
 			       captured_vitals.hrv_freq_valid,
 			       captured_vitals.algorithm_state);
+		} else if (strcmp(cmd, "hrv") == 0 && n == 2) {
+			algorithm_set_hrv_enabled(arg != 0);
+		} else if (strcmp(cmd, "batch") == 0) {
+			struct ecg_algorithm_results r;
+			uint32_t now;
+
+			ecg_state.sample_count += ECG_BATCH_SIZE;
+			now = (uint32_t)(((uint64_t)ecg_state.sample_count * 1000U) /
+					 HPI_ECG_M4_RATE_HZ);
+			hpi_host_uptime_ms = now;
+			memset(&r, 0, sizeof(r));
+			r.timestamp = now;
+			captured_vitals_count = 0;
+			track_rhythm(n == 2,
+				     (uint64_t)ecg_state.sample_count - ECG_BATCH_SIZE + arg,
+				     &r);
+			ecg_state.batches_processed++;
+			ecg_report(&r, now);
+			printf("B t=%u hr=%u conf=%u rr=%u q=%u hrvpass=%d tx=%d",
+			       now, r.heart_rate, r.confidence, r.rr_interval_ms,
+			       r.qrs_detected,
+			       now != 0 && (ecg_state.last_hrv_update_ms == now ||
+					    ecg_state.last_hrv_freq_update_ms == now),
+			       captured_vitals_count);
+			if (captured_vitals_count) {
+				printf(" vhr=%u vconf=%u vstate=%u varr=%u vrr=%u",
+				       captured_vitals.heart_rate,
+				       captured_vitals.qrs_confidence,
+				       captured_vitals.algorithm_state,
+				       captured_vitals.arrhythmia_flags,
+				       captured_vitals.rr_interval_ms);
+			}
+			printf("\n");
 		} else {
 			printf("ERR unknown command: %s", line);
 			return 2;

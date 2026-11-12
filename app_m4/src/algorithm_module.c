@@ -135,6 +135,8 @@ struct ecg_algorithm_state {
     size_t rr_index;                      /* Circular buffer index */
     size_t rr_total_count;                /* Total RR intervals ever recorded */
 
+    uint16_t last_sent_hr;                /* heart_rate of the last ECG_VITALS sent */
+
     /* HRV state */
     struct hrv_time_domain hrv;           /* Latest time domain HRV metrics */
     struct hrv_freq_domain hrv_freq;      /* Latest frequency domain HRV metrics */
@@ -205,6 +207,10 @@ static uint8_t assess_signal_quality(const int32_t *samples, size_t count);
 static uint16_t rr_ms_from_sample_delta(uint64_t d);
 static void update_rr_interval(uint16_t interval_ms);
 static void update_heart_rate(struct ecg_algorithm_results *results);
+static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
+                         struct ecg_algorithm_results *results);
+static void ecg_report(const struct ecg_algorithm_results *results,
+                       uint32_t now_ms);
 static void calculate_hrv_time_domain(struct hrv_time_domain *hrv);
 static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq);
 static void send_ecg_vitals(void);
@@ -376,57 +382,66 @@ static void ecg_algorithm_thread_func(void *p1, void *p2, void *p3)
             algo_stats.queue_max_usage = queue_usage;
         }
         
-        /* Calculate HRV periodically when enabled and we have enough data */
-        uint32_t current_time = k_uptime_get_32();
-        bool hrv_just_calculated = false;
-
-        if (hrv_enabled) {
-            /* Time domain HRV: every 5 seconds with minimum 8 RR intervals */
-            if (ecg_state.rr_count >= HRV_MIN_RR_COUNT &&
-                (current_time - ecg_state.last_hrv_update_ms) >= HRV_UPDATE_INTERVAL_MS) {
-                LOG_INF("HRV time domain trigger: rr_count=%u, time_since_last=%u ms",
-                        ecg_state.rr_count,
-                        current_time - ecg_state.last_hrv_update_ms);
-                calculate_hrv_time_domain(&ecg_state.hrv);
-                ecg_state.last_hrv_update_ms = current_time;
-                hrv_just_calculated = true;
-            }
-
-            /* Frequency domain HRV: every 60 seconds with minimum 32 RR intervals */
-            if (ecg_state.rr_count >= HRV_FREQ_MIN_RR_COUNT &&
-                (current_time - ecg_state.last_hrv_freq_update_ms) >= HRV_FREQ_UPDATE_INTERVAL_MS) {
-                LOG_INF("HRV freq domain trigger: rr_count=%u, time_since_last=%u ms",
-                        ecg_state.rr_count,
-                        current_time - ecg_state.last_hrv_freq_update_ms);
-                calculate_hrv_freq_domain(&ecg_state.hrv_freq);
-                ecg_state.last_hrv_freq_update_ms = current_time;
-                hrv_just_calculated = true;
-            }
-        }
-
-        /* Send ECG vitals to M7:
-         * - On every QRS detection (for real-time RR interval)
-         * - When HR changes significantly
-         * - Immediately after HRV calculation (to send VALID state) */
-        static uint16_t last_sent_hr = 0;
-        bool hr_changed = (results.heart_rate != last_sent_hr) && (results.heart_rate > 0);
-
-        if (results.qrs_detected) {
-            send_beat_notify(&results);
-        }
-        if (results.qrs_detected || hr_changed || hrv_just_calculated) {
-            send_ecg_vitals();
-            if (hr_changed) {
-                algo_stats.hr_updates_sent++;
-                last_sent_hr = results.heart_rate;
-            }
-        }
+        ecg_report(&results, k_uptime_get_32());
 
         /* Periodic status logging - simplified QRS counter only (every 500 batches = ~16 seconds) */
         if (algo_stats.ecg_batches_processed % 500 == 0) {
             LOG_INF("QRS: %u detected, HR=%u bpm",
                     algo_stats.qrs_detections_total,
                     ecg_state.current_hr);
+        }
+    }
+}
+
+/* After each batch: run the HRV passes when due and decide whether the M7 gets
+ * an ECG_VITALS (and a BEAT_NOTIFY). Pulled out of the thread loop unchanged
+ * so the host test can drive it. */
+static void ecg_report(const struct ecg_algorithm_results *results,
+                       uint32_t now_ms)
+{
+    /* Calculate HRV periodically when enabled and we have enough data */
+    uint32_t current_time = now_ms;
+    bool hrv_just_calculated = false;
+
+    if (hrv_enabled) {
+        /* Time domain HRV: every 5 seconds with minimum 8 RR intervals */
+        if (ecg_state.rr_count >= HRV_MIN_RR_COUNT &&
+            (current_time - ecg_state.last_hrv_update_ms) >= HRV_UPDATE_INTERVAL_MS) {
+            LOG_INF("HRV time domain trigger: rr_count=%u, time_since_last=%u ms",
+                    ecg_state.rr_count,
+                    current_time - ecg_state.last_hrv_update_ms);
+            calculate_hrv_time_domain(&ecg_state.hrv);
+            ecg_state.last_hrv_update_ms = current_time;
+            hrv_just_calculated = true;
+        }
+
+        /* Frequency domain HRV: every 60 seconds with minimum 32 RR intervals */
+        if (ecg_state.rr_count >= HRV_FREQ_MIN_RR_COUNT &&
+            (current_time - ecg_state.last_hrv_freq_update_ms) >= HRV_FREQ_UPDATE_INTERVAL_MS) {
+            LOG_INF("HRV freq domain trigger: rr_count=%u, time_since_last=%u ms",
+                    ecg_state.rr_count,
+                    current_time - ecg_state.last_hrv_freq_update_ms);
+            calculate_hrv_freq_domain(&ecg_state.hrv_freq);
+            ecg_state.last_hrv_freq_update_ms = current_time;
+            hrv_just_calculated = true;
+        }
+    }
+
+    /* Send ECG vitals to M7:
+     * - On every QRS detection (for real-time RR interval)
+     * - When HR changes significantly
+     * - Immediately after HRV calculation (to send VALID state) */
+    bool hr_changed = (results->heart_rate != ecg_state.last_sent_hr) &&
+                      (results->heart_rate > 0);
+
+    if (results->qrs_detected) {
+        send_beat_notify(results);
+    }
+    if (results->qrs_detected || hr_changed || hrv_just_calculated) {
+        send_ecg_vitals();
+        if (hr_changed) {
+            algo_stats.hr_updates_sent++;
+            ecg_state.last_sent_hr = results->heart_rate;
         }
     }
 }
@@ -492,15 +507,34 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
     moving_window_integration(squared, integrated, ECG_BATCH_SIZE);
 
     /* QRS detection */
-    size_t qrs_index;
+    size_t qrs_index = 0;
     int qrs_found = qrs_detect(integrated, ECG_BATCH_SIZE, &qrs_index);
     
     /* Build results */
     memset(results, 0, sizeof(*results));
     results->timestamp = k_uptime_get_32();
     results->signal_quality = quality;
-    
-    if (qrs_found > 0) {
+
+    /* qrs_index is the QRS position within this batch, and sample_count has
+     * already been advanced past the batch, so the absolute index is
+     * sample_count - ECG_BATCH_SIZE + qrs_index. */
+    track_rhythm(qrs_found > 0,
+                 (uint64_t)ecg_state.sample_count - ECG_BATCH_SIZE + qrs_index,
+                 results);
+
+    ecg_state.batches_processed++;
+
+    return 0;
+}
+
+/* Everything ecg_process_batch() does once the detector has run: RR interval,
+ * heart rate. qrs_sample is the absolute sample index of the QRS
+ * (ignored when !qrs_found); ecg_state.sample_count must already include this
+ * batch. Separate so the host test can drive it with beats at known samples. */
+static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
+                         struct ecg_algorithm_results *results)
+{
+    if (qrs_found) {
         /* QRS detected! */
         algo_stats.qrs_detections_total++;
         ecg_state.qrs_count++;
@@ -517,12 +551,10 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
          * numbers looked plausible and measured mostly the scheduler. HR
          * survived it (averaged over >= 3 intervals) but HRV cannot.
          *
-         * qrs_index is the QRS position within this batch, and sample_count has
-         * already been advanced past the batch, so the absolute index is
-         * sample_count - ECG_BATCH_SIZE + qrs_index. At 500 Hz that is 2 ms
-         * resolution, set by the ADC, and free of scheduling noise. */
+         * qrs_sample is an absolute sample index (see ecg_process_batch()). At
+         * 500 Hz that is 2 ms resolution, set by the ADC, and free of
+         * scheduling noise. */
         uint32_t current_time_ms = results->timestamp;
-        uint64_t qrs_sample = ecg_state.sample_count - ECG_BATCH_SIZE + qrs_index;
         uint16_t rr_ms = 0;
 
         if (ecg_state.last_qrs_sample > 0) {
@@ -538,12 +570,8 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
         ecg_state.last_qrs_sample = qrs_sample;
         ecg_state.last_qrs_time_ms = current_time_ms;  /* refractory gate only */
     }
-    
+
     update_heart_rate(results);
-
-    ecg_state.batches_processed++;
-
-    return 0;
 }
 
 /* Heart rate from the RR buffer into results and ecg_state.current_hr (which
