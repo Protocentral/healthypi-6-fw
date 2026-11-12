@@ -22,6 +22,20 @@ Versions here are the **firmware** version reported by the device
   are unchanged. **Settings start empty on the first boot after updating**, as
   LittleFS moves. The release check now fails a build whose QSPI partitions do
   not fit the declared part, or a v5+ board that declares anything but 64 MiB.
+- `healthypi test run` against a port that does not answer exited 1 with a
+  traceback, the same code as a test FAIL. It now exits 3 with a message.
+
+### Added
+- **`scripts/release.sh` gates a bundle on hardware.** `--port <CDC1>` (or
+  `HP6_RELEASE_PORT`) runs the group-64 acceptance suite (`healthypi test run`)
+  on the attached unit first and refuses to build on any FAIL or if the suite
+  cannot run. SKIPs are listed and allowed, and the report is kept as
+  `build/release/hw-gate.json`. Without a port it refuses unless `--no-hw-gate`
+  is given, which prints a warning that the bundle was not hardware-gated.
+- `CONFIG_HPI_RESP_MIN_AMP_UV` (default 100, unchanged): the respiration-rate
+  detector's amplitude floor, now configurable. With `resp_debug.conf` the
+  detector logs the filtered amplitude it sees and the rate it produced every
+  5 s, so the floor can be set from bench data.
 
 ### Changed
 - The release bundle is now named `hpi6-firmware-<version>.zip` instead of
