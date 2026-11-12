@@ -20,8 +20,36 @@ Versions here are the **firmware** version reported by the device
   own OTA). `espfw` is `""` while the C6 is in reset -- the boot default, until
   `conn_enable` -- before it has answered, and on C6 firmware older than
   HealthyBridge 1.1.0.
+- **The ESP32-C6 can be updated over USB, through the M7 -- not yet run on
+  hardware.** Group-64 `espfw_begin` / `espfw_chunk` / `espfw_commit` /
+  `espfw_status` / `espfw_abort` (`0x00A6`-`0x00AA`, signed builds,
+  `CONFIG_HPI_ESP32_UPDATE`; schema version `0x0003`). The M7 relays each chunk
+  over HealthyBridge (new frame types `0x80`/`0x81`) into the C6's inactive OTA
+  slot; nothing is staged on the M7. The image must carry an ECDSA-P256
+  signature with the release key -- checked before anything is sent, with the
+  same verifier as the M4 image -- and the C6 is sent COMMIT only once every
+  byte has been relayed and their SHA-256 matches the signed digest. The M7 then
+  watches the C6 restart and keeps it talking until the new image reports
+  VALID (or reports the rollback). `espfw_chunk` blocks for up to 1.6 s, so
+  hosts must use a 5 s per-request timeout for `espfw_*`. New group-64 errors
+  272 `ESP_NO_REPLY`, 273 `ESP_REFUSED`, 274 `ESP_UPDATE_ACTIVE`, 275
+  `IMAGE_INCOMPLETE`. Needs healthybridge-esp32 with the OTA receiver
+  (`hp6/c6-ota-receiver`). The host updater (`healthypi fw update`) does not use
+  it yet.
+- **Resets that would roll a C6 update back are refused.** While a C6 update is
+  in flight or its new image is pending verification, `os reset` (unless
+  `force`), `enter_recovery` (arm) and `conn_disable` answer 274, and a
+  power-down requested from the UI or the shell waits.
+- **Keepalive on the C6 link.** When the link is up and the M7 has sent nothing
+  for 5 s it sends one real status request, so a pending C6 image always hears
+  from the host.
 
 ### Fixed
+- **The C6's radios come back after it restarts on its own.** A C6 restart the
+  M7 did not cause (panic, watchdog, the restart after a firmware update) left
+  both radios off while the M7 believed them on, so Wi-Fi/BLE streaming stopped
+  until toggled by hand. The connectivity service now re-sends the requested
+  radio state when it detects the restart.
 - **QSPI flash is 64 MiB on HealthyPi 6 v5 and later.** The board definition
   declared the 1 Gbit (128 MiB) W25Q01JV and placed the `/lfs` LittleFS at
   `0x4000000`; the fitted part is 512 Mbit (64 MiB), which ignores the higher

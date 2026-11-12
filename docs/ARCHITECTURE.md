@@ -212,6 +212,19 @@ reports "not ready" and the service stays idle. Build with
 | `0x0076` | `conn_disable` | write | radios down, C6 back into reset |
 | `0x0077` | `conn_status` | read | `{link, radios, state, rssi, ssid, ip, ble_adv, ble_conn}` |
 
+A C6 restart the M7 did not cause — a panic, its watchdog, the restart after a
+firmware update — is detected from the C6's frame sequence number running
+backwards. The connectivity service then drops the cached version **and
+re-sends the radio state that was requested**: the C6 comes up with both radios
+off on every boot, so without that a unit streaming over Wi-Fi went silent until
+someone toggled the radio.
+
+When the link is up and the M7 has sent nothing for 5 s it sends one real
+`GET_STATUS` (a **keepalive**; the 2 s status poll is otherwise answered from a
+cache of the C6's own push and never reaches the wire). A freshly updated C6
+image keeps its slot only after it hears from the host, so the link must never
+be silent for long.
+
 ### Radios are off at boot
 
 **The device boots with the co-processor in reset and neither radio running, and
@@ -248,7 +261,15 @@ because a C6 held in reset cannot be flashed over its own USB port.
 The ESP32-C6 firmware is **not in this repository**. It lives in
 [`protocentral/healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32),
 a dual-target project shared with HealthyPi 5. `scripts/build.sh esp32` and
-`scripts/flash.sh esp32` delegate to it.
+`scripts/flash.sh esp32` delegate to it (over the C6's own USB port — bench and
+factory).
+
+In the field the C6 is updated **through the M7**, over this link: group-64
+`espfw_*` (`0x00A6`–`0x00AA`) hands the image to
+`services/esp32_update_service.c`, which relays it in HealthyBridge frames
+`0x80`/`0x81` into the C6's inactive OTA slot. See
+[§9](#9-firmware-update-and-recovery). **This path has not yet run on
+hardware.**
 
 **The baud must match at both ends** — M7 `&uart4 current-speed` and the
 co-processor's `CONFIG_HB_UART_BAUD_HP6`. A mismatch does not fail gracefully; it
@@ -293,10 +314,10 @@ their hardware genuinely differs.
 |---|---|---|---|
 | **STM32H757 M7** | application | MCUboot image 0, stock MCUmgr **img group** over USB CDC1 | **MCUboot**, ECDSA-P256, before boot |
 | **STM32H757 M4** | algorithm core | group-64 `0x00A0-0x00A4` → QSPI staging → M7 writes bank 2 | **the M7 app**: SHA-256 + ECDSA-P256 + vector-table sanity |
-| **ESP32-C6** | network coprocessor | `esptool` over its own USB-Serial/JTAG port (`scripts/flash.sh esp32`) | ESP-IDF image checks |
+| **ESP32-C6** | network coprocessor | group-64 `0x00A6-0x00AA` → the M7 relays each chunk over the HealthyBridge UART into the C6's **inactive** OTA slot (nothing staged on the M7); the C6 switches slots on COMMIT and keeps the new image only after its link self-test. **Not yet run on hardware.** Bench/factory: `esptool` over its own USB port (`scripts/flash.sh esp32`) | **the M7 app**: ECDSA-P256 over the image's SHA-256 (same key and verifier as the M4), checked before anything is sent, plus the relayed bytes' SHA-256 before COMMIT; then **the C6**: SHA-256 of its flash, `esp_ota_end()` validation, project name, bootloader rollback |
 
-The M7 image, the M4 image and the release manifest are signed with **one**
-ECDSA-P256 release key — see [Keys](#keys).
+The M7 image, the M4 image, the C6 image and the release manifest are signed
+with **one** ECDSA-P256 release key — see [Keys](#keys).
 
 > **Downgrade protection covers the M7's normal update path only.** MCUboot
 > enforces `MCUBOOT_DOWNGRADE_PREVENTION` when it installs from the secondary
@@ -341,7 +362,8 @@ tools/ci/check_prod_surface.sh --release build/release/m7s
 ```
 
 fails unless the image carries `BOOTLOADER_MCUBOOT`, `MCUMGR_GRP_IMG`,
-`IMG_MANAGER`, `HPI_M4_UPDATE`, `HPI_RECOVERY_MODE` and `RETENTION_BOOT_MODE`,
+`IMG_MANAGER`, `HPI_M4_UPDATE`, `HPI_ESP32_UPDATE`, `HPI_RECOVERY_MODE` and
+`RETENTION_BOOT_MODE`,
 the bootloader carries serial recovery + signing + downgrade prevention, and the
 USB VID is no longer the Zephyr development pair. `scripts/release.sh` runs it
 and refuses to produce a bundle if it fails.
@@ -378,8 +400,28 @@ cause of a slow update.
    digest, then its signature, then that its first two vectors look like an M4
    image, and only then erases and rewrites bank 2. A reset follows; the M4
    rebinds IPC ~7-10 s later.
-3. **ESP32-C6:** uploaded to the C6's own HTTP endpoint; it writes the inactive
-   OTA slot and rolls back by itself if the new image fails its self-test.
+3. **ESP32-C6:** the M7 checks the image's signature over its announced
+   SHA-256 *before* anything moves, then relays it chunk by chunk over the
+   HealthyBridge UART into the C6's inactive OTA slot, hashing each chunk the C6
+   acknowledges. Only when every byte has been relayed and the hash matches the
+   signed digest does the C6 get COMMIT; it re-hashes its flash, validates the
+   image and switches slots. It restarts into the new image **pending
+   verification** and keeps it only after it hears from the M7 within 60 s —
+   the M7's once-a-second status polls do that — otherwise the bootloader rolls
+   it back. **Any reset of the M7 or the C6 in that window rolls it back**, so
+   the device refuses `os reset`, `enter_recovery` and `conn_disable` while an
+   update is in flight or pending (group-64 274; `os reset` with `force`
+   overrides). Wire contract and polling rules:
+   [MCUMGR_COMMANDS.md §5.12](MCUMGR_COMMANDS.md#512-network-co-processor-esp32-c6-firmware-update).
+   **Not yet run on hardware.**
+
+> **Order for a three-processor update: the C6 last.** The device side needs
+> the M7 to keep running, undisturbed, from the C6's COMMIT until the new image
+> reports VALID — so the M7/M4 reset has to come *before* the C6 update, not
+> after it. That is the opposite of the ESP32-C6 → M4 → M7 order `healthypi fw
+> update` describes above, which predates this path; the host updater for it is
+> a separate change and must adopt C6-last. Doing the C6 last also means it is
+> always updated by an M7 that has the `espfw_*` commands.
 
 **Bank 2 and slot0 are never touched until the whole image has arrived and
 verified.** An interrupted or corrupt upload leaves the running firmware alone.
@@ -474,8 +516,9 @@ The manifest carries, per processor: version, sha256, size, transport, optional
 ### Keys
 
 One ECDSA-P256 keypair signs everything: the M7 image (enforced by MCUboot), the
-M4 image (enforced by the M7 application, whose compiled-in copy of the public
-half is generated from the same PEM at build time), and the release manifest
+M4 and ESP32-C6 images (both enforced by the M7 application, through one
+verifier, `services/fw_release_sig.c`, whose compiled-in copy of the public half
+is generated from the same PEM at build time), and the release manifest
 (checked by host tools).
 
 - **Dev key** `keys/hp6_dev_ec256.pem` — generated locally on first signed build,
