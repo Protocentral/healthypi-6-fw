@@ -229,3 +229,33 @@ def test_espfw_host_timeout_exceeds_the_device_bound():
         if cmd.name.startswith("espfw_"):
             assert cmd.meta.get("timeout_s") == catalog.ESPFW_TIMEOUT_S, cmd.name
     assert catalog.ESPFW_TIMEOUT_S >= 2 * catalog.ESPFW_CHUNK_DEVICE_BOUND_S
+
+
+HB_PROTO_H = (REPO / "drivers" / "misc" / "healthybridge_esp32"
+              / "healthybridge_esp32_protocol.h")
+
+
+@pytest.mark.skipif(not HB_PROTO_H.is_file(), reason="firmware tree not present")
+def test_espfw_c6_error_names_match_the_healthybridge_header():
+    """`c6_err` is the C6's own OTA status code, passed through by the M7. The
+    updater names it in its failure messages, so the names are held to the
+    HealthyBridge header the M7 is built against."""
+    import re
+
+    text = HB_PROTO_H.read_text()
+    found = {
+        int(v, 16): n
+        for n, v in re.findall(r"#define\s+HPI_HB_OTA_ERR_(\w+)\s+0x([0-9A-Fa-f]+)", text)
+    }
+    found[0] = "OK"  # HPI_HB_OTA_OK
+    assert len(found) > 10, "parsed too little -- the header changed shape"
+    assert found == catalog.ESPFW_C6_ERRORS
+
+
+@pytest.mark.skipif(not ESPFW_H.is_file(), reason="firmware tree not present")
+def test_espfw_max_chunk_matches_firmware():
+    import re
+
+    text = ESPFW_H.read_text()
+    fw = int(re.search(r"HPI_ESPFW_MAX_CHUNK\s+(\d+)U", text).group(1))
+    assert fw == catalog.ESPFW_MAX_CHUNK

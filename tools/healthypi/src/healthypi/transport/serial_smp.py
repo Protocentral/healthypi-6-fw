@@ -80,6 +80,26 @@ def _reply_error(req, exc: Exception) -> "UnparseableReplyError":
     )
 
 
+def catalog_timeout(req) -> float | None:
+    """The per-request timeout the catalog states for this request, or None.
+
+    Group-64 commands that need more than the client's default carry it as
+    ``meta["timeout_s"]`` (the ``espfw_*`` set: 5 s). Resolving it here, in the
+    one place every request passes through, means a caller cannot forget it --
+    the 2.5 s default silently winning over a longer budget has bitten this
+    project twice (the M4 commit in F8, and the wrapper bug noted below).
+    """
+    from ..smp.catalog import BY_ID, GROUP_ID
+
+    if getattr(type(req), "_GROUP_ID", None) != GROUP_ID:
+        return None
+    cmd = BY_ID.get(getattr(type(req), "_COMMAND_ID", -1))
+    if cmd is None:
+        return None
+    t = cmd.meta.get("timeout_s")
+    return float(t) if t is not None else None
+
+
 @dataclass(slots=True)
 class Connection:
     """A live CDC 1 session."""
@@ -96,6 +116,11 @@ class Connection:
         # asyncio.wait_for() instead left the client's own 2.5 s default in
         # charge, so every longer budget (the M4 commit's, above all) was
         # silently cut to 2.5 s.
+        #
+        # An explicit timeout_s wins; otherwise the catalog's figure for this
+        # command, if it states one; otherwise the client's default.
+        if timeout_s is None:
+            timeout_s = catalog_timeout(req)
         try:
             return await self.client.request(req, timeout_s=timeout_s)
         except (TypeError, ValueError) as exc:

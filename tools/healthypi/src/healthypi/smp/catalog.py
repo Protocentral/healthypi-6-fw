@@ -71,6 +71,9 @@ ERRORS: dict[int, tuple[str, str]] = {
 ESPFW_CHUNK_DEVICE_BOUND_S = 1.6
 #: Per-request timeout a host must use for every espfw_* command, seconds.
 ESPFW_TIMEOUT_S = 5.0
+#: Largest `data` one espfw_chunk may carry (HPI_ESPFW_MAX_CHUNK: one
+#: HealthyBridge DATA frame). The SMP frame size usually binds first.
+ESPFW_MAX_CHUNK = 1016
 
 #: espfw_status `st` -- ``enum hpi_espfw_state`` (esp32_update_service.h).
 ESPFW_STATES: dict[int, str] = {
@@ -104,6 +107,32 @@ ESPFW_ERRORS: dict[int, str] = {
     13: "NOT_VALID",
     14: "ROLLED_BACK",
     15: "NOT_SWITCHED",
+}
+
+#: espfw_status `c6_err` -- the C6's own OTA status code, passed through
+#: unchanged (HPI_HB_OTA_ERR_*, drivers/misc/healthybridge_esp32/
+#: healthybridge_esp32_protocol.h; the C6 firmware's docs/PROTOCOL.md). A
+#: different namespace from ESPFW_ERRORS: these are the C6's reasons, those the
+#: M7's.
+ESPFW_C6_ERRORS: dict[int, str] = {
+    0x00: "OK",
+    0x01: "BUSY",
+    0x02: "BAD_SIZE",
+    0x03: "BAD_OFFSET",
+    0x04: "FLASH_WRITE",
+    0x05: "DIGEST_MISMATCH",
+    0x06: "IMAGE_INVALID",
+    0x07: "NOT_IN_TRANSFER",
+    0x08: "RUNNING_UNCONFIRMED",
+    0x09: "INCOMPLETE",
+    0x0A: "FLASH_READ",
+    0x0B: "BOOT_SET",
+    0x0C: "BAD_REQUEST",
+    0x0D: "UNKNOWN_OP",
+    0x0E: "TIMEOUT",
+    0x0F: "NO_SLOT",
+    0x10: "INTERNAL",
+    0x11: "ABORTED",
 }
 
 # --- stock-group error codes we can also be answered with -------------------
