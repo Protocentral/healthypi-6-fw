@@ -65,13 +65,10 @@ CMSIS_SOURCES = [
 
 
 
-OBS_HR_LAG = (
-    "HR lag (observed, not fixed): calculate_heart_rate() averages every RR "
-    "interval in the 256-entry history, so the heart rate sent to the M7 in "
-    "ECG_VITALS (and BEAT_NOTIFY) follows a change over up to 256 beats. A "
-    "step from 60 to 100 BPM with a full buffer takes 236 beats (~142 s) to "
-    "come within 5 BPM."
-)
+# Heart rate. calculate_heart_rate() reports the median of the newest
+# HR_WINDOW_RR intervals; these mirror the constants in algorithm_module.c.
+HR_WINDOW_RR = 8
+HR_MIN_RR_COUNT = 3
 
 
 # --------------------------------------------------------------------------
@@ -161,11 +158,13 @@ def run_freq(h, rr):
 # --------------------------------------------------------------------------
 
 class Check:
-    def __init__(self, case, metric, expected, actual, tol, xfail=None, note=""):
+    def __init__(self, case, metric, expected, actual, tol, xfail=None, note="",
+                 at_most=False):
         self.case, self.metric = case, metric
         self.expected, self.actual, self.tol = expected, actual, tol
         self.xfail, self.note = xfail, note
-        ok = abs(actual - expected) <= tol
+        # at_most: a bound, not a target -- pass when actual <= expected + tol.
+        ok = (actual <= expected + tol) if at_most else abs(actual - expected) <= tol
         if self.xfail:
             self.status = "XPASS" if ok else "XFAIL"
         else:
@@ -308,33 +307,124 @@ def cases(h):
         checks.append(Check("gate: %d samples @500 Hz" % d, "RR ms (0=rejected)",
                             exp, got[d], 0))
 
-    # ---- heart rate step response ------------------------------------------
-    # Not HRV, but the same RR buffer. RR steps from 1000 ms (60 BPM) to 600 ms
-    # (100 BPM); count the beats until the reported HR is within 5 BPM of 100.
-    # "model" is a whole-history integer mean over the last <= 256 intervals:
-    # matching it confirms the mechanism; the 10-beat check is the defect.
-    def hr_model(rr):
-        win = rr[-256:]
-        return max(30, min(200, 60000 // (sum(win) // len(win))))
+    # ---- heart rate ---------------------------------------------------------
+    # Not HRV, but the same RR buffer. The rate the M7 shows as the ECG heart
+    # rate (ECG_VITALS.heart_rate, BEAT_NOTIFY.heart_rate_bpm) is the median of
+    # the newest HR_WINDOW_RR intervals. It used to be the mean of the whole
+    # 256-interval history: 236 beats (~142 s) to follow a 60->100 BPM step.
+    #
+    # The notes quote what the two rejected estimators would have read on the
+    # same input, from a model with the firmware's integer maths: the old
+    # whole-history mean, and a plain mean of the newest 8.
 
-    for pre in (300, 30):
-        name = "HR step 1000->600 ms after %d beats" % pre
-        rr = [1000] * pre
-        cmds = feed(rr)
-        for _ in range(300):
-            cmds += ["rr 600", "hr"]
-        hrs = [int(l.split()[1]) for l in h.run(cmds) if l.startswith("HR ")]
-        settle = next((k + 1 for k, v in enumerate(hrs) if abs(v - 100) <= 5), None)
-        model = [hr_model(rr + [600] * (k + 1)) for k in range(len(hrs))]
-        m_settle = next(k + 1 for k, v in enumerate(model) if abs(v - 100) <= 5)
-        checks.append(Check(name, "beats to +-5 BPM vs model", m_settle,
-                            settle if settle is not None else 9999, 0,
-                            note="settles after %s beats = %.1f s at 600 ms; "
-                                 "HR after 10 beats %d BPM, after 60 s (100 "
-                                 "beats) %d BPM" % (settle, (settle or 0) * 0.6,
-                                                    hrs[9], hrs[99])))
-        checks.append(Check(name, "HR after 10 beats (6 s)", 100, hrs[9], 5,
-                            OBS_HR_LAG))
+    def hr_series(pre_rr, post_rr):
+        """Reset, load pre_rr, then one 'hr' per interval of post_rr."""
+        cmds = feed(pre_rr)
+        for x in post_rr:
+            cmds += ["rr %d" % x, "hr"]
+        return [kv(l) | {"bpm": int(l.split()[1])}
+                for l in h.run(cmds) if l.startswith("HR ")]
+
+    def clamp_hr(rr_ms):
+        return max(30, min(200, 60000 // rr_ms))
+
+    def model_mean(rr, n):
+        w = rr[-n:]
+        return clamp_hr(sum(w) // len(w))
+
+    def model_series(model, pre_rr, post_rr):
+        return [model(pre_rr + post_rr[:k + 1]) for k in range(len(post_rr))]
+
+    def settle(hrs, target):
+        return next((k + 1 for k, v in enumerate(hrs) if abs(v - target) <= 5
+                     and all(abs(u - target) <= 5 for u in hrs[k:])), 9999)
+
+    old = lambda rr: model_mean(rr, 256)
+    mean8 = lambda rr: model_mean(rr, HR_WINDOW_RR)
+
+    # Steps, both directions. pre = 300 wraps the circular buffer; pre = 252
+    # puts the 8-interval window across the wrap seam; pre = 30 is a short
+    # history.
+    for (a, b, target) in ((1000, 600, 100), (600, 1000, 60)):
+        for pre in (300, 252, 30):
+            name = "HR step %d->%d ms (%d->%d BPM) after %d beats" % (
+                a, b, 60000 // a, target, pre)
+            pre_rr, post_rr = [a] * pre, [b] * 40
+            hrs = [r["bpm"] for r in hr_series(pre_rr, post_rr)]
+            s = settle(hrs, target)
+            s_old = settle(model_series(old, pre_rr, [b] * 300), target)
+            s_m8 = settle(model_series(mean8, pre_rr, post_rr), target)
+            checks.append(Check(
+                name, "beats to +-5 BPM (bound N+1)", HR_WINDOW_RR + 1, s, 0,
+                at_most=True,
+                note="median-of-8 settles in %d beats (%.1f s); mean-of-8 would "
+                     "take %d, the old whole-history mean %d (%.1f s). Trace: %s"
+                     % (s, s * b / 1000.0, s_m8, s_old, s_old * b / 1000.0,
+                        hrs[:10])))
+            checks.append(Check(name, "HR after N+1 beats", target,
+                                hrs[HR_WINDOW_RR], 0,
+                                note="no residual once the window has turned over"))
+
+    # Steady state: a constant RR reads exactly what the old mean read
+    # (60000 // RR, clamped to 30-200), whatever the history length.
+    for rr_ms, n in ((1000, 300), (600, 64), (857, 20), (1500, 8), (333, 3),
+                     (2000, 10), (300, 10)):
+        hrs = hr_series([], [rr_ms] * n)
+        checks.append(Check("HR steady: %d x %d ms" % (n, rr_ms), "BPM",
+                            old([rr_ms] * n), hrs[-1]["bpm"], 0,
+                            note="identical to the whole-history mean"))
+
+    # Outliers in a 60 BPM rhythm. With a median of 8 a single bad interval
+    # (or up to 3 of 8) is never the middle value, so the reading does not
+    # move at all; the bound is 0 BPM. The note gives what a plain mean of 8
+    # would have done.
+    base = [1000] * 40
+    for name, bad in (("PVC: 600 + compensatory 1400", [600, 1400]),
+                      ("single premature 600", [600]),
+                      ("missed beat (2000)", [2000]),
+                      ("extra detection (1000 -> 500 + 500)", [500, 500]),
+                      ("two PVCs back to back", [600, 1400, 600, 1400]),
+                      ("3 short in 8 (600, x, 600, x, 600)",
+                       [600, 1000, 600, 1000, 600])):
+        post = bad + [1000] * 10
+        hrs = [r["bpm"] for r in hr_series(base, post)]
+        dev = max(abs(v - 60) for v in hrs)
+        m8 = model_series(mean8, base, post)
+        dev_m8 = max(abs(v - 60) for v in m8)
+        checks.append(Check("HR outlier: " + name, "max |HR - 60| BPM", 0, dev, 0,
+                            at_most=True,
+                            note="median-of-8 trace %s; mean-of-8 would swing "
+                                 "%d BPM (%s)" % (hrs[:9], dev_m8, m8[:9])))
+
+    # The protection ends at half the window: 4+ bad intervals in 8 is a rhythm
+    # change, and the reading follows it. Sustained bigeminy (600/1400) reads
+    # the true mean rate.
+    hrs = [r["bpm"] for r in hr_series(base, [600, 1400] * 8)]
+    checks.append(Check("HR bigeminy 600/1400 x16", "BPM after 16", 60,
+                        hrs[-1], 0, note="median of 4x600 + 4x1400 = 1000 ms"))
+
+    # Start-up from reset. No rate (0, confidence 0) until HR_MIN_RR_COUNT = 3
+    # intervals, i.e. 4 detected beats -- the rule ecg_process_batch() has
+    # always had. Then the median of what there is: 3 intervals -> the middle
+    # one, 4 -> mean of the middle two, ... 8 and beyond -> the newest 8.
+    # Confidence (unchanged): 50 below 5 intervals, 70 below 8, then 90.
+    seq = [1000, 600, 800, 700, 900, 650, 750, 850, 600, 600]
+    rs = hr_series([], seq)
+    for k, r in enumerate(rs, start=1):
+        if k < HR_MIN_RR_COUNT:
+            exp_bpm, exp_conf = 0, 0
+        else:
+            w = sorted(seq[max(0, k - HR_WINDOW_RR):k])
+            n = len(w)
+            med = w[n // 2] if n % 2 else (w[n // 2 - 1] + w[n // 2]) // 2
+            exp_bpm = clamp_hr(med)
+            exp_conf = 90 if k >= 8 else 70 if k >= 5 else 50
+        case = "HR start-up: %d interval%s" % (k, "" if k == 1 else "s")
+        checks.append(Check(case, "BPM", exp_bpm, r["bpm"], 0,
+                            note="window %s" % seq[max(0, k - HR_WINDOW_RR):k]
+                            if k >= HR_MIN_RR_COUNT else
+                            "below HR_MIN_RR_COUNT: no rate yet"))
+        checks.append(Check(case, "confidence", exp_conf, r["conf"], 0))
 
     # ---- frequency domain -------------------------------------------------
 

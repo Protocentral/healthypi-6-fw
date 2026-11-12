@@ -22,8 +22,8 @@
  *   freq         calculate_hrv_freq_domain() and print the result (the module
  *                also logs its unclamped float band powers as "LOG INF HRV
  *                freq raw: ...", which the runner reads)
- *   hr           calculate_heart_rate() over the RR buffer, as
- *                ecg_process_batch() calls it, and print the BPM
+ *   hr           update_heart_rate(), as ecg_process_batch() calls it, and
+ *                print the BPM it reports, its confidence and current_hr
  *   interp       print how many 4 Hz samples interpolate_rr_intervals() makes
  *   vitals       send_ecg_vitals() and print the HRV fields of the IPC payload
  *
@@ -103,13 +103,17 @@ int main(void)
 			       f->hf_power_ms2, f->total_power, f->lf_hf_ratio_x10,
 			       f->lf_nu, f->hf_nu);
 		} else if (strcmp(cmd, "hr") == 0) {
-			/* The call ecg_process_batch() makes after each beat (once
-			 * rr_count >= 3); its result becomes ecg_state.current_hr,
-			 * which ECG_VITALS.heart_rate carries to the M7. */
-			printf("HR %u count=%u\n",
-			       (unsigned)calculate_heart_rate(ecg_state.rr_intervals,
-							      ecg_state.rr_count),
-			       (unsigned)ecg_state.rr_count);
+			/* The call ecg_process_batch() makes after every batch,
+			 * start-up rule included (no new rate until rr_count >=
+			 * HR_MIN_RR_COUNT); it sets ecg_state.current_hr, which
+			 * ECG_VITALS.heart_rate carries to the M7. */
+			struct ecg_algorithm_results r;
+
+			memset(&r, 0, sizeof(r));
+			update_heart_rate(&r);
+			printf("HR %u count=%u conf=%u current=%u\n",
+			       (unsigned)r.heart_rate, (unsigned)ecg_state.rr_count,
+			       (unsigned)r.confidence, (unsigned)ecg_state.current_hr);
 		} else if (strcmp(cmd, "interp") == 0) {
 			size_t s = interpolate_rr_intervals(ecg_state.rr_intervals,
 							    ecg_state.rr_count,

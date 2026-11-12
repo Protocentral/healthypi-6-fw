@@ -157,13 +157,18 @@ int ecg_process_batch(const void *batch, struct ecg_algorithm_results *results);
 int qrs_detect(const int32_t *samples, size_t count, size_t *detected_index);
 
 /**
- * @brief Calculate heart rate from RR intervals
+ * @brief Calculate heart rate from the newest RR intervals
  *
- * @param rr_intervals Array of RR intervals in milliseconds
- * @param count Number of intervals (up to 10)
- * @return Heart rate in BPM, or 0 if insufficient data
+ * Median of the newest min(count, 8) intervals of a circular RR buffer.
+ *
+ * @param rr_intervals Circular RR buffer (milliseconds), RR_HISTORY_SIZE long
+ * @param count Number of valid intervals in it
+ * @param next_index Slot the next interval will be written to (the newest
+ *                   interval is the one before it)
+ * @return Heart rate in BPM clamped to 30-200, or 0 if no data
  */
-uint16_t calculate_heart_rate(const uint16_t *rr_intervals, size_t count);
+uint16_t calculate_heart_rate(const uint16_t *rr_intervals, size_t count,
+                              size_t next_index);
 
 /* NOTE: The M4 performs signal calculations only (QRS/HR/HRV/SpO2). ML
  * arrhythmia classification runs on the HealthyLink Compute (STM32N657 NPU)

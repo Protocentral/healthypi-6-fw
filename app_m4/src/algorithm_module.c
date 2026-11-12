@@ -29,6 +29,17 @@ LOG_MODULE_REGISTER(algorithm_module, LOG_LEVEL_INF);
 #define ECG_BUFFER_SIZE         256    /* Circular buffer for context */
 #define RR_HISTORY_SIZE         256    /* Sized for frequency-domain HRV */
 
+/* Heart rate: the median of the newest HR_WINDOW_RR intervals (fewer while
+ * fewer exist), reported once HR_MIN_RR_COUNT intervals = 4 detected beats
+ * are in. The RR history above is untouched by this: HRV still reads all of
+ * it. The rate used to be the mean of the whole 256-interval history, which
+ * took 236 beats (~142 s) to follow a step from 60 to 100 BPM; the median of
+ * 8 follows it in 5 beats and is unmoved by a single ectopic, missed or extra
+ * beat, where a mean of 8 settles in 8 and swings by up to 8 BPM on one bad
+ * interval. Numbers: app_m4/tests/hrv/test_hrv.py. */
+#define HR_WINDOW_RR            8
+#define HR_MIN_RR_COUNT         3
+
 /* HRV Configuration - can be toggled at runtime via algorithm_set_hrv_enabled().
  *
  * ON by default since 2026-08-31. It defaulted to false "to save CPU", and
@@ -193,6 +204,7 @@ static int moving_window_integration(const int32_t *input, int32_t *output, size
 static uint8_t assess_signal_quality(const int32_t *samples, size_t count);
 static uint16_t rr_ms_from_sample_delta(uint64_t d);
 static void update_rr_interval(uint16_t interval_ms);
+static void update_heart_rate(struct ecg_algorithm_results *results);
 static void calculate_hrv_time_domain(struct hrv_time_domain *hrv);
 static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq);
 static void send_ecg_vitals(void);
@@ -527,24 +539,32 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
         ecg_state.last_qrs_time_ms = current_time_ms;  /* refractory gate only */
     }
     
-    /* Calculate heart rate from RR intervals */
-    if (ecg_state.rr_count >= 3) {
-        results->heart_rate = calculate_heart_rate(ecg_state.rr_intervals, 
-                                                     ecg_state.rr_count);
+    update_heart_rate(results);
+
+    ecg_state.batches_processed++;
+
+    return 0;
+}
+
+/* Heart rate from the RR buffer into results and ecg_state.current_hr (which
+ * ECG_VITALS and BEAT_NOTIFY carry to the M7). Pulled out of
+ * ecg_process_batch() so the host test can drive the real start-up rule. */
+static void update_heart_rate(struct ecg_algorithm_results *results)
+{
+    if (ecg_state.rr_count >= HR_MIN_RR_COUNT) {
+        results->heart_rate = calculate_heart_rate(ecg_state.rr_intervals,
+                                                   ecg_state.rr_count,
+                                                   ecg_state.rr_index);
         ecg_state.current_hr = results->heart_rate;
-        
-        /* Confidence based on RR interval variability */
-        results->confidence = (ecg_state.rr_count >= 8) ? 90 : 
+
+        /* Confidence from how much history there is (unchanged) */
+        results->confidence = (ecg_state.rr_count >= 8) ? 90 :
                              (ecg_state.rr_count >= 5) ? 70 : 50;
         ecg_state.hr_confidence = results->confidence;
     } else {
         results->heart_rate = ecg_state.current_hr;  /* Use last known */
         results->confidence = 0;  /* Not enough data */
     }
-    
-    ecg_state.batches_processed++;
-    
-    return 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -819,26 +839,42 @@ static void update_rr_interval(uint16_t interval_ms)
     }
 }
 
-uint16_t calculate_heart_rate(const uint16_t *rr_intervals, size_t count)
+uint16_t calculate_heart_rate(const uint16_t *rr_intervals, size_t count,
+                              size_t next_index)
 {
-    if (!rr_intervals || count == 0) {
+    if (!rr_intervals || count == 0 || count > RR_HISTORY_SIZE) {
         return 0;
     }
 
-    /* Average RR intervals */
-    uint32_t sum = 0;
-    for (size_t i = 0; i < count; i++) {
-        sum += rr_intervals[i];
+    /* The newest min(count, HR_WINDOW_RR) intervals, walking back from the
+     * slot before next_index (the buffer is circular), insertion-sorted. */
+    uint16_t win[HR_WINDOW_RR];
+    size_t n = (count < HR_WINDOW_RR) ? count : HR_WINDOW_RR;
+
+    for (size_t i = 0; i < n; i++) {
+        size_t idx = (next_index + RR_HISTORY_SIZE - 1 - i) % RR_HISTORY_SIZE;
+        uint16_t v = rr_intervals[idx];
+        size_t j = i;
+
+        while (j > 0 && win[j - 1] > v) {
+            win[j] = win[j - 1];
+            j--;
+        }
+        win[j] = v;
     }
 
-    uint32_t avg_rr_ms = sum / count;
+    /* Median; for an even count the integer mean of the middle two. A median
+     * rather than a mean so one premature, missed or extra beat does not move
+     * the reading at all (a mean of 8 moves by up to 8 BPM). */
+    uint32_t med_rr_ms = (n & 1U) ? win[n / 2]
+                                  : ((uint32_t)win[n / 2 - 1] + win[n / 2]) / 2U;
 
     /* Convert to BPM: HR = 60000 / RR_ms */
-    if (avg_rr_ms == 0) {
+    if (med_rr_ms == 0) {
         return 0;
     }
 
-    uint16_t hr = 60000 / avg_rr_ms;
+    uint16_t hr = 60000 / med_rr_ms;
 
     /* Clamp to physiological range */
     if (hr < 30) hr = 30;
@@ -1246,7 +1282,7 @@ static void send_ecg_vitals(void)
     vitals.hrv_freq_valid = ecg_state.hrv_freq.valid;
 
     /* Algorithm state */
-    if (ecg_state.rr_count < 3) {
+    if (ecg_state.rr_count < HR_MIN_RR_COUNT) {
         vitals.algorithm_state = HPI_ECG_ALGO_STATE_LEARNING;
     } else if (ecg_state.hrv.valid) {
         vitals.algorithm_state = HPI_ECG_ALGO_STATE_VALID;
