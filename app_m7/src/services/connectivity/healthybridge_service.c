@@ -90,7 +90,9 @@ static struct k_spinlock g_ver_lock;           /* g_ver + g_ver_state */
 static char g_ver[SIZEOF_FIELD(struct hpi_hb_version_resp, version_string)];
 static uint8_t g_ver_state = CONN_VER_UNKNOWN;
 static uint8_t g_ver_tries;                    /* conn_thread only */
-static uint32_t g_ver_epoch;                   /* peer_restarts last seen */
+
+/* healthybridge_rx_stats.peer_restarts as last seen by conn_thread. */
+static uint32_t g_peer_epoch;
 
 /* ---- canonical -> HealthyBridge frame mapping ---- */
 
@@ -237,18 +239,48 @@ static void version_invalidate(const char *why)
 	}
 }
 
+/*
+ * conn_thread only, every pass while the link is powered (it is one read).
+ *
+ * A C6 restart -- release from reset, or an in-place reboot the driver detects
+ * by the frame sequence number running backwards (panic, watchdog, the
+ * esp_restart() after a firmware update or provisioning) -- invalidates
+ * everything learned from the previous boot:
+ *
+ *   - its firmware version, which an update has just changed;
+ *   - its radio state. The C6 starts with both radios off on every boot
+ *     (CONFIG_HB_RADIOS_OFF_AT_BOOT), whatever it was doing before, so after
+ *     an in-place reboot g_radios claims radios that are no longer running.
+ *     Nothing used to notice: a unit streaming over Wi-Fi went silent after a
+ *     C6 watchdog reset until someone toggled the radio by hand. Forget what
+ *     was applied and let link_apply_request() re-send what was requested.
+ *
+ * A release from reset counts too, but there g_radios is already 0 (powering
+ * down clears it), so only the version is dropped.
+ */
+static void peer_restart_check(void)
+{
+	struct healthybridge_rx_stats rx;
+
+	if (healthybridge_get_rx_stats(hb, &rx) != 0 || rx.peer_restarts == g_peer_epoch) {
+		return;
+	}
+	g_peer_epoch = rx.peer_restarts;
+	version_invalidate("co-processor restarted");
+
+	if (g_radios != 0) {
+		LOG_INF("ESP32 restarted with radios%s%s requested -- re-applying",
+			(g_req_radios & HPI_CONN_RADIO_WIFI) ? " wifi" : "",
+			(g_req_radios & HPI_CONN_RADIO_BLE) ? " ble" : "");
+		g_radios = 0;
+		g_req_pending = true;
+	}
+}
+
 /* conn_thread only. Cheap unless a fetch is due; a fetch is one round-trip,
  * bounded by the driver's command timeout. */
 static void version_maintain(bool fetch_due)
 {
-	struct healthybridge_rx_stats rx;
-
-	if (healthybridge_get_rx_stats(hb, &rx) == 0 &&
-	    rx.peer_restarts != g_ver_epoch) {
-		g_ver_epoch = rx.peer_restarts;
-		version_invalidate("co-processor restarted");
-	}
-
 	if (!fetch_due || g_link_state != HPI_CONN_LINK_UP ||
 	    g_ver_state != CONN_VER_UNKNOWN || g_ver_tries >= CONN_VER_TRIES) {
 		return;
@@ -503,6 +535,7 @@ static void conn_thread(void *a, void *b, void *c)
 		/* Restart detection every pass (it is two reads); the fetch
 		 * rides the poll cadence so retries are a window apart. */
 		if (g_link_state != HPI_CONN_LINK_OFF) {
+			peer_restart_check();
 			version_maintain(poll_due);
 		}
 #if IS_ENABLED(CONFIG_HPI_CONN_DEBUG)
