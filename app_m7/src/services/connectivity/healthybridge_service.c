@@ -198,6 +198,22 @@ static void forward_vitals(const struct hpi_sample_frame *f)
  */
 #define CONN_WIFI_POLL_MS 2000
 
+/*
+ * Keepalive: when the link is up and this end has transmitted nothing for this
+ * long, send one real GET_STATUS (healthybridge_keepalive()). At most one frame
+ * per ~5 s, and only when nothing else is flowing.
+ *
+ * Needed because an OTA-installed C6 image keeps its slot only after it has
+ * received CONFIG_HB_OTA_SELFTEST_FRAMES (3) CRC-valid host frames within
+ * CONFIG_HB_OTA_SELFTEST_TIMEOUT_S (60 s) of booting, and otherwise rolls itself
+ * back. With the radios off and the M4 silent this end used to send almost
+ * nothing -- the 2 s status poll is answered from the driver's cache of the
+ * C6's own 1 Hz push -- so an image left pending outside an update session (the
+ * M7 rebooted mid-wait and something powered the C6 again) could miss it.
+ * 5 s gives ~11 frames in the 60 s window.
+ */
+#define CONN_KEEPALIVE_IDLE_MS 5000
+
 #define CONN_WIFI_POLL_ENABLED 1
 
 static const char *link_state_name(uint8_t s)
@@ -492,10 +508,10 @@ static void conn_thread(void *a, void *b, void *c)
 			 * all count; Wi-Fi being up does not. With the radios
 			 * off the ~1 Hz vitals are what keeps a radios-off boot
 			 * from rolling itself back -- and they exist only while
-			 * the M4 is producing. Without them this end sends the
-			 * first GET_STATUS poll and GET_VERSION, and the later
-			 * polls are mostly answered from the driver's cache of
-			 * the C6's 1 Hz status push, i.e. not sent at all.
+			 * the M4 is producing. Without them the status poll is
+			 * mostly answered from the driver's cache of the C6's
+			 * 1 Hz status push, i.e. not sent at all; the keepalive
+			 * below (CONN_KEEPALIVE_IDLE_MS) is what covers that.
 			 */
 			bool live = (g_link_state == HPI_CONN_LINK_UP ||
 				     g_link_state == HPI_CONN_LINK_STARTING);
@@ -537,6 +553,10 @@ static void conn_thread(void *a, void *b, void *c)
 		if (g_link_state != HPI_CONN_LINK_OFF) {
 			peer_restart_check();
 			version_maintain(poll_due);
+		}
+		/* Cheap: a timestamp compare unless the link has been quiet. */
+		if (g_link_state == HPI_CONN_LINK_UP) {
+			(void)healthybridge_keepalive(hb, CONN_KEEPALIVE_IDLE_MS);
 		}
 #if IS_ENABLED(CONFIG_HPI_CONN_DEBUG)
 		if (now - win >= 5000) {

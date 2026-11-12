@@ -114,6 +114,23 @@ struct healthybridge_link_api {
 	int (*get_rx_stats)(const struct device *dev, struct healthybridge_rx_stats *out);
 
 	/**
+	 * Make sure the co-processor hears from this host: if nothing has been
+	 * transmitted for @p idle_ms, send a real GET_STATUS on the wire --
+	 * bypassing the status cache that wifi_status() answers from -- and
+	 * refresh that cache from the reply. Otherwise do nothing.
+	 *
+	 * Why: a freshly updated C6 image keeps its OTA slot only after it has
+	 * received a few CRC-valid frames from the host within 60 s of booting.
+	 * With the radios off and the M4 silent, everything this end used to
+	 * send was answered from cache, i.e. not sent at all.
+	 *
+	 * Blocking for at most one command round-trip when a frame is due.
+	 * Returns 0, or the command's error (-ETIMEDOUT still means the frame
+	 * went out; only the reply is missing).
+	 */
+	int (*keepalive)(const struct device *dev, uint32_t idle_ms);
+
+	/**
 	 * Send one firmware-update request (HealthyBridge 0x80) and wait for the
 	 * reply that answers it: a 0x81 with the same op and, for DATA, the same
 	 * req_offset. Stale and duplicate replies -- answers to an earlier
@@ -251,6 +268,11 @@ static inline int healthybridge_ota_request(const struct device *dev, uint8_t op
 {
 	return HB_LINK_CALL(dev, ota_request, op, begin, offset, data, len,
 			    timeout_ms, out);
+}
+
+static inline int healthybridge_keepalive(const struct device *dev, uint32_t idle_ms)
+{
+	return HB_LINK_CALL(dev, keepalive, idle_ms);
 }
 
 static inline const char *healthybridge_link_name(const struct device *dev)

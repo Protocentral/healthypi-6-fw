@@ -132,6 +132,9 @@ struct healthybridge_uart_data {
 	bool wifi_valid;
 	int64_t wifi_at;
 
+	/* uptime of the last frame that left the UART, for keepalive() */
+	int64_t last_tx_at;
+
 	/* Peer restart detection. The C6 numbers every frame it sends from one
 	 * counter that starts at 0 when it boots, so a sequence number that runs
 	 * backwards means it rebooted underneath us (panic, watchdog, esp_restart
@@ -419,6 +422,7 @@ static int hb_uart_transmit(const struct healthybridge_uart_config *cfg,
 
 	data->stats.frames++;
 	data->stats.bytes += (uint32_t)len;
+	data->last_tx_at = k_uptime_get();
 	return 0;
 }
 
@@ -676,6 +680,39 @@ static int hb_uart_api_wifi_status(const struct device *dev,
 			       (uint8_t *)out, sizeof(*out), NULL);
 }
 
+/*
+ * A real GET_STATUS, sent only when the link has been quiet for idle_ms. The
+ * reply carries the same record as the unsolicited 0x61 push, so it refreshes
+ * the cache wifi_status() serves; the frame itself is the point.
+ */
+static int hb_uart_api_keepalive(const struct device *dev, uint32_t idle_ms)
+{
+	struct healthybridge_uart_data *data = dev->data;
+	struct hpi_hb_wifi_status_resp st;
+	uint16_t n = 0;
+	int rc;
+
+	if (!data->initialized) {
+		return -ENODEV;
+	}
+	if (!data->powered) {
+		return -EHOSTDOWN;
+	}
+	if (data->last_tx_at != 0 && (k_uptime_get() - data->last_tx_at) < (int64_t)idle_ms) {
+		return 0;
+	}
+
+	rc = hb_uart_command(dev, HPI_HB_CMD_GET_STATUS, NULL, 0,
+			     (uint8_t *)&st, sizeof(st), &n);
+	if (rc == 0 && n >= sizeof(st)) {
+		st.ssid[sizeof(st.ssid) - 1] = '\0';
+		data->wifi = st;
+		data->wifi_at = k_uptime_get();
+		data->wifi_valid = true;
+	}
+	return (rc == -ENODATA) ? 0 : rc;
+}
+
 static int hb_uart_api_get_version(const struct device *dev,
 				   struct hpi_hb_version_resp *out)
 {
@@ -860,6 +897,7 @@ static const struct healthybridge_link_api hb_uart_api = {
 	.wifi_softap = hb_uart_api_wifi_softap,
 	.get_rx_stats = hb_uart_api_rx_stats,
 	.ota_request = hb_uart_api_ota_request,
+	.keepalive = hb_uart_api_keepalive,
 	.name = "uart",
 };
 
