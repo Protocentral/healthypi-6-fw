@@ -41,6 +41,21 @@ Versions here are the **firmware** version reported by the device
   exactly as before, and the first rate still appears after 4 beats. HRV is
   unchanged and still uses the full history. Checked on the host
   (`app_m4/tests/hrv/`); not yet checked against real QRS detection on hardware.
+- **A stale ECG heart rate is withdrawn after 5 s (M4).** With HRV on (the
+  default) the M4 re-sends its ECG vitals every 5 s whether or not a beat was
+  detected, still carrying the last rate, and the M7 counts an ECG rate as
+  fresh for 5 s from each message's arrival. So if QRS detection stopped while
+  the electrodes stayed on -- asystole, a flat or very low-amplitude trace, a
+  detector that lost the signal -- the last heart rate could stay on the
+  display, in the stream and in recordings indefinitely, as a live ECG rate.
+  The M4 now reports no rate (0, confidence 0) once no RR interval has been
+  accepted for 5 s of signal, and sends that at once; the M7 then falls back
+  to a fresh PPG rate (flagged as such) or shows none. A rhythm below 30 BPM,
+  which the M4 cannot measure, now also clears the rate instead of keeping the
+  last one. After a pause the rate returns after 4 beats and is built only from
+  intervals after the pause. A steady 30 BPM and a single missed beat at
+  normal rates do not trigger it; below about 36 BPM one missed beat does.
+  Checked on the host; not yet checked on hardware.
 
 ### Changed
 - The release bundle is now named `hpi6-firmware-<version>.zip` instead of

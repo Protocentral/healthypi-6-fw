@@ -92,7 +92,7 @@ raw batches M7→M4, `*_VITALS` M4→M7, `*_CONFIG` M7→M4. Batch size 16 sampl
 
 | Capability | State | Notes |
 |------------|-------|-------|
-| **ECG → QRS → HR** | ✅ **Live** | Only fully-working path. Simplified Pan-Tompkins on Lead I. **Rate = median of the newest 8 RR intervals** (`HR_WINDOW_RR`; fewer while fewer exist), first reported after 3 intervals = 4 beats (`HR_MIN_RR_COUNT`, unchanged). Follows a 60↔100 BPM step in 5 beats and is not moved by a single premature, missed or extra beat (host-measured, `tests/hrv/`). Until 2026-11-12 it was the mean of the whole 256-interval history: 236 beats (~142 s) for the same step. HRV still reads the full history. Not yet checked against real QRS detection on hardware |
+| **ECG → QRS → HR** | ✅ **Live** | Only fully-working path. Simplified Pan-Tompkins on Lead I. **Rate = median of the newest 8 RR intervals** (`HR_WINDOW_RR`; fewer while fewer exist), first reported after 3 intervals = 4 beats (`HR_MIN_RR_COUNT`, unchanged). Follows a 60↔100 BPM step in 5 beats and is not moved by a single premature, missed or extra beat (host-measured, `tests/hrv/`). Until 2026-11-12 it was the mean of the whole 256-interval history: 236 beats (~142 s) for the same step. HRV still reads the full history. **The rate expires** (0, confidence 0, state LEARNING, sent at once) when no RR interval has been accepted for 5 s of samples (`HR_STALE_SAMPLES`); after that the window restarts, so the next rate needs 3 new intervals (4 beats) and contains no pre-pause interval. Before 2026-11-12 it never expired on the M4, and the HRV-pass re-sends (every 5 s) kept the M7's 5 s freshness window open on the last rate indefinitely through asystole or a lost signal with the leads on. Not yet checked against real QRS detection on hardware |
 | **HRV time domain** (SDNN/RMSSD/pNN50) | 🟡 **Runs, not yet validated** | `HRV_ENABLED_DEFAULT=true` since 2026-08-31. Before that it defaulted false and nothing in either core ever called `algorithm_set_hrv_enabled(true)`, so SDNN/RMSSD were computed by no one and the fields they travel in read 0 on every device ever built. Updates every 5 s, needs ≥8 RR intervals. **Maths checked on the host** against a reference (`tests/hrv/`, §6): SDNN/RMSSD/pNN50 agree within 1 ms / 1 %. Not yet checked on hardware with real QRS timing |
 | **HRV freq domain** (LF/HF via CMSIS-DSP FFT) | 🟡 **Runs, not yet validated** | Same default; updates every 60 s over the **newest** 64 s of RR, needs ≥32 RR intervals and ≥32 s. **Maths checked on the host** (`tests/hrv/`, §6): VLF/LF/HF in ms², LF/HF and LFnu/HFnu agree with the reference within 10 % / 3 points. Three defects the host test found are fixed (2026-11-12): band powers were 1/64 of true (D1, `df` applied twice); the spectrum covered the *oldest* 64 s of the up-to-4-minute buffer (D2); and 32–64 s of data got the first L points of a 256-point window with the full window's normalisation, 20–50 % low and unevenly weighted in time (D3; now a Hann window of the record's own length). Only the LF/HF ratio reaches `hp6_vitals`; the M7 drops the absolute powers. Not yet checked on hardware |
 | **SpO2 + PPG-HR** | 🔴 **Runs, outputs nothing** | Compiled **in** (`main.c:483` is `#if 1`), starts, and registers `PPG_RAW` itself (`spo2_module.c:1285`). Broken by the double decimation in **F2** below |
@@ -148,9 +148,25 @@ Plan: `fw-internal-docs/release/RELEASE_1_0_0_FEATURE_COMPLETION_PLAN.md` W1.
      is imperfect.
   3. Filter coefficients (`bp_filter_b/a`) are declared but the actual filter is a
      hand-rolled 2nd difference — the coeff arrays are unused.
+- **Rate expiry:** `expire_stale_heart_rate()` withdraws the rate once no RR interval
+  has been *accepted* for `HR_STALE_SAMPLES` = 2500 samples (5 s), counted in sample
+  indices like RR itself. 5 s is 2.5× the longest accepted interval (2000 ms = 30 BPM),
+  so a steady 30 BPM and a 60 BPM rhythm with one missed beat never trip it; it equals
+  the M7's `HR_STALE_MS`. Keyed on accepted intervals rather than detections, so a
+  rhythm below 30 BPM (every interval rejected by the gate) also expires the rate
+  instead of leaving the last measurable one up. Trade-off: below ~36 BPM a single
+  missed beat leaves > 5 s between accepted intervals and withdraws the rate until 3 new
+  ones. On expiry: HR 0 / confidence 0 / RR 0 / state LEARNING, brady/tachy clear (they
+  derive from the rate), the 8-interval HR window (`hr_rr_count`) restarts. The RR
+  history and HRV are untouched; the interval spanning the pause (> 5 s) is already
+  rejected by the 300–2000 ms gate, so it reaches neither HR nor HRV. **The HRV series
+  is still spliced across a pause** (pre- and post-pause intervals are adjacent in the
+  buffer, as after any rejected interval); the M7 blanks HRV while it has no ECG rate.
 - **Output:** `send_ecg_vitals()` packs `struct hpi_ipc_ecg_vitals` (HR, RR, QRS count,
   confidence, signal quality, HRV fields, `algorithm_state`, arrhythmia/flags) and sends
-  `0x21`. Triggered on QRS, on HR change, or right after an HRV calc.
+  `0x21`. Triggered on QRS, on any HR change (including to 0, i.e. an expiry), or right
+  after an HRV calc. The HRV-pass sends happen whether or not a beat arrived, which is
+  why the rate must expire on the M4: the M7 times an ECG rate from message *arrival*.
 
 ---
 
@@ -218,10 +234,16 @@ CMSIS-DSP from the west workspace or `$CMSIS_DSP`), feeds known RR series throug
 LFnu/HFnu with `tests/hrv/hrv_oracle.py`, a from-the-definitions Python reference.
 Known defects are expected failures with their numbers; the run fails on a new
 failure *or* on a known one starting to pass. CI runs it (`m4-hrv-host`). It does not
-exercise QRS detection — RR intervals go straight into the buffer. The frequency-domain
+exercise QRS detection — RR intervals go straight into the buffer, or, for the
+`stale:`/`expire:`/`no-expiry:` cases, beats are placed at exact sample indices and run
+through `track_rhythm()` + `ecg_report()` (the thread's path from a detected QRS to the
+`ECG_VITALS` it sends), with a model of the M7's `publish_vitals()` arbitration on top. The frequency-domain
 defects D1–D3 it found are fixed, and so is the heart-rate lag it measured (whole-history
 mean, now a median of the newest 8; see §4): the `HR …` cases check the step response
-both ways, steady state, single outliers and start-up from 1 interval up. No expected
+both ways, steady state, single outliers and start-up from 1 interval up; the stale-rate
+cases check expiry 5 s after the last interval (HRV on and off, every re-send after it 0),
+recovery from 0 after exactly 3 new intervals with no pre-pause contribution, that a missed
+beat at 60 BPM and a steady 30 BPM do not expire, and the < 36 BPM trade-off. No expected
 failures remain.
 
 **Pre-commit:** `scripts/build.sh m4` builds clean; IPC callbacks stay enqueue-only;
