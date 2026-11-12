@@ -1081,9 +1081,28 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
     arm_mean_f32(hrv_interp_buffer, interp_samples, &mean_val);
     arm_offset_f32(hrv_interp_buffer, -mean_val, hrv_interp_buffer, interp_samples);
 
-    /* Step 3: Apply Hanning window using CMSIS-DSP multiply */
+    /* Step 3: Apply a Hann window of the segment's OWN length L and keep its
+     * energy Σw² for the normalisation in Step 6.
+     *
+     * With 64 s of data (L = 256) that is the precomputed table. With 32-64 s
+     * (128 <= L < 256) a window of length L is computed here; the segment is
+     * then zero-padded to 256 for the FFT. This used to apply the first L
+     * points of the 256-point window -- a taper that falls to zero at the old
+     * end only and peaks near the new end, so it weighted the record unevenly
+     * in time -- and normalise by the full window's energy, which read 20-50 %
+     * low. Computing L cosines costs well under 0.1 ms once a minute, and needs
+     * no extra buffer. */
     size_t fft_len = (interp_samples < HRV_FFT_SIZE) ? interp_samples : HRV_FFT_SIZE;
-    arm_mult_f32(hrv_interp_buffer, hrv_hanning_window, hrv_window_buffer, fft_len);
+    float32_t window_power = 0.0f;  /* Σw² of the window actually applied */
+
+    for (size_t n = 0; n < fft_len; n++) {
+        float32_t w = (fft_len == HRV_FFT_SIZE)
+            ? hrv_hanning_window[n]
+            : 0.5f * (1.0f - arm_cos_f32(2.0f * PI * (float32_t)n /
+                                         (float32_t)(fft_len - 1)));
+        hrv_window_buffer[n] = hrv_interp_buffer[n] * w;
+        window_power += w * w;
+    }
 
     /* Zero-pad if necessary */
     if (fft_len < HRV_FFT_SIZE) {
@@ -1104,16 +1123,18 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
      *     P[k] · df = 2|X[k]|² / (N · Σw²)
      * so this factor already yields ms² per bin and the band sums below are
      * the band powers directly. (They used to be multiplied by df once more,
-     * which made every band power exactly 1/64 of the true value.) */
-    float32_t window_power = (float32_t)HRV_FFT_SIZE * 0.375f;  /* Hanning window power */
+     * which made every band power exactly 1/64 of the true value.)
+     * N is the FFT length (256) even when the segment is shorter and
+     * zero-padded; Σw² is that of the window applied (Step 3). */
     float32_t norm_factor = 2.0f / ((float32_t)HRV_FFT_SIZE * window_power);
 
     for (int i = 0; i < HRV_FFT_SIZE / 2; i++) {
         hrv_power_spectrum[i] *= norm_factor;
     }
 
-    LOG_DBG("HRV FFT: N=%d, window_power=%.1f, norm=%.6f",
-            HRV_FFT_SIZE, (double)window_power, (double)norm_factor);
+    LOG_DBG("HRV FFT: N=%d, L=%u, window_power=%.1f, norm=%.6f",
+            HRV_FFT_SIZE, (unsigned)fft_len, (double)window_power,
+            (double)norm_factor);
 
     /* Step 7: Integrate power in frequency bands (bins are already ms², see
      * Step 6 -- do not scale by df again). */

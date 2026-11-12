@@ -63,11 +63,6 @@ CMSIS_SOURCES = [
 # Known defects. Each is referenced by the checks it breaks.
 # --------------------------------------------------------------------------
 
-DEFECT_PARTIAL = (
-    "D3: with 32-64 s of data (128-255 samples) the code multiplies the "
-    "segment by the first L points of a 256-point Hann window - a truncated, "
-    "one-sided taper - and normalises as if the full window had been applied."
-)
 
 
 # --------------------------------------------------------------------------
@@ -209,7 +204,7 @@ def time_checks(case, rr, t, v=None, xfail=None):
 
 
 def freq_checks(case, rr, f, segment="newest", abs_xfail=None,
-                rel_xfail=None, check_abs=True):
+                rel_xfail=None, check_abs=True, nu_tol=3):
     p = ref.band_powers(rr, segment=segment)
     ratio, lf_nu, hf_nu = ref.lf_hf_derived(p)
     c = [Check(case, "freq valid", 1, f["valid"], 0)]
@@ -224,8 +219,8 @@ def freq_checks(case, rr, f, segment="newest", abs_xfail=None,
     c += [
         Check(case, "LF/HF x10", r10, f["ratio_x10"], rel(r10, 0.10, 2.0),
               rel_xfail),
-        Check(case, "LFnu %", lf_nu, f["lf_nu"], 3, rel_xfail),
-        Check(case, "HFnu %", hf_nu, f["hf_nu"], 3, rel_xfail),
+        Check(case, "LFnu %", lf_nu, f["lf_nu"], nu_tol, rel_xfail),
+        Check(case, "HFnu %", hf_nu, f["hf_nu"], nu_tol, rel_xfail),
     ]
     return c, p
 
@@ -357,11 +352,33 @@ def cases(h):
     checks.append(Check("freq: 40 intervals of 600 ms (24 s)", "freq valid",
                         0, f["valid"], 0, note="needs 32 s, not just 32 beats"))
 
-    # 40 s of data: valid, but with the truncated-window path (D3).
+    # 32-64 s of data (128-255 samples): a Hann window of the segment's own
+    # length, zero-padded to 256. Before D3 was fixed the firmware applied the
+    # first L points of the 256-point window and normalised by the full
+    # window's energy: LF 596.6 / HF 104.7 here against 755.3 / 129.5.
     rr = ref.sine_rr(40, 1000, [(40, 0.10), (20, 0.25)])
     f = run_freq(h, rr)
-    checks += freq_checks("freq: LF+HF mix, 40 s (partial window)", rr, f,
-                          abs_xfail=DEFECT_PARTIAL)[0]
+    checks += freq_checks("freq: LF+HF mix, 40 s (partial window)", rr, f)[0]
+
+    # The shortest valid record, 32 s = 128 samples.
+    rr = ref.sine_rr(33, 1000, [(5, 0.10), (30, 0.25)])
+    f = run_freq(h, rr)
+    checks += freq_checks("freq: LF+HF mix, 33 s (shortest window)", rr, f)[0]
+
+    # Window symmetry on a short record: 20 s of LF, then 20 s of HF. The
+    # truncated 256-point taper is zero at the old end but peaks near the new
+    # end, so it under-weights the first half; renormalising it alone would
+    # still read LF at ~21 % and HF at ~173 % of the oracle (LFnu ~15 %).
+    # Only a symmetric window of length L passes this.
+    # LFnu/HFnu get +-4, not +-3: with an abrupt change mid-record, the
+    # one-beat alignment difference (firmware places RR_k at the start of its
+    # interval, the oracle at its end) moves the change point against the
+    # window. The oracle re-run with start placement gives LF 197.2, HF 158.8,
+    # LFnu 55.4 -- what the firmware reports -- against 58.0 with end placement.
+    rr = ref.sine_rr(20, 1000, [(30, 0.10)]) + ref.sine_rr(20, 1000, [(30, 0.25)])
+    f = run_freq(h, rr)
+    checks += freq_checks("freq: LF then HF, 40 s (window symmetry)", rr, f,
+                          nu_tol=4)[0]
 
     # Window position: 128 beats of HF-only, then 128 beats of LF-only.
     # The most recent 64 s are pure LF. Before D2 was fixed the firmware
