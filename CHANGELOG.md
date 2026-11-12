@@ -22,6 +22,16 @@ Versions here are the **firmware** version reported by the device
   are unchanged. **Settings start empty on the first boot after updating**, as
   LittleFS moves. The release check now fails a build whose QSPI partitions do
   not fit the declared part, or a v5+ board that declares anything but 64 MiB.
+- **Heart rate, SpO2 and HRV no longer stay on screen after the M4 stops
+  sending them.** Their 5 s freshness limit was only checked when a new vitals
+  message arrived, so if the M4 crashed, hung, was being updated or simply went
+  quiet, the last values stayed on the display, in the live stream, on the
+  ESP32 link and in the lead-off diagnostic reply as if they were current.
+  The M7 now publishes an updated vitals sample at the moment each value
+  expires, with expired values reading 0 ("not available"); values return with
+  the next message from the M4. SpO2 and the weak-perfusion flag now expire
+  with the PPG data they came from -- before, SpO2 had no freshness limit at
+  all.
 
 ### Changed
 - The release bundle is now named `hpi6-firmware-<version>.zip` instead of
