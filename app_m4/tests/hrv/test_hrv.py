@@ -63,12 +63,6 @@ CMSIS_SOURCES = [
 # Known defects. Each is referenced by the checks it breaks.
 # --------------------------------------------------------------------------
 
-DEFECT_SCALE = (
-    "D1: LF/HF/VLF band powers are 1/64 of the true value. The PSD "
-    "normalisation 2/(N*sum(w^2)) already turns |X|^2 into power per bin "
-    "(ms^2); calculate_hrv_freq_domain() then multiplies by df = fs/N = "
-    "4/256 again. Scale-free outputs (LF/HF, LFnu, HFnu) are unaffected."
-)
 DEFECT_WINDOW = (
     "D2: the spectrum is taken over the OLDEST 64 s in the RR buffer, not the "
     "newest. interpolate_rr_intervals() starts at the oldest of up to 256 "
@@ -220,21 +214,18 @@ def time_checks(case, rr, t, v=None, xfail=None):
     return c
 
 
-def freq_checks(case, rr, f, segment="newest", scaled_xfail=None,
+def freq_checks(case, rr, f, segment="newest", abs_xfail=None,
                 rel_xfail=None, check_abs=True):
     p = ref.band_powers(rr, segment=segment)
     ratio, lf_nu, hf_nu = ref.lf_hf_derived(p)
     c = [Check(case, "freq valid", 1, f["valid"], 0)]
     if check_abs and f["raw"] is not None:
+        # Absolute band powers. Before D1 was fixed (df applied twice) these
+        # read exactly 1/64 of the oracle.
         for b in ("lf", "hf"):
             if p[b] > 1.0:
                 c.append(Check(case, "%s power ms2" % b.upper(), p[b],
-                               f["raw"][b], rel(p[b], 0.10, 1.0), DEFECT_SCALE))
-                # The same value with D1's factor undone: isolates D1 (an exact
-                # 1/64) from anything else wrong with the spectrum.
-                c.append(Check(case, "%s power x64" % b.upper(), p[b],
-                               f["raw"][b] * 64.0, rel(p[b], 0.10, 1.0),
-                               scaled_xfail))
+                               f["raw"][b], rel(p[b], 0.10, 1.0), abs_xfail))
     r10 = min(ratio * 10.0, 255.0)
     c += [
         Check(case, "LF/HF x10", r10, f["ratio_x10"], rel(r10, 0.10, 2.0),
@@ -376,7 +367,7 @@ def cases(h):
     rr = ref.sine_rr(40, 1000, [(40, 0.10), (20, 0.25)])
     f = run_freq(h, rr)
     checks += freq_checks("freq: LF+HF mix, 40 s (partial window)", rr, f,
-                          scaled_xfail=DEFECT_PARTIAL)[0]
+                          abs_xfail=DEFECT_PARTIAL)[0]
 
     # Window position: 128 beats of HF-only, then 128 beats of LF-only.
     # The most recent 64 s are pure LF.

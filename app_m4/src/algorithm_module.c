@@ -1089,11 +1089,14 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
     /* FFT output is interleaved real/imag: [Re0, Im0, Re1, Im1, ...] */
     arm_cmplx_mag_squared_f32(hrv_fft_output, hrv_power_spectrum, HRV_FFT_SIZE / 2);
 
-    /* Step 6: Normalize power spectrum. PSD normalization is
-     * 2 / (N * window_power), with Hanning window power ≈ N * 0.375; the ×2
-     * accounts for the one-sided spectrum. Band powers are later integrated
-     * by multiplying by df = fs/N, which supplies the remaining per-Hz
-     * scaling. */
+    /* Step 6: Normalize power spectrum to power per bin, in ms².
+     *
+     * The one-sided PSD is P[k] = 2|X[k]|² / (fs · Σw²) in ms²/Hz, and a
+     * band's power is Σ P[k] · df with df = fs/N. The fs cancels:
+     *     P[k] · df = 2|X[k]|² / (N · Σw²)
+     * so this factor already yields ms² per bin and the band sums below are
+     * the band powers directly. (They used to be multiplied by df once more,
+     * which made every band power exactly 1/64 of the true value.) */
     float32_t window_power = (float32_t)HRV_FFT_SIZE * 0.375f;  /* Hanning window power */
     float32_t norm_factor = 2.0f / ((float32_t)HRV_FFT_SIZE * window_power);
 
@@ -1104,7 +1107,8 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
     LOG_DBG("HRV FFT: N=%d, window_power=%.1f, norm=%.6f",
             HRV_FFT_SIZE, (double)window_power, (double)norm_factor);
 
-    /* Step 7: Integrate power in frequency bands */
+    /* Step 7: Integrate power in frequency bands (bins are already ms², see
+     * Step 6 -- do not scale by df again). */
     float32_t freq_resolution = HRV_INTERP_RATE / HRV_FFT_SIZE;  /* Hz per bin */
     float32_t vlf_power = 0, lf_power = 0, hf_power = 0;
 
@@ -1119,11 +1123,6 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
             hf_power += hrv_power_spectrum[i];
         }
     }
-
-    /* Scale by frequency resolution to get integrated power in ms² */
-    vlf_power *= freq_resolution;
-    lf_power *= freq_resolution;
-    hf_power *= freq_resolution;
 
     float32_t total_power = vlf_power + lf_power + hf_power;
 
