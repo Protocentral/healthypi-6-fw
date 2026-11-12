@@ -13,9 +13,11 @@ What it does
   3. Compares every output with hrv_oracle.py, a from-the-definitions Python
      implementation that shares no code with the firmware.
 
-Scope: this validates the HRV *maths* only. It does not exercise QRS
-detection, its timing on hardware, or the 5 s / 60 s scheduling in the
-algorithm thread. RR intervals go straight into the buffer.
+Scope: the HRV maths and heart rate, with RR intervals straight into the
+buffer; and, in the stale-rate cases, the thread's path from a detected QRS to
+the ECG_VITALS it sends (track_rhythm() + ecg_report(), including the 5 s /
+60 s HRV scheduling, in sample time), with beats placed at exact sample
+indices. It does not exercise QRS detection itself or timing on hardware.
 
 Result states
   PASS   within tolerance.
@@ -233,6 +235,195 @@ def freq_checks(case, rr, f, segment="newest", abs_xfail=None,
     return c, p
 
 
+# --------------------------------------------------------------------------
+# Stale heart rate: the path from a detected QRS to the ECG_VITALS the M7 gets
+# --------------------------------------------------------------------------
+#
+# Mirrors of firmware constants. ECG_HZ/BATCH: hpi_common_types.h and
+# algorithm_module.c; HR_STALE_MS: HR_STALE_SAMPLES / 500 Hz in
+# algorithm_module.c, and also the M7's own HR_STALE_MS (app_m7 platform/ipc.c).
+ECG_HZ = 500
+BATCH = 16
+HR_STALE_MS = 5000
+M7_HR_STALE_MS = 5000
+STATE_LEARNING = 1
+ARR_BRADY, ARR_TACHY = 1 << 3, 1 << 4
+
+
+def beats_from_rr(rr_ms, start=1000):
+    """Absolute QRS sample indices: one at `start`, then one per interval."""
+    s, out = start, [start]
+    for x in rr_ms:
+        s += x * ECG_HZ // 1000
+        out.append(s)
+    return out
+
+
+def run_stream(h, beats, end_ms, hrv=True, tail=()):
+    """Drive 'batch' from sample 0 to end_ms, a QRS at each beat sample, then
+    the commands in tail. Returns one dict per batch (t = sample time in ms at
+    the batch end) and the harness's whole output."""
+    cmds = ["reset", "hrv %d" % (1 if hrv else 0)]
+    bset = {b // BATCH: b % BATCH for b in beats}
+    for k in range(end_ms * ECG_HZ // 1000 // BATCH):
+        cmds.append("batch %d" % bset[k] if k in bset else "batch")
+    out = h.run(cmds + list(tail))
+    return [kv(l) for l in out if l.startswith("B ")], out
+
+
+def m7_ecg_rate(rows, at_ms):
+    """The ECG rate app_m7 platform/ipc.c publish_vitals() would carry at
+    at_ms, leads on, publishing often enough (e.g. on PPG vitals) for its
+    staleness rule to be the only thing that expires a rate: ecg_hr is the
+    heart_rate of the newest ECG_VITALS, credible while non-zero and younger
+    than HR_STALE_MS by ARRIVAL. IPC latency ignored."""
+    tx = [r for r in rows if r["tx"] and r["t"] <= at_ms]
+    if not tx:
+        return 0
+    last = tx[-1]
+    return last["vhr"] if last["vhr"] and at_ms - last["t"] <= M7_HR_STALE_MS else 0
+
+
+def stale_rate_cases(h):
+    checks = []
+    ms = lambda b: b * 1000 // ECG_HZ
+
+    # 1. Beats, then silence with the electrodes on (asystole, a flat line, a
+    #    detector that stops finding QRS). The rate must read the last value
+    #    until HR_STALE_MS after the last accepted interval, then 0 /
+    #    confidence 0 -- in every ECG_VITALS, including the HRV-pass re-sends
+    #    every 5 s that used to keep it alive. Brady/tachy go with it.
+    for rr_ms, bpm, arr in ((1000, 60, 0), (500, 120, ARR_TACHY),
+                            (1200, 50, ARR_BRADY)):
+        for hrv in (True, False):
+            case = "stale: %d BPM x40 then 40 s silence, HRV %s" % (
+                bpm, "on" if hrv else "off")
+            beats = beats_from_rr([rr_ms] * 40)
+            last = ms(beats[-1])
+            rows, _ = run_stream(h, beats, last + 40000, hrv=hrv)
+            tx = [r for r in rows if r["tx"]]
+            pre = [r for r in tx if r["t"] <= last]
+            post = [r for r in tx if r["t"] > last]
+            checks.append(Check(case, "HR before silence", bpm,
+                                pre[-1]["vhr"], 0))
+            checks.append(Check(case, "brady/tachy before", arr,
+                                pre[-1]["varr"], 0))
+            live = [r for r in post if r["vhr"]]
+            oldest = max((r["t"] - last for r in live), default=0)
+            checks.append(Check(
+                case, "oldest non-0 HR sent, ms after last beat",
+                HR_STALE_MS + 32, oldest, 0, at_most=True,
+                note="bound = HR_STALE_MS + one batch (32 ms)"))
+            zero = next((r for r in post if r["vhr"] == 0), None)
+            checks.append(Check(case, "0 sent at once on expiry, ms after last beat",
+                                HR_STALE_MS + 16, zero["t"] - last if zero else 99999,
+                                16, note="the expiry sends; it does not wait "
+                                         "for an HRV pass"))
+            after = [r for r in post if zero and r["t"] >= zero["t"]]
+            bad = [r for r in after if r["vhr"] or r["vconf"] or r["varr"]
+                   or r["vrr"] or r["vstate"] != STATE_LEARNING]
+            checks.append(Check(
+                case, "ECG_VITALS after expiry not 0/conf 0/LEARNING", 0,
+                len(bad), 0,
+                note="%d sent after expiry, %d of them HRV-pass re-sends"
+                     % (len(after), sum(1 for r in after if r["hrvpass"]))))
+            if hrv:
+                checks.append(Check(case, "HRV-pass re-sends during silence",
+                                    40000 // 5000,
+                                    sum(1 for r in post if r["hrvpass"]), 1,
+                                    note="still sent every 5 s, now with 0"))
+            for dt in (6000, 15000, 39000):
+                checks.append(Check(case, "M7 ECG rate %d s after last beat"
+                                    % (dt // 1000), 0,
+                                    m7_ecg_rate(rows, last + dt), 0,
+                                    note="model of app_m7 platform/ipc.c "
+                                         "publish_vitals()"))
+
+    # 2. Recovery after a pause: no rate until 3 NEW intervals (4 beats; the
+    #    first beat after the pause closes a > 5 s interval the 2000 ms gate
+    #    rejects), then the median of post-pause intervals only. Pre-pause is
+    #    60 BPM and post-pause 100 BPM, so any pre-pause interval left in the
+    #    window would show: a median over 5 x 1000 + 3 x 600 reads 60.
+    case = "stale: 60 BPM x40, 10 s pause, 100 BPM x20"
+    pre_b = beats_from_rr([1000] * 40)
+    post_b = beats_from_rr([600] * 19, start=pre_b[-1] + 10 * ECG_HZ)
+    rows, _ = run_stream(h, pre_b + post_b, ms(post_b[-1]) + 200)
+    qrs = [r for r in rows if r["q"]][len(pre_b):]  # the 20 post-pause beats
+    checks.append(Check(case, "RR of 1st beat after pause (0=rejected)", 0,
+                        qrs[0]["rr"], 0,
+                        note="the 10 s interval enters neither HR nor HRV"))
+    for k, r in enumerate(qrs[:10], start=1):
+        n_rr = k - 1                                # post-pause intervals
+        exp = 100 if n_rr >= 3 else 0
+        conf = 0 if n_rr < 3 else 90 if n_rr >= 8 else 70 if n_rr >= 5 else 50
+        checks.append(Check(case, "beat %d after pause: HR" % k, exp,
+                            r["vhr"], 0))
+        checks.append(Check(case, "beat %d after pause: confidence" % k, conf,
+                            r["vconf"], 0))
+    checks.append(Check(case, "any post-pause HR != 0 or 100", 0,
+                        sum(1 for r in qrs if r["vhr"] not in (0, 100)), 0))
+    out = h.run(["reset"] + ["rr %d" % x for x in [1000] * 40 + [600] * 19]
+                + ["time"])
+    t_ref = kv(next(l for l in out if l.startswith("TIME")))
+    _, out = run_stream(h, pre_b + post_b, ms(post_b[-1]) + 200, tail=["time"])
+    t = kv(next(l for l in out if l.startswith("TIME")))
+    checks.append(Check(case, "HRV interval count", 59, t["count"], 0,
+                        note="40 + 19: the pause interval is not in HRV"))
+    checks.append(Check(case, "HRV max RR ms", 1000, t["max"], 0))
+    checks.append(Check(case, "HRV SDNN = same intervals fed directly",
+                        t_ref["sdnn"], t["sdnn"], 0))
+
+    # 3. Must NOT expire: one missed beat at 60 BPM (a single 2000 ms
+    #    interval, accepted by the gate), and a steady 30 BPM (every interval
+    #    2000 ms, the longest accepted).
+    for case, rr, bpm in (
+            ("no-expiry: 60 BPM, one missed beat (2000 ms)",
+             [1000] * 30 + [2000] + [1000] * 10, 60),
+            ("no-expiry: steady 30 BPM (2000 ms) x30", [2000] * 30, 30)):
+        beats = beats_from_rr(rr)
+        rows, _ = run_stream(h, beats, ms(beats[-1]) + 200)
+        first = next(i for i, r in enumerate(rows) if r["hr"])
+        drops = sum(1 for r in rows[first:] if r["hr"] == 0)
+        checks.append(Check(case, "batches reading 0 after first rate", 0,
+                            drops, 0))
+        checks.append(Check(case, "HR at end", bpm, rows[-1]["hr"], 0))
+        checks.append(Check(case, "M7 ECG rate at end", bpm,
+                            m7_ecg_rate(rows, rows[-1]["t"]), 0))
+
+    # 4. Expiry is keyed on ACCEPTED intervals, so it also catches a rhythm the
+    #    gate cannot measure. 60 BPM, then 25 BPM (2400 ms, every interval
+    #    rejected): the detector keeps firing but no rate supports 60 any more.
+    case = "expire: 60 BPM x20, then 25 BPM (2400 ms, rejected) x8"
+    beats = beats_from_rr([1000] * 20 + [2400] * 8)
+    rows, _ = run_stream(h, beats, ms(beats[-1]) + 200)
+    last_ok = ms(beats[20])
+    zero = next((r for r in rows
+                 if r["t"] > last_ok and r["tx"] and r["vhr"] == 0), None)
+    checks.append(Check(case, "0 sent, ms after last accepted interval",
+                        HR_STALE_MS + 16, zero["t"] - last_ok if zero else 99999,
+                        16))
+    checks.append(Check(case, "HR at end", 0, rows[-1]["hr"], 0,
+                        note="the M4 cannot measure below 30 BPM; it no longer "
+                             "keeps showing the last rate it could"))
+
+    # 5. The trade-off, documented: below ~36 BPM one missed beat leaves three
+    #    intervals' worth of time between accepted intervals (the double one
+    #    is rejected), > 5 s at 30 BPM. The rate still reads 30 at the beat
+    #    4 s into the gap, is withdrawn 5 s in, and returns after 3 new
+    #    intervals.
+    case = "trade-off: 30 BPM, one missed beat (4000 ms rejected)"
+    beats = beats_from_rr([2000] * 10 + [4000] + [2000] * 6)
+    rows, _ = run_stream(h, beats, ms(beats[-1]) + 200)
+    qrs = [r for r in rows if r["q"]]
+    after = [r["hr"] for r in qrs[11:]]
+    checks.append(Check(case, "HR at beats after the gap", 0,
+                        sum(1 for a, e in zip(after, [30, 0, 0, 30, 30, 30])
+                            if a != e), 0,
+                        note="trace %s: withdrawn, back after 3 intervals"
+                             % after))
+    return checks
+
+
 def cases(h):
     checks = []
 
@@ -425,6 +616,8 @@ def cases(h):
                             if k >= HR_MIN_RR_COUNT else
                             "below HR_MIN_RR_COUNT: no rate yet"))
         checks.append(Check(case, "confidence", exp_conf, r["conf"], 0))
+
+    checks += stale_rate_cases(h)
 
     # ---- frequency domain -------------------------------------------------
 

@@ -40,6 +40,30 @@ LOG_MODULE_REGISTER(algorithm_module, LOG_LEVEL_INF);
 #define HR_WINDOW_RR            8
 #define HR_MIN_RR_COUNT         3
 
+/* A heart rate expires when no RR interval has been accepted for this many
+ * ECG samples (5 s at 500 Hz). Counted in samples, so it is the signal's time,
+ * not the time a batch happened to be processed.
+ *
+ * Why it is needed: ECG_VITALS is re-sent after every HRV pass (5 s, and 60 s
+ * for the spectrum) whether or not a beat arrived, and the M7 treats an ECG
+ * rate as fresh for 5 s from each message's ARRIVAL. Without an expiry here a
+ * rate survived asystole, a flat line or a detector that stopped finding QRS
+ * for as long as the electrodes stayed on.
+ *
+ * Why 5 s: the longest interval the gate accepts is 2000 ms (30 BPM), so a
+ * steady 30 BPM refreshes the rate every 2 s, and a 60 BPM rhythm with one
+ * missed beat (one 2000 ms interval) never comes close. Below ~36 BPM a missed
+ * beat leaves a 3-interval gap between accepted intervals and does expire the
+ * rate: at that rate a dropped beat is enough doubt to withdraw the number. It
+ * is also the M7's own HR_STALE_MS, so with or without HRV re-sends a rate is
+ * never shown for more than ~5 s after the last interval that supports it.
+ *
+ * Keyed on the last ACCEPTED interval, not the last detection: the rate is made
+ * of accepted intervals only, so its age is theirs. A rhythm below 30 BPM (every
+ * interval rejected) or a detector firing faster than the 300 ms gate therefore
+ * expires the rate too, rather than leaving the last good one on screen. */
+#define HR_STALE_SAMPLES        (5U * HPI_ECG_M4_RATE_HZ)
+
 /* HRV Configuration - can be toggled at runtime via algorithm_set_hrv_enabled().
  *
  * ON by default since 2026-08-31. It defaulted to false "to save CPU", and
@@ -135,6 +159,12 @@ struct ecg_algorithm_state {
     size_t rr_index;                      /* Circular buffer index */
     size_t rr_total_count;                /* Total RR intervals ever recorded */
 
+    /* Heart-rate window: how many of the newest rr_intervals belong to the
+     * current run of beats (0..HR_WINDOW_RR). Reset to 0 when the rate expires,
+     * so a rate after a gap is built from post-gap intervals only and the
+     * HR_MIN_RR_COUNT start-up rule applies again. HRV ignores it. */
+    size_t hr_rr_count;
+    uint64_t last_rr_sample;              /* Sample index closing the newest accepted RR */
     uint16_t last_sent_hr;                /* heart_rate of the last ECG_VITALS sent */
 
     /* HRV state */
@@ -207,6 +237,7 @@ static uint8_t assess_signal_quality(const int32_t *samples, size_t count);
 static uint16_t rr_ms_from_sample_delta(uint64_t d);
 static void update_rr_interval(uint16_t interval_ms);
 static void update_heart_rate(struct ecg_algorithm_results *results);
+static void expire_stale_heart_rate(void);
 static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
                          struct ecg_algorithm_results *results);
 static void ecg_report(const struct ecg_algorithm_results *results,
@@ -324,6 +355,11 @@ void algorithm_reset(void)
     memset(ecg_state.rr_intervals, 0, sizeof(ecg_state.rr_intervals));
     ecg_state.rr_count = 0;
     ecg_state.rr_index = 0;
+    ecg_state.hr_rr_count = 0;
+    ecg_state.last_rr_sample = 0;
+    ecg_state.current_hr = 0;
+    ecg_state.hr_confidence = 0;
+    ecg_state.current_rr_ms = 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -394,8 +430,8 @@ static void ecg_algorithm_thread_func(void *p1, void *p2, void *p3)
 }
 
 /* After each batch: run the HRV passes when due and decide whether the M7 gets
- * an ECG_VITALS (and a BEAT_NOTIFY). Pulled out of the thread loop unchanged
- * so the host test can drive it. */
+ * an ECG_VITALS (and a BEAT_NOTIFY). Pulled out of the thread loop, unchanged
+ * apart from the hr_changed rule below, so the host test can drive it. */
 static void ecg_report(const struct ecg_algorithm_results *results,
                        uint32_t now_ms)
 {
@@ -429,10 +465,15 @@ static void ecg_report(const struct ecg_algorithm_results *results,
 
     /* Send ECG vitals to M7:
      * - On every QRS detection (for real-time RR interval)
-     * - When HR changes significantly
-     * - Immediately after HRV calculation (to send VALID state) */
-    bool hr_changed = (results->heart_rate != ecg_state.last_sent_hr) &&
-                      (results->heart_rate > 0);
+     * - When the reported HR changes, INCLUDING to 0. A rate that expires
+     *   (HR_STALE_SAMPLES) is sent at once as 0 / confidence 0; this used
+     *   to require heart_rate > 0, so the withdrawal would only have gone
+     *   out with the next HRV pass, or never with HRV off.
+     * - Immediately after HRV calculation (to send VALID state). These
+     *   re-sends carry whatever current_hr is, which is why it must expire
+     *   on the M4: they arrive every 5 s and would otherwise keep the M7's
+     *   5 s freshness window open on the last rate indefinitely. */
+    bool hr_changed = (results->heart_rate != ecg_state.last_sent_hr);
 
     if (results->qrs_detected) {
         send_beat_notify(results);
@@ -528,7 +569,7 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
 }
 
 /* Everything ecg_process_batch() does once the detector has run: RR interval,
- * heart rate. qrs_sample is the absolute sample index of the QRS
+ * rate expiry, heart rate. qrs_sample is the absolute sample index of the QRS
  * (ignored when !qrs_found); ecg_state.sample_count must already include this
  * batch. Separate so the host test can drive it with beats at known samples. */
 static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
@@ -553,7 +594,11 @@ static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
          *
          * qrs_sample is an absolute sample index (see ecg_process_batch()). At
          * 500 Hz that is 2 ms resolution, set by the ADC, and free of
-         * scheduling noise. */
+         * scheduling noise.
+         *
+         * The interval that spans a pause long enough to expire the rate is
+         * > HR_STALE_SAMPLES (5 s), far outside the 2000 ms gate, so it is
+         * rejected here and enters neither the HR window nor HRV. */
         uint32_t current_time_ms = results->timestamp;
         uint16_t rr_ms = 0;
 
@@ -564,6 +609,7 @@ static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
                 update_rr_interval(rr_ms);
                 results->rr_interval_ms = rr_ms;
                 ecg_state.current_rr_ms = rr_ms;
+                ecg_state.last_rr_sample = qrs_sample;
             }
         }
 
@@ -571,7 +617,44 @@ static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
         ecg_state.last_qrs_time_ms = current_time_ms;  /* refractory gate only */
     }
 
+    expire_stale_heart_rate();
     update_heart_rate(results);
+}
+
+/* Withdraw the heart rate when no RR interval has been accepted for
+ * HR_STALE_SAMPLES (see its definition for the why and the why-5-s).
+ *
+ * On expiry:
+ *  - the rate reads 0 with confidence 0 -- the "no rate" the M4 has always
+ *    reported before its first 3 intervals, and what the M7 treats as no ECG
+ *    rate (falls back to a fresh PPG rate, else none);
+ *  - the HR window restarts (hr_rr_count = 0), so after the pause the first
+ *    rate again needs HR_MIN_RR_COUNT new intervals and is the median of those
+ *    alone: a pre-pause interval in the window would be a number about a
+ *    rhythm that may no longer exist;
+ *  - current_rr_ms is cleared: "latest RR" is as stale as the rate;
+ *  - brady/tachy clear by themselves, being derived from current_hr in
+ *    send_ecg_vitals(); on recovery they follow the new rate only.
+ * The RR history (rr_intervals/rr_count) and HRV are left alone: HRV is its own
+ * 5 s / 60 s pass over the full history, and the M7 blanks HRV whenever it has
+ * no ECG rate. The QRS detector is not touched either. */
+static void expire_stale_heart_rate(void)
+{
+    if (ecg_state.hr_rr_count == 0) {
+        return;
+    }
+    if ((uint64_t)ecg_state.sample_count - ecg_state.last_rr_sample <= HR_STALE_SAMPLES) {
+        return;
+    }
+
+    LOG_WRN("ECG rate expired: no RR interval for %u samples (HR was %u)",
+            (uint32_t)((uint64_t)ecg_state.sample_count - ecg_state.last_rr_sample),
+            ecg_state.current_hr);
+
+    ecg_state.hr_rr_count = 0;
+    ecg_state.current_hr = 0;
+    ecg_state.hr_confidence = 0;
+    ecg_state.current_rr_ms = 0;
 }
 
 /* Heart rate from the RR buffer into results and ecg_state.current_hr (which
@@ -579,19 +662,28 @@ static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
  * ecg_process_batch() so the host test can drive the real start-up rule. */
 static void update_heart_rate(struct ecg_algorithm_results *results)
 {
-    if (ecg_state.rr_count >= HR_MIN_RR_COUNT) {
+    /* hr_rr_count, not rr_count: after an expiry the window holds only the
+     * intervals since, so the start-up rule and the median both see the new
+     * run of beats alone (calculate_heart_rate() reads the newest `count`). */
+    if (ecg_state.hr_rr_count >= HR_MIN_RR_COUNT) {
         results->heart_rate = calculate_heart_rate(ecg_state.rr_intervals,
-                                                   ecg_state.rr_count,
+                                                   ecg_state.hr_rr_count,
                                                    ecg_state.rr_index);
         ecg_state.current_hr = results->heart_rate;
 
         /* Confidence from how much history there is (unchanged) */
-        results->confidence = (ecg_state.rr_count >= 8) ? 90 :
-                             (ecg_state.rr_count >= 5) ? 70 : 50;
+        results->confidence = (ecg_state.hr_rr_count >= 8) ? 90 :
+                             (ecg_state.hr_rr_count >= 5) ? 70 : 50;
         ecg_state.hr_confidence = results->confidence;
     } else {
-        results->heart_rate = ecg_state.current_hr;  /* Use last known */
-        results->confidence = 0;  /* Not enough data */
+        /* No rate: before the first HR_MIN_RR_COUNT intervals, and again after
+         * an expiry until as many new ones. This used to report the "last
+         * known" current_hr, which is 0 in both cases now that an expiry
+         * clears it; say so rather than rely on it. */
+        results->heart_rate = 0;
+        results->confidence = 0;
+        ecg_state.current_hr = 0;
+        ecg_state.hr_confidence = 0;
     }
 }
 
@@ -864,6 +956,9 @@ static void update_rr_interval(uint16_t interval_ms)
     
     if (ecg_state.rr_count < RR_HISTORY_SIZE) {
         ecg_state.rr_count++;
+    }
+    if (ecg_state.hr_rr_count < HR_WINDOW_RR) {
+        ecg_state.hr_rr_count++;
     }
 }
 
@@ -1309,8 +1404,9 @@ static void send_ecg_vitals(void)
     vitals.hrv_hf_nu = ecg_state.hrv_freq.hf_nu;
     vitals.hrv_freq_valid = ecg_state.hrv_freq.valid;
 
-    /* Algorithm state */
-    if (ecg_state.rr_count < HR_MIN_RR_COUNT) {
+    /* Algorithm state. LEARNING whenever there is no rate -- at start-up and
+     * after an expiry (hr_rr_count is reset then; rr_count never shrinks). */
+    if (ecg_state.hr_rr_count < HR_MIN_RR_COUNT) {
         vitals.algorithm_state = HPI_ECG_ALGO_STATE_LEARNING;
     } else if (ecg_state.hrv.valid) {
         vitals.algorithm_state = HPI_ECG_ALGO_STATE_VALID;
