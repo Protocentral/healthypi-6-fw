@@ -30,6 +30,7 @@
 #include "m4_ipc_protocol.h"           /* envelope + msg ids + ept name */
 #include "ipc.h"
 #include "health.h"                    /* M4 link heartbeat */
+#include "vitals_arbiter.h"            /* HR source arbitration + expiry */
 #if IS_ENABLED(CONFIG_HPI_NPU_STREAM)
 #include "healthylink/npu_stream.h"
 #endif
@@ -50,49 +51,56 @@ bool hpi_ipc_ready(void)
     return ipc_ready;
 }
 
-/* Latest merged vitals; ECG fills HR/HRV, PPG fills SpO2. Published on update. */
-static struct hp6_vitals g_vitals;
+/* ---------------- vitals: M4 inputs -> HPI_CH_VITALS ----------------
+ *
+ * The M4's ECG and PPG vitals messages are inputs; what the bus carries is
+ * computed from them by hpi_vit_arbitrate() (vitals_arbiter.c, which holds the
+ * source-arbitration and expiry rules). Those inputs EXPIRE, and an expiry is
+ * a change in what is true even when no message arrives -- the M4 crashed,
+ * hung, is being updated, or simply stopped sending. So the bus is fed from
+ * one delayable work item, vitals_work, which runs:
+ *   - immediately on every vitals message (ept_recv reschedules it), and
+ *   - at the instant the next still-fresh input ages out (one timer, re-armed
+ *     on every run; at most two pending expiries -- ECG and PPG),
+ * and publishes on every message plus once per expiry that changed the output.
+ * There is no periodic tick: with every input fresh it only waits on the
+ * timer, and once everything has been cleared nothing is armed at all. If the
+ * M4 never binds it never runs, and the vitals stay "not available".
+ *
+ * Concurrency. ept_recv runs on the RPMSG backend's workqueue; vitals_work on
+ * the system workqueue. vit_lock (a spinlock: nothing blocks under it) guards
+ * vit_in, vit_arrived and g_vitals. ept_recv only stores the message under it
+ * and reschedules the work -- it never computes or publishes, so the callback
+ * stays non-blocking. g_vitals and last_pub are written only by vitals_work,
+ * which a workqueue never runs concurrently with itself, so publishes cannot
+ * reorder. A message landing while vitals_work runs re-queues it
+ * (k_work_reschedule() leaves a queued submission in place when it re-arms the
+ * delay), so the newer input is always evaluated and published.
+ */
+#define LEAD_OFF_STALE_MS 5000   /* ECG quiet this long: lead state is unknown */
+
+static struct k_spinlock vit_lock;
+static struct hpi_vit_inputs vit_in;      /* vit_lock */
+static bool vit_arrived;                  /* vit_lock: a message since last run */
+static struct hp6_vitals g_vitals;        /* vit_lock; last sample published */
 
 void hpi_ipc_last_vitals(struct hp6_vitals *out)
 {
     if (out != NULL) {
-        *out = g_vitals;   /* 12 bytes, single-word fields: a torn read here
-                            * would cost more to prevent than it can hurt */
+        k_spinlock_key_t key = k_spin_lock(&vit_lock);
+
+        *out = g_vitals;
+        k_spin_unlock(&vit_lock, key);
     }
 }
 
+static void vitals_work_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(vitals_work, vitals_work_fn);
 
-/* ---------------- heart-rate source arbitration ----------------
- *
- * Two detectors can produce a heart rate -- the M4's ECG QRS detector and its
- * PPG pulse detector -- and they are NOT interchangeable. This block decides
- * which one hp6_vitals.hr_bpm carries and records that choice in
- * hp6_vitals.flags, so every consumer knows the number's provenance.
- *
- * Three rules:
- *  1. An ECG HR is only credible while the leads are ON -- a disconnected
- *     electrode rails and the QRS detector finds "beats" in the noise.
- *  2. Both HRs EXPIRE (HR_STALE_MS); a stale source never holds the field.
- *  3. The PPG fallback is EXPLICIT (HP6_VIT_HR_FROM_PPG) -- a PPG pulse rate
- *     must never be rendered under an ECG label.
- */
-#define HR_STALE_MS       5000   /* a source older than this no longer counts */
-#define LEAD_OFF_STALE_MS 5000   /* ECG quiet this long: lead state is unknown */
-
-static struct {
-    uint16_t ecg_hr;
-    int64_t  ecg_at;
-    uint16_t ppg_hr;
-    int64_t  ppg_at;
-    bool     ppg_weak;   /* M4 says low perfusion / poor quality */
-} hr_src;
-
-/* Fill hr_bpm + flags from whichever source is currently credible, then publish.
- * Recomputed on every vitals message rather than mutated in place: staleness is
- * a function of time, so "what is true now" cannot be maintained incrementally
- * by whichever message happened to arrive last. */
-static void publish_vitals(void)
+static void vitals_work_fn(struct k_work *work)
 {
+    ARG_UNUSED(work);
+
     int64_t now = k_uptime_get();
     uint32_t lead_age = UINT32_MAX;
     uint8_t lead_off = hpi_acquisition_lead_off(&lead_age);
@@ -101,75 +109,80 @@ static void publish_vitals(void)
      * rate, since no ECG vitals will be arriving either way. */
     bool leads_off = (lead_age <= LEAD_OFF_STALE_MS) && (lead_off != 0);
 
-    bool ecg_ok = !leads_off && hr_src.ecg_hr != 0U &&
-                  (now - hr_src.ecg_at) <= HR_STALE_MS;
-    bool ppg_ok = hr_src.ppg_hr != 0U && (now - hr_src.ppg_at) <= HR_STALE_MS;
+    struct hpi_vit_inputs in;
+    bool arrived;
+    k_spinlock_key_t key = k_spin_lock(&vit_lock);
 
-    g_vitals.flags = leads_off ? HP6_VIT_ECG_LEAD_OFF : 0;
+    in = vit_in;
+    arrived = vit_arrived;
+    vit_arrived = false;
+    struct hp6_vitals v = g_vitals;   /* only this work item writes it */
+    k_spin_unlock(&vit_lock, key);
 
-    if (ecg_ok) {
-        g_vitals.hr_bpm = hr_src.ecg_hr;
-    } else if (ppg_ok) {
-        /* The PPG rate is reported even when the M4 calls perfusion low -- with
-         * HP6_VIT_PPG_WEAK set, so a consumer can present it as provisional
-         * rather than being handed nothing at all. */
-        g_vitals.hr_bpm = hr_src.ppg_hr;
-        g_vitals.flags |= HP6_VIT_HR_FROM_PPG;
-    } else {
-        g_vitals.hr_bpm = 0U;   /* 0 = not available (never "measured zero") */
-    }
+    struct hp6_vitals last_pub = v;
 
-    /* PPG_WEAK qualifies EVERYTHING the PPG produced, not just a PPG-sourced
-     * rate. It used to be set only inside the branch above, i.e. only when the
-     * ECG rate was unavailable -- so in the normal case, good ECG plus a poorly
-     * perfused finger, spo2_x10 travelled with no quality indication at all.
-     * SpO2 is the value most likely to be read off a poorly perfused finger and
-     * the one a reader is least able to sanity-check, so the flag follows the
-     * signal, not the arbitration outcome. */
-    if (hr_src.ppg_weak) {
-        g_vitals.flags |= HP6_VIT_PPG_WEAK;
-    }
-    /* Artifact hint only — do not suppress HR/SpO2 while this is set. */
+    hpi_vit_arbitrate(&in, now, leads_off, &v);
+
+    /* Artifact hint only -- do not suppress HR/SpO2 while this is set. */
     if (hpi_imu_motion()) {
-        g_vitals.flags |= HP6_VIT_MOTION;
+        v.flags |= HP6_VIT_MOTION;
+    } else {
+        v.flags &= (uint8_t)~HP6_VIT_MOTION;
+    }
+    v.temp_c_x100 = hpi_temp_c_x100();
+    v.rr_bpm = hpi_resp_rate_bpm();
+
+    /* A message is always published (the ~1 Hz cadence consumers see); an
+     * expiry only when it changed what the M4-derived fields say. */
+    if (arrived || hpi_vit_arbitrated_differ(&v, &last_pub)) {
+        key = k_spin_lock(&vit_lock);
+        g_vitals = v;
+        k_spin_unlock(&vit_lock, key);
+
+        struct hpi_sample_frame f = {
+            .channel = HPI_CH_VITALS,
+            .sample_rate = 1,
+            .sample_count = 1,
+            .t_mono_us = (uint64_t)now * 1000ULL,
+            .len = sizeof(v),
+            .payload = &v,
+        };
+        (void)hpi_bus_publish(&f);
     }
 
-    g_vitals.temp_c_x100 = hpi_temp_c_x100();
-    g_vitals.rr_bpm = hpi_resp_rate_bpm();
+    /* Come back once, when the freshest-expiring input ages out. */
+    int64_t next = hpi_vit_next_expiry(&in, now);
 
-    /* HRV comes from the ECG beat series, so it dies with the ECG HR. */
-    if (!ecg_ok) {
-        g_vitals.hrv_sdnn_ms = 0U;
-        g_vitals.hrv_rmssd_ms = 0U;
-        g_vitals.hrv_lf_hf_x10 = 0U;
+    if (next != HPI_VIT_NO_EXPIRY) {
+        (void)k_work_reschedule(&vitals_work, K_MSEC(next - now));
     }
+}
 
-    struct hpi_sample_frame f = {
-        .channel = HPI_CH_VITALS,
-        .sample_rate = 1,
-        .sample_count = 1,
-        .t_mono_us = (uint64_t)now * 1000ULL,
-        .len = sizeof(g_vitals),
-        .payload = &g_vitals,
-    };
-    (void)hpi_bus_publish(&f);
+/* Called from ept_recv (RPMSG workqueue): hand the evaluation off. */
+static void vitals_arrived(void)
+{
+    (void)k_work_reschedule(&vitals_work, K_NO_WAIT);
     hpi_health_alive(HPI_SUBSYS_M4_IPC);   /* M4 link heartbeat */
 }
 
 static void on_ecg_vitals(const struct hpi_ipc_ecg_vitals *v)
 {
-    hr_src.ecg_hr = v->heart_rate;
-    hr_src.ecg_at = k_uptime_get();
+    k_spinlock_key_t key = k_spin_lock(&vit_lock);
+
+    vit_in.ecg_hr = v->heart_rate;
+    vit_in.ecg_at = k_uptime_get();
     /* Passed through at full width since format 0x0300. These used to go
      * through clamp_u8(): SDNN over 255 ms occurs in healthy young adults at
      * rest and routinely in AF, and a clamped 255 could not be told apart from
      * a measured one. */
-    g_vitals.hrv_sdnn_ms  = v->hrv_sdnn;
-    g_vitals.hrv_rmssd_ms = v->hrv_rmssd;
+    vit_in.hrv_sdnn_ms  = v->hrv_sdnn;
+    vit_in.hrv_rmssd_ms = v->hrv_rmssd;
     /* The M4 reports the LF/HF ratio x10 in a uint8 and flags its validity;
      * carry it only when the frequency-domain pass actually ran. */
-    g_vitals.hrv_lf_hf_x10 = v->hrv_freq_valid ? v->hrv_lf_hf_ratio_x10 : 0U;
-    publish_vitals();
+    vit_in.hrv_lf_hf_x10 = v->hrv_freq_valid ? v->hrv_lf_hf_ratio_x10 : 0U;
+    vit_arrived = true;
+    k_spin_unlock(&vit_lock, key);
+    vitals_arrived();
 #if defined(CONFIG_HPI_ACQ_DEBUG)
     /* Throttle to ~once per window; vitals arrive at several Hz and flood the
      * console otherwise. */
@@ -178,7 +191,7 @@ static void on_ecg_vitals(const struct hpi_ipc_ecg_vitals *v)
     if (now - last_log >= HPI_VITALS_LOG_PERIOD_MS) {
         last_log = now;
         LOG_INF("vitals(ecg): HR=%u RR=%u SDNN=%u RMSSD=%u q=%u",
-                v->heart_rate, g_vitals.rr_bpm, v->hrv_sdnn, v->hrv_rmssd,
+                v->heart_rate, hpi_resp_rate_bpm(), v->hrv_sdnn, v->hrv_rmssd,
                 v->signal_quality);
     }
 #endif
@@ -186,14 +199,18 @@ static void on_ecg_vitals(const struct hpi_ipc_ecg_vitals *v)
 
 static void on_ppg_vitals(const struct hpi_ipc_ppg_vitals *v)
 {
-    g_vitals.spo2_x10 = (uint16_t)v->spo2 * 10U;
-    hr_src.ppg_hr = v->heart_rate;
-    hr_src.ppg_at = k_uptime_get();
+    k_spinlock_key_t key = k_spin_lock(&vit_lock);
+
+    vit_in.spo2_x10 = (uint16_t)v->spo2 * 10U;
+    vit_in.ppg_hr = v->heart_rate;
+    vit_in.ppg_at = k_uptime_get();
     /* The M4 already judges the signal; take its word rather than inventing a
      * second threshold here. LEAD_OFF here means "finger off the sensor". */
-    hr_src.ppg_weak = (v->flags & (HPI_PPG_FLAG_LOW_PERFUSION |
+    vit_in.ppg_weak = (v->flags & (HPI_PPG_FLAG_LOW_PERFUSION |
                                    HPI_PPG_FLAG_LEAD_OFF)) != 0U;
-    publish_vitals();   /* ECG HR still wins when it is fresh and leads are on */
+    vit_arrived = true;
+    k_spin_unlock(&vit_lock, key);
+    vitals_arrived();   /* ECG HR still wins when it is fresh and leads are on */
 #if defined(CONFIG_HPI_ACQ_DEBUG)
     /* Throttle to ~once per window (see on_ecg_vitals). */
     static int64_t last_log;
