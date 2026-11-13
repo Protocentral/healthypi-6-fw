@@ -44,8 +44,10 @@ The first public release. Nothing had shipped before it, so both cores start at
 - PPG on the TI AFE4400, 22-bit at 250 Hz. The rate has a single source of truth
   in `CONFIG_AFE4400_PRF_HZ`, which programs the AFE *and* derives the rate
   advertised on the wire, so hardware and metadata cannot drift apart.
-- ECG lead-off detection: comparators configured, electrode mask debounced and
-  published, and an ECG-derived heart rate suppressed while any electrode is off.
+- ECG lead-off detection for RA, LA and LL: comparators configured, electrode
+  mask debounced and published, and an ECG-derived heart rate suppressed while
+  any electrode is off. V1 is wired into the mask but never asserts on v5 (see
+  Known limitations).
 - Temperature (ams AS6221), motion (BMI323), fuel gauge (MAX17048) and a
   TI BQ24074 linear charger.
 
@@ -54,7 +56,11 @@ The first public release. Nothing had shipped before it, so both cores start at
   per-consumer lock-free rings and drop-on-full, so a slow consumer can never
   back-pressure acquisition.
 - Cortex-M4 as a calculations-only core over OpenAMP/RPMSG. QRS detection and
-  heart rate are live; SpO₂ and EEG band power are present but not enabled.
+  ECG heart rate are live. SpO₂ and a PPG pulse rate are computed and published,
+  but the R→SpO₂ curve is inherited and uncalibrated on this hardware. HRV
+  (SDNN/RMSSD, LF/HF) is computed by default but not yet validated against a
+  reference. EEG band power is a stub: EEG batches are received and counted,
+  not analysed.
 - HealthyLink expansion framework: provider registry, interface arbiter and a
   supervisor that quarantines a faulting module without disturbing acquisition.
 
@@ -118,9 +124,11 @@ The first public release. Nothing had shipped before it, so both cores start at
   reference oximeter on this hardware. Do not treat the value as clinical.
 - **HRV** (SDNN/RMSSD, LF/HF) is computed, but has not been validated against a
   known RR series.
-- **Lead-off** detects RA, LA and LL. **V1 is not detected** — a board-level
-  fault, not a firmware one. The comparator threshold has not been checked on a
-  body.
+- **Lead-off** detects RA, LA and LL. **V1 is not detected on v5** — its bit
+  in the lead-off mask never asserts, so the absence of a V1 lead-off warning
+  does not mean the V1 electrode is attached. This is a board-level limitation,
+  not a firmware one, and 1.0.0 ships with it. The comparator threshold has not been
+  checked on a body.
 - **EEG and NPU expansion modules** are experimental. The NPU link works; the
   inference path is a stub on the module side, and the module's firmware lives
   in the separate `Protocentral/healthylink-compute-fw` repository.
