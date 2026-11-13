@@ -72,8 +72,10 @@ USB. To run your own builds, re-key the unit:
 
 1. Generate a key: `imgtool keygen -k my_key.pem -t ecdsa-p256`.
 2. Build and program it over SWD:
-   `HP6_SIGNING_KEY=/abs/path/my_key.pem scripts/release.sh --own-key && scripts/flash.sh factory`.
+   `HP6_SIGNING_KEY=/abs/path/my_key.pem scripts/release.sh --own-key --no-hw-gate && scripts/flash.sh factory`.
    This replaces the bootloader too, so its embedded public key becomes yours.
+   (`--no-hw-gate` because the unit is not running your build yet. Once it is,
+   gate later bundles with `--port <CDC1>`.)
    v1 does not lock the debug port, so this always works.
 3. From then on, update the unit over USB with your own bundles:
    `healthypi fw update --bundle … --pubkey my_key.pem`.

@@ -127,8 +127,9 @@ Leads III, aVR, aVL and aVF are derived, not transmitted: `III = II − I`,
 
 `lead_off` names **electrodes** (debounced ~100 ms), not AFE channels. A set
 bit means the trace on that lead is a floating-input artefact, not a signal.
-**It is always 0 in firmware 1.0.0**, where the lead-off comparators were never
-enabled — treat a 0 from a 1.0.0 recording as "unknown", not "all on".
+In firmware 1.0.0 RA, LA and LL are detected. **Bit 3 (V1) is never set on
+v5 hardware**, a board-level limitation, so a clear V1 bit means "unknown",
+not "attached".
 
 ### PPG — 12 bytes
 
