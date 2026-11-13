@@ -20,6 +20,7 @@ import pytest
 
 from healthypi import testing
 from healthypi.testing.suite import (
+    REQ_ESPFW,
     REQ_SD,
     REQ_SIGNED,
     REQ_UNLOCK,
@@ -35,10 +36,18 @@ from healthypi.testing.suite import (
 
 def test_cases_are_registered():
     reg = testing.registry()
-    assert len(reg) >= 15
     names = {c.name for c in reg}
     assert "os/echo" in names
     assert "device_info" in names
+    assert {"espfw_status", "espfw rejects a bad signature"} <= names
+
+
+def test_case_counts_match_the_docs():
+    """`healthypi test list` prints these; tools/healthypi/README.md quotes them.
+    Adding a case means updating both, on purpose."""
+    reg = testing.registry()
+    assert len(reg) == 23
+    assert sum(c.destructive for c in reg) == 5
 
 
 def test_case_names_are_unique():
@@ -95,6 +104,10 @@ def test_state_changing_cases_require_unlock():
         (Capabilities(sd_present=True), (REQ_SD,), None),
         (Capabilities(sd_present=False), (REQ_SD,), "SD card"),
         (Capabilities(unlocked=True, sd_present=False), (REQ_UNLOCK, REQ_SD), "SD card"),
+        (Capabilities(espfw=True), (REQ_ESPFW,), None),
+        (Capabilities(espfw=False), (REQ_ESPFW,), "ESP32-C6 update commands"),
+        # unsigned is the reason given first: it is the more fundamental one
+        (Capabilities(), (REQ_SIGNED, REQ_ESPFW), "signed build"),
     ],
 )
 def test_unmet_requirements_are_named(caps, requires, expected):

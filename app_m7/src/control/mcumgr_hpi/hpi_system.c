@@ -11,6 +11,7 @@
 
 #include "hpi_mgmt_group.h"
 #include "platform/ipc.h"
+#include "services/connectivity/healthybridge_service.h"
 
 #include <string.h>
 
@@ -80,10 +81,12 @@ int hpi_system_device_info(struct smp_streamer *ctxt)
 	const char *m7fw  = APP_VERSION_STRING;
 	/* Reported by the M4 over IPC at bind; empty until it has. */
 	const char *m4fw  = hpi_ipc_m4_version();
-	/* TODO(D6): needs a HealthyBridge info field, which is the ESP->M7
-	 * direction -- blocked on the dead MISO return path. Empty string keeps
-	 * the response well-formed. */
-	const char *espfw = "";
+	/* From the connectivity service's cache (HealthyBridge GET_VERSION,
+	 * fetched when the link comes up) -- never a UART round-trip here. ""
+	 * while the C6 is in reset, has not answered, or predates the command. */
+	char espfw[32];
+
+	(void)hpi_connectivity_esp_version(espfw, sizeof(espfw));
 	const char *board_rev = hpi_board_rev();
 
 	uint32_t uptime_s = k_uptime_get_32() / 1000U;
@@ -105,19 +108,22 @@ int hpi_system_device_info(struct smp_streamer *ctxt)
 	return MGMT_ERR_EOK;
 }
 
-/* hpi/fw_versions (cmd 0x0031) -- M7 from the build; M4/ESP32/module
- * strings populate from IPC / HealthyBridge / EEPROM in later phases. Empty
- * strings keep the schema stable until then. */
+/* hpi/fw_versions (cmd 0x0031) -- M7 from the build, M4 from IPC, ESP32-C6
+ * from the connectivity service's cache. Module strings are empty until the
+ * HealthyLink contract carries a version; empty strings keep the schema
+ * stable. */
 int hpi_system_fw_versions(struct smp_streamer *ctxt)
 {
 	zcbor_state_t *zse = ctxt->writer->zs;
 
 	const char *m7fw  = APP_VERSION_STRING;
 	const char *m4fw  = hpi_ipc_m4_version();
-	/* TODO(D6): espfw needs a HealthyBridge info field (ESP->M7), blocked on
-	 * the dead MISO return path. mod_a/mod_b need a version field in the
-	 * HealthyLink module contract, which does not exist yet. */
-	const char *espfw = "";
+	/* Cached; "" while the C6 is in reset or has not answered (see
+	 * hpi_connectivity_esp_version()). mod_a/mod_b need a version field in
+	 * the HealthyLink module contract, which does not exist yet. */
+	char espfw[32];
+
+	(void)hpi_connectivity_esp_version(espfw, sizeof(espfw));
 	const char *mod_a = "";
 	const char *mod_b = "";
 

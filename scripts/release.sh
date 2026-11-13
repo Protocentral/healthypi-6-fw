@@ -8,6 +8,7 @@
 #   HP6_SIGNING_KEY=/abs/my_key.pem scripts/release.sh --port <CDC1> --own-key
 #                                             (a re-keyed unit)
 #   scripts/release.sh --no-hw-gate           no unit attached: NOT hardware-gated
+#   scripts/release.sh --port <CDC1> --no-esp32   a bundle that CANNOT update the C6
 #
 # Hardware gate: --port <CDC1> (or HP6_RELEASE_PORT=<CDC1>) runs the group-64
 # acceptance suite (`healthypi test run`, read-only cases) against the attached
@@ -21,6 +22,12 @@
 #   m7s/                       the sysbuild tree (MCUboot + signed app)
 #   hpi6-firmware-<version>.zip  the bundle a customer or Studio applies
 #   hw-gate.json               the suite report the bundle was gated on
+#
+# The ESP32-C6 app image is REQUIRED and is not built here: it comes from the
+# healthybridge-esp32 repo (beside this one, or $HEALTHYBRIDGE_DIR), built
+# there with `./hp6.sh build`, which leaves build.hp6/healthybridge_esp32c6.bin.
+# It is checked (target, HP6 profile, OTA receiver, not stale) and signed into
+# the bundle with the same key as the M4 image.
 #
 # This is the ONLY supported way to produce firmware for a unit that leaves the
 # building. It exists because "which build ships" was previously undefined: the
@@ -49,7 +56,7 @@ while [ $# -gt 0 ]; do
         --port)           [ $# -ge 2 ] || { echo "--port needs a CDC1 device" >&2; exit 1; }
                           HW_PORT="$2"; shift ;;
         --port=*)         HW_PORT="${1#--port=}" ;;
-        -h|--help)        sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)        awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option $1" >&2; exit 1 ;;
     esac
     shift
@@ -92,9 +99,81 @@ if [ "$HP6_SIGNING_KEY" = "$HPI_ROOT/keys/hp6_dev_ec256.pem" ]; then
     echo "  ⚠️  DEV KEY. Units signed with it accept updates signed only with the"
     echo "     same key. A real release passes HP6_SIGNING_KEY=/abs/path."
 fi
+
+# --- 0. the ESP32-C6 image (checked first: it fails in a second, the builds
+#        below take minutes) ---------------------------------------------------
+#
+# Required since the C6 is updated through the M7 (group-64 espfw_*): a bundle
+# without it leaves every unit's C6 on whatever it shipped with. Not built
+# here -- the C6 is its own repo with its own toolchain (ESP-IDF), and a release
+# must not depend on which ESP-IDF this shell happens to have sourced -- but
+# checked hard, because a wrong image is refused only on the device, after the
+# transfer, or worse is accepted by the M7 and then refused by the C6.
+#
+# Everything is read from ESP-IDF's own build metadata rather than guessed: the
+# .bin name is per-target, and a guessed "healthybridge.bin" once left the image
+# silently out of every bundle.
+c6_image() {   # <healthybridge dir> -> path of the HP6 (esp32c6) app image
+    python3 - "$1" <<'PY'
+import json, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+fix = f"Build it there:  (cd {repo} && ./hp6.sh build)"
+desc = repo / "build.hp6" / "project_description.json"
+if not desc.is_file():
+    sys.exit(f"no HealthyPi 6 build of the C6 firmware in {repo}/build.hp6. {fix}")
+d = json.loads(desc.read_text())
+if d.get("target") != "esp32c6":
+    sys.exit(f"{repo}/build.hp6 was built for {d.get('target')!r}, not esp32c6 -- "
+             f"wrong target. Rebuild:  (cd {repo} && ./hp6.sh clean && ./hp6.sh build)")
+cfg = pathlib.Path(d["build_dir"]) / "config" / "sdkconfig.json"
+k = json.loads(cfg.read_text()) if cfg.is_file() else {}
+if not k.get("HB_PROFILE_HP6"):
+    sys.exit(f"{repo}/build.hp6 is not the HealthyPi 6 profile (CONFIG_HB_PROFILE_HP6 "
+             f"unset in {cfg}) -- wrong profile. Rebuild:  (cd {repo} && ./hp6.sh "
+             "clean && ./hp6.sh build)")
+if not k.get("HB_OTA_RECEIVER"):
+    sys.exit(f"{repo}/build.hp6 has no firmware-update receiver (CONFIG_HB_OTA_RECEIVER "
+             "unset): a unit given this image could never be updated over USB again. "
+             "Use a healthybridge-esp32 with the HP6 OTA receiver.")
+img = pathlib.Path(d["build_dir"]) / d["app_bin"]
+if not img.is_file():
+    sys.exit(f"{img} is missing. {fix}")
+want = (repo / "version.txt").read_text().strip() if (repo / "version.txt").is_file() else ""
+built = d.get("project_version", "")
+if want and built != want:
+    sys.exit(f"{img} is stale: built as {built}, but {repo}/version.txt says {want}. {fix}")
+print(img)
+PY
+}
+ESP_BIN=""
+if [ "$SKIP_ESP32" = 1 ]; then
+    echo ""
+    echo "  ⚠️  --no-esp32: this bundle will carry NO ESP32-C6 image. It cannot"
+    echo "     update the C6 -- every unit keeps the C6 firmware it already has."
+else
+    if ! hb="$(hpi_find_healthybridge)"; then
+        echo ""
+        echo "❌ the release needs the ESP32-C6 app image (above: where to get the repo)."
+        echo "   Or, deliberately without it: scripts/release.sh --no-esp32"
+        exit 1
+    fi
+    if ! ESP_BIN="$(c6_image "$hb")"; then
+        echo ""
+        echo "❌ no usable ESP32-C6 app image (above). Or, deliberately without it:"
+        echo "   scripts/release.sh --no-esp32"
+        exit 1
+    fi
+    ESP_REV="$(git -C "$hb" describe --always --dirty 2>/dev/null || echo unknown)"
+    echo "  C6 $ESP_BIN"
+    echo "     healthybridge-esp32 @ $ESP_REV"
+    case "$ESP_REV" in
+        *-dirty) echo "  ⚠️  healthybridge-esp32 has uncommitted changes: this C6 image is"
+                 echo "     not reproducible from any commit." ;;
+    esac
+fi
 echo ""
 
-# --- 0. hardware gate --------------------------------------------------------
+# --- 0b. hardware gate --------------------------------------------------------
 # The group-64 acceptance suite against the attached unit, read-only cases only.
 # The verdict is the CLI's exit code (0 = no FAIL, 1 = at least one FAIL, other
 # = the suite could not run); its --json report is kept next to the bundle and
@@ -161,43 +240,6 @@ fi
 FLAVOR=prod HPI_SIGNED_OUT="$M7S" "$HPI_ROOT/scripts/build.sh" signed prod
 "$HPI_ROOT/scripts/build.sh" m4
 
-# The C6 image is OPTIONAL in a bundle. Nothing applies it yet -- `fw update`
-# skips the C6, and the C6 has no OTA slots until its A/B partition table lands
-# -- so a missing ESP-IDF must not take the whole release down. Carry it when it
-# builds, and say loudly when it does not.
-#
-# The image's file name is read from ESP-IDF's own build metadata rather than
-# guessed: the project name (and so the .bin name) is per-target, and a guessed
-# "healthybridge.bin" never existed, so the image was silently left out of
-# every bundle.
-c6_image() {   # <healthybridge dir> -> path of the HP6 (esp32c6) app image
-    python3 - "$1/build.hp6/project_description.json" <<'PY'
-import json, pathlib, sys
-desc = pathlib.Path(sys.argv[1])
-d = json.loads(desc.read_text())
-if d.get("target") != "esp32c6":
-    sys.exit(f"build.hp6 was built for {d.get('target')!r}, not esp32c6")
-img = pathlib.Path(d["build_dir"]) / d["app_bin"]
-if not img.is_file():
-    sys.exit(f"{img} is missing")
-print(img)
-PY
-}
-if [ "$SKIP_ESP32" = 0 ]; then
-    if hb="$(hpi_find_healthybridge 2>/dev/null)"; then
-        if ( cd "$hb" && ./hp6.sh build ); then
-            if ! ESP_BIN="$(c6_image "$hb")"; then
-                ESP_BIN=""
-                echo "⚠️  ESP32-C6 built, but its image could not be located (above)."
-            fi
-        else
-            echo "⚠️  ESP32-C6 build failed (ESP-IDF not sourced?)."
-        fi
-    else
-        echo "ℹ️  HealthyBridge repo not found."
-    fi
-fi
-
 # --- 2. gate ----------------------------------------------------------------
 echo ""
 echo "--- shippability check ---"
@@ -224,12 +266,10 @@ BUNDLE_ARGS=(
     --release "$M7_VER" --hw-rev v5
     --key "$HP6_SIGNING_KEY" --created "$CREATED"
 )
-if [ -n "${ESP_BIN:-}" ]; then
-    echo "  esp32c6: $ESP_BIN"
+if [ -n "$ESP_BIN" ]; then
+    # The version comes from the image's own app descriptor, which is what the
+    # C6 reports once it runs it; bundle create also re-checks chip and project.
     BUNDLE_ARGS+=(--esp32c6 "$ESP_BIN")
-elif [ "$SKIP_ESP32" = 0 ]; then
-    echo "⚠️  This bundle carries NO ESP32-C6 image. Source ESP-IDF's export.sh"
-    echo "   and re-run, or pass --no-esp32 if that is intentional."
 fi
 healthypi fw bundle create "${BUNDLE_ARGS[@]}"
 
@@ -258,6 +298,9 @@ elif [ "$HP6_SIGNING_KEY" != "$HPI_ROOT/keys/hp6_dev_ec256.pem" ]; then
 fi
 
 echo ""
+if [ "$SKIP_ESP32" = 1 ]; then
+    echo "⚠️  built with --no-esp32: this bundle CANNOT update the ESP32-C6."
+fi
 if [ "$NO_HW_GATE" = 1 ]; then
     echo "⚠️  NOT HARDWARE-GATED (--no-hw-gate): the acceptance suite was not run."
     echo "✅ release built (ungated): $BUNDLE"

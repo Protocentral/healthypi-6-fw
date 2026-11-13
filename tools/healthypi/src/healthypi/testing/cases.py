@@ -18,7 +18,7 @@ import asyncio
 import time
 
 from ..smp import catalog
-from .suite import REQ_SD, REQ_SIGNED, REQ_UNLOCK, case, fail, ok, skip
+from .suite import REQ_ESPFW, REQ_SD, REQ_SIGNED, REQ_UNLOCK, case, fail, ok, skip
 
 
 def _err(name, resp, fmt_error, what):
@@ -444,6 +444,76 @@ async def m4fw_bad_digest(conn, g, is_error, fmt_error):
                     "COMMIT ACCEPTED an image whose digest cannot match -- "
                     "bank 2 may have been written with corrupt firmware")
     return ok("m4fw rejects a bad digest", "commit refused, bank 2 untouched")
+
+
+@case("espfw_status", group="fw", requires=(REQ_SIGNED, REQ_ESPFW))
+async def espfw_status(conn, g, is_error, fmt_error):
+    """The ESP32-C6 update service's state, read only (answered from the M7's
+    cache; it never touches the C6). Checks the reply is self-consistent --
+    the derived flags agree with `img`, every code has a name -- because a host
+    decides whether it may reset the device from `busy`."""
+    s = await conn.request(g.espfw_status())
+    if is_error(s):
+        return _err("espfw_status", s, fmt_error, "refused")
+    if s.st not in catalog.ESPFW_STATES:
+        return fail("espfw_status", f"unknown session state {s.st}")
+    if s.err not in catalog.ESPFW_ERRORS:
+        return fail("espfw_status", f"unknown err {s.err}")
+    if s.valid != (s.img == 0) or s.pend != (s.img == 1):
+        return fail("espfw_status", f"valid/pend ({s.valid}/{s.pend}) disagree with img {s.img}")
+    if s.pend and not s.busy:
+        return fail("espfw_status", "image pending verification but busy is false -- "
+                                    "a host would reset and roll it back")
+    if 1 <= s.st <= 5 and not s.busy:
+        return fail("espfw_status", f"session {catalog.ESPFW_STATES[s.st]} but not busy")
+    return ok("espfw_status",
+              f"st={catalog.ESPFW_STATES[s.st]} err={catalog.ESPFW_ERRORS[s.err]} "
+              f"c6={s.ver or '-'} slot={s.slot} busy={s.busy}")
+
+
+@case("espfw rejects a bad signature", group="fw",
+      requires=(REQ_SIGNED, REQ_ESPFW, REQ_UNLOCK), destructive=True)
+async def espfw_bad_signature(conn, g, is_error, fmt_error):
+    """The C6 has no signature check of its own, so this refusal is the whole of
+    its protection: espfw_begin with a signature that cannot verify must answer
+    268, send nothing to the C6, and leave the service not busy.
+
+    Destructive only in that it records a failed session (st 8 / err 1), which
+    the case then clears with espfw_abort; the C6 is never powered by it.
+    """
+    name = "espfw rejects a bad signature"
+    before = await conn.request(g.espfw_status())
+    if is_error(before):
+        return _err(name, before, fmt_error, "status refused")
+    if before.busy:
+        return skip(name, "an ESP32-C6 update is active (busy); not interfering")
+    link0 = await conn.request(g.conn_status())
+
+    digest = bytes(range(32))
+    begin = await conn.request(g.espfw_begin(len=4096, sha=digest, sig=b"\x01" * 64))
+    if not is_error(begin):
+        await conn.request(g.espfw_abort())
+        return fail(name, "espfw_begin ACCEPTED a signature that cannot verify -- the "
+                          "C6 would have been sent an unauthenticated image")
+    if not _is_err(begin, catalog.GROUP_ID, 268):
+        return fail(name, f"refused, but not with 268 IMAGE_INVALID: {fmt_error(begin)}")
+
+    after = await conn.request(g.espfw_status())
+    await conn.request(g.espfw_abort())     # clear the failed session's result
+    if is_error(after):
+        return _err(name, after, fmt_error, "status after refusal")
+    if after.busy:
+        return fail(name, f"busy after a refused begin (st={after.st}) -- resets "
+                          "would now be blocked")
+    if after.st not in (0, 8) or (after.st == 8 and after.err != 1):
+        return fail(name, f"state after refusal is st={after.st} err={after.err}, "
+                          "expected idle or failed with SIG_INVALID")
+    link1 = await conn.request(g.conn_status())
+    if (not is_error(link0) and not is_error(link1)
+            and link0.link == 0 and link1.link != 0):
+        return fail(name, "a refused signature powered the C6 -- the check must come "
+                          "before anything is sent")
+    return ok(name, f"268, nothing sent; st={after.st} err={after.err}, not busy")
 
 
 @case("recovery availability", group="fw")

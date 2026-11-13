@@ -60,6 +60,8 @@ extern "C" {
 #define HPI_HB_MSG_TYPE_CONTROL_RESP   0x51    /* Control response (ESP32 → M7) */
 #define HPI_HB_MSG_TYPE_STATUS_REQ     0x60    /* Status request (M7 → ESP32) */
 #define HPI_HB_MSG_TYPE_STATUS_RESP    0x61    /* Status response (ESP32 → M7) */
+#define HPI_HB_MSG_TYPE_OTA_REQ        0x80    /* C6 firmware-update request (= HB_TYPE_OTA_REQ) */
+#define HPI_HB_MSG_TYPE_OTA_RSP        0x81    /* C6 firmware-update reply   (= HB_TYPE_OTA_RSP) */
 
 /* Frame Flags (bitfield) */
 #define HPI_HB_FLAG_COMPRESSED     (1 << 0)    /* Payload is compressed */
@@ -160,20 +162,53 @@ struct hpi_hb_ppg_payload {
     struct hpi_ppg_sample samples[];  /* PPG sample pairs */
 } __attribute__((packed));
 
+/*
+ * Compile-time size check usable from both Zephyr and the host-compiled codec
+ * test (BUILD_ASSERT is Zephyr-only; this is what it expands to in C11).
+ */
+#ifdef __cplusplus
+#define HPI_HB_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define HPI_HB_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
 /**
- * @brief Vitals payload (TYPE = 0x40)
+ * @brief Vitals payload (TYPE = 0x40), M7 -> C6, ~1 Hz.
  *
- * Computed vital signs transmitted at low rate (~1 Hz).
+ * Exactly the 16 bytes of the M7's canonical `struct hp6_vitals`
+ * (app_m7/src/core/sample_formats.h) -- the same record that rides the sample
+ * bus, the .HP6 recording and the USB stream -- sent as-is: no scaling, no
+ * clamping, flags copied. A driver must not include app headers, so the layout
+ * is mirrored here; the connectivity service asserts the two sizes agree.
+ *
+ * Must equal the ESP side's `struct hb_vitals_payload_hp6` byte for byte. The
+ * C6 rejects a payload shorter than 16 bytes (including the 12-byte
+ * {timestamp, u8 rates, temp x10, flags} form used before HealthyBridge 1.1.0)
+ * and ignores bytes beyond 16, so fields may only ever be APPENDED.
+ *
+ * A zero in any measurement field means "not available", never a measured 0.
  */
 struct hpi_hb_vitals_payload {
-    uint32_t timestamp_ms;      /* M7 uptime */
-    uint8_t heart_rate_bpm;     /* Heart rate (0-255 BPM) */
-    uint8_t spo2_percent;       /* SpO2 (0-100 %) */
-    uint8_t resp_rate_bpm;      /* Respiration rate (0-255 breaths/min) */
-    uint8_t reserved;
-    int16_t temp_celsius_x10;   /* Temperature * 10 (e.g., 372 = 37.2°C) */
-    uint16_t status_flags;      /* Validity flags for each vital */
+    uint16_t hr_bpm;            /* beats/min; source sensor is HPI_HB_VIT_HR_FROM_PPG */
+    uint16_t spo2_x10;          /* SpO2 % x10 (985 = 98.5 %) */
+    uint16_t rr_bpm;            /* respiration rate, breaths/min */
+    int16_t  temp_c_x100;       /* temperature, degC x100, signed */
+    uint16_t hrv_sdnn_ms;       /* SDNN, ms */
+    uint16_t hrv_rmssd_ms;      /* RMSSD, ms */
+    uint16_t hrv_lf_hf_x10;     /* LF/HF ratio x10 */
+    uint8_t  flags;             /* HPI_HB_VIT_* (= HP6_VIT_*) */
+    uint8_t  reserved;          /* 0 */
 } __attribute__((packed));
+
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_vitals_payload) == 16,
+                     "HealthyBridge vitals payload must be exactly 16 bytes");
+
+/* hpi_hb_vitals_payload.flags -- numerically identical to the M7's HP6_VIT_*
+ * and the ESP's HB_VIT_*. */
+#define HPI_HB_VIT_HR_FROM_PPG   0x01  /* hr_bpm is a PPG pulse rate, not ECG */
+#define HPI_HB_VIT_ECG_LEAD_OFF  0x02  /* >=1 ECG electrode off */
+#define HPI_HB_VIT_PPG_WEAK      0x04  /* SpO2 / PPG rate provisional */
+#define HPI_HB_VIT_MOTION        0x08  /* board is moving */
 
 /**
  * @brief HRV payload (TYPE = 0x41)
@@ -227,6 +262,10 @@ struct hpi_hb_control_cmd {
 #define HPI_HB_CMD_WIFI_DISABLE         0x21  /* = HB_CMD_WIFI_DISABLE (stop STA / AP) */
 #define HPI_HB_CMD_WIFI_SOFTAP          0x22  /* = HB_CMD_WIFI_SOFTAP  (captive portal) */
 #define HPI_HB_CMD_GET_STATUS           0x30  /* = HB_CMD_GET_STATUS -> HB_TYPE_STATUS reply */
+/* = HB_CMD_GET_VERSION -> CONTROL_RESP, data = struct hpi_hb_version_resp
+ * (36 B). Added in HealthyBridge 1.1.0: an older C6 image answers with a bare
+ * HPI_HB_RESP_ERROR ack, and an HP5-profile image does not answer at all. */
+#define HPI_HB_CMD_GET_VERSION          0x31
 
 /*
  * Any command not listed above is NOT IMPLEMENTED by the external ESP firmware
@@ -298,15 +337,23 @@ struct hpi_hb_mqtt_status_resp {
 } __attribute__((packed));
 
 /**
- * @brief Version response data
+ * @brief Version response data -- the CONTROL_RESP data[] answering
+ *        HPI_HB_CMD_GET_VERSION (0x31).
+ *
+ * Must equal the ESP side's `struct hb_version_resp_hp6` byte for byte.
+ * major/minor/patch are parsed by the C6 from the leading "MAJOR.MINOR.PATCH"
+ * of version_string (all 0 if it does not start that way).
  */
 struct hpi_hb_version_resp {
     uint8_t major;
     uint8_t minor;
     uint8_t patch;
     uint8_t reserved;
-    char version_string[32];    /* Human-readable version */
+    char version_string[32];    /* image version, NUL-terminated, zero-padded */
 } __attribute__((packed));
+
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_version_resp) == 36,
+                     "HealthyBridge version reply must be exactly 36 bytes");
 
 /**
  * @brief Control response payload (TYPE = 0x51)
@@ -342,6 +389,136 @@ struct hpi_hb_status_resp {
     uint16_t frames_received;   /* Total frames received since boot */
     uint16_t frames_dropped;    /* Frames dropped due to errors */
 } __attribute__((packed));
+
+/*
+ * ---- Firmware update (types 0x80 / 0x81) ---------------------------------
+ *
+ * The M7 relays a new ESP32-C6 application image, received from the host PC,
+ * into the C6's INACTIVE OTA slot. Mirrors the ESP side's healthybridge_hp6.h
+ * (struct hb_ota_*_hp6, HB_OTA_*) byte for byte; the contract, timing table and
+ * example frames are docs/PROTOCOL.md "Firmware update (0x80 / 0x81)" in the
+ * healthybridge-esp32 repository, and test_codec.c pins the golden frames.
+ *
+ * Trust is split: the M7 verifies the release signature (ECDSA-P256 over the
+ * image's SHA-256) before it ever sends COMMIT; the C6 checks that the SHA-256
+ * of what is actually in flash equals the digest announced at BEGIN, runs
+ * esp_ota_end() validation, and switches its boot slot only on a COMMIT that
+ * passes all of that.
+ *
+ * Stop-and-wait: one request outstanding. A reply answers the request with the
+ * same op and, for DATA, the same req_offset; anything else is stale.
+ */
+#define HPI_HB_OTA_PROTO_VERSION   1
+
+/* Request ops (hpi_hb_ota_req.op, echoed in hpi_hb_ota_rsp.op). */
+#define HPI_HB_OTA_OP_BEGIN        0x01   /* params: struct hpi_hb_ota_begin (36 B) */
+#define HPI_HB_OTA_OP_DATA         0x02   /* params: u32 offset + 1..1016 bytes     */
+#define HPI_HB_OTA_OP_COMMIT       0x03   /* no params; NEVER resent (poll STATUS)  */
+#define HPI_HB_OTA_OP_ABORT        0x04   /* no params; always safe before COMMIT   */
+#define HPI_HB_OTA_OP_STATUS       0x05   /* no params; answered immediately        */
+
+/* Most image bytes one DATA frame carries: the C6 codec's 1024-byte payload cap
+ * minus the 4-byte request header and the 4-byte offset. */
+#define HPI_HB_OTA_MAX_CHUNK       1016
+
+/* Reply status (hpi_hb_ota_rsp.status, and hpi_hb_ota_status.last_error). Own
+ * namespace: unrelated to HPI_HB_RESP_*. "Terminal" = the C6 has ended the
+ * transfer; a new BEGIN starts over. */
+#define HPI_HB_OTA_OK                    0x00
+#define HPI_HB_OTA_ERR_BUSY              0x01  /* different image active, or after COMMIT */
+#define HPI_HB_OTA_ERR_BAD_SIZE          0x02  /* BEGIN size 0 / > slot; DATA past size   */
+#define HPI_HB_OTA_ERR_BAD_OFFSET        0x03  /* DATA offset != ack.next_offset          */
+#define HPI_HB_OTA_ERR_FLASH_WRITE       0x04  /* terminal */
+#define HPI_HB_OTA_ERR_DIGEST_MISMATCH   0x05  /* terminal */
+#define HPI_HB_OTA_ERR_IMAGE_INVALID     0x06  /* terminal: magic, esp_ota_end, project   */
+#define HPI_HB_OTA_ERR_NOT_IN_TRANSFER   0x07  /* DATA / COMMIT with no active transfer   */
+#define HPI_HB_OTA_ERR_RUNNING_UNCONFIRMED 0x08 /* BEGIN while running image is pending   */
+#define HPI_HB_OTA_ERR_INCOMPLETE        0x09  /* COMMIT before image_size bytes          */
+#define HPI_HB_OTA_ERR_FLASH_READ        0x0A  /* terminal */
+#define HPI_HB_OTA_ERR_BOOT_SET          0x0B  /* terminal, boot slot unchanged           */
+#define HPI_HB_OTA_ERR_BAD_REQUEST       0x0C  /* malformed request                       */
+#define HPI_HB_OTA_ERR_UNKNOWN_OP        0x0D
+#define HPI_HB_OTA_ERR_TIMEOUT           0x0E  /* last_error only: 30 s inactivity        */
+#define HPI_HB_OTA_ERR_NO_SLOT           0x0F  /* no inactive OTA partition               */
+#define HPI_HB_OTA_ERR_INTERNAL          0x10  /* esp_ota_begin failed                    */
+#define HPI_HB_OTA_ERR_ABORTED           0x11  /* last_error only: an ABORT ended it      */
+
+/* Receiver state (hpi_hb_ota_status.state). */
+#define HPI_HB_OTA_STATE_IDLE        0
+#define HPI_HB_OTA_STATE_RECEIVING   1
+#define HPI_HB_OTA_STATE_VERIFYING   2   /* COMMIT in progress */
+#define HPI_HB_OTA_STATE_COMMITTED   3   /* boot slot switched; restarting */
+#define HPI_HB_OTA_STATE_ERROR       4   /* idle; last transfer failed (see last_error) */
+
+/* Image state of a slot (running_img_state / other_img_state). */
+#define HPI_HB_OTA_IMG_VALID           0
+#define HPI_HB_OTA_IMG_PENDING_VERIFY  1   /* a reset of the C6 now ROLLS IT BACK */
+#define HPI_HB_OTA_IMG_NEW             2
+#define HPI_HB_OTA_IMG_INVALID         3
+#define HPI_HB_OTA_IMG_ABORTED         4
+#define HPI_HB_OTA_IMG_UNDEFINED       5
+#define HPI_HB_OTA_IMG_UNKNOWN         0xFF
+
+/** Request header (TYPE 0x80); params follow. */
+struct hpi_hb_ota_req {
+	uint8_t  op;          /* HPI_HB_OTA_OP_* */
+	uint8_t  reserved;    /* 0 */
+	uint16_t param_len;   /* = frame payload length - 4 */
+} __attribute__((packed));
+
+/** Reply header (TYPE 0x81); data follows. */
+struct hpi_hb_ota_rsp {
+	uint8_t  op;          /* echo of the request's op */
+	uint8_t  status;      /* HPI_HB_OTA_OK / HPI_HB_OTA_ERR_* */
+	uint16_t data_len;    /* 12 for every op but STATUS; 52 for STATUS */
+} __attribute__((packed));
+
+/** BEGIN params. */
+struct hpi_hb_ota_begin {
+	uint32_t image_size;  /* bytes of the .bin, as written to the slot */
+	uint8_t  sha256[32];  /* SHA-256 of exactly those bytes */
+} __attribute__((packed));
+
+/** Reply data for BEGIN / DATA / COMMIT / ABORT, whatever the status. */
+struct hpi_hb_ota_ack {
+	uint32_t req_offset;  /* DATA: the request's offset; else 0 */
+	uint32_t next_offset; /* next offset the C6 will accept; 0 with no transfer */
+	uint32_t image_size;  /* active transfer's size; 0 with no transfer */
+} __attribute__((packed));
+
+/** Reply data for STATUS. */
+struct hpi_hb_ota_status {
+	uint8_t  proto_version;     /* HPI_HB_OTA_PROTO_VERSION */
+	uint8_t  state;             /* HPI_HB_OTA_STATE_* */
+	uint8_t  last_error;        /* most recent HPI_HB_OTA_ERR_*, 0 after a good BEGIN */
+	uint8_t  running_slot;      /* 0 = ota_0, 1 = ota_1, 0xFF = other */
+	uint8_t  running_img_state; /* HPI_HB_OTA_IMG_* */
+	uint8_t  other_img_state;   /* HPI_HB_OTA_IMG_*; INVALID/ABORTED after a rollback */
+	uint16_t max_chunk;         /* HPI_HB_OTA_MAX_CHUNK */
+	uint32_t bytes_received;    /* current or last transfer */
+	uint32_t image_size;        /* current or last transfer's announced size */
+	uint32_t slot_size;         /* capacity of the inactive slot, 0 if none */
+	char     version[32];       /* running image version, NUL-terminated */
+} __attribute__((packed));
+
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_ota_req) == 4, "ota request header must be 4 bytes");
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_ota_rsp) == 4, "ota reply header must be 4 bytes");
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_ota_begin) == 36, "ota BEGIN params must be 36 bytes");
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_ota_ack) == 12, "ota ack must be 12 bytes");
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_ota_status) == 52, "ota status must be 52 bytes");
+/* A full DATA request must fit the C6's 1024-byte codec payload cap. */
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_ota_req) + sizeof(uint32_t) +
+		     HPI_HB_OTA_MAX_CHUNK == 1024, "ota DATA frame must fill the C6 cap exactly");
+
+/** A decoded OTA reply: the header plus whichever body its op carries. */
+struct hpi_hb_ota_reply {
+	uint8_t op;
+	uint8_t status;
+	union {
+		struct hpi_hb_ota_ack ack;       /* every op but STATUS */
+		struct hpi_hb_ota_status st;     /* STATUS */
+	} u;
+};
 
 /* CRC lives in healthybridge_esp32_codec.h (hpi_hb_crc16). */
 

@@ -157,7 +157,17 @@ only ever be updated over SWD, with the case open.
 scripts/flash.sh all        # M7 + M4 over SWD
 scripts/flash.sh signed     # bootloader + signed application
 scripts/flash.sh factory    # full production programming sequence
+scripts/flash.sh esp32 --full [PORT]      # ESP32-C6 over its own USB: first flash
+scripts/flash.sh esp32 --app-only [PORT]  # ESP32-C6 re-flash, keeps Wi-Fi settings
 ```
+
+The ESP32-C6 is flashed with healthybridge-esp32's `flash_hp6.sh`, from its
+`build.hp6` (`scripts/build.sh esp32`). The M7 holds the C6 in reset from boot,
+so its USB port only appears after `healthypi conn enable --radios none` (or
+`hpi link on` on the dev shell). `--full` erases the whole chip and is required
+the first time a unit gets the C6's A/B partition layout; it also erases the
+Wi-Fi credentials stored on the C6. `--app-only` keeps them and refuses a unit
+that is not on the A/B layout yet.
 
 ---
 
@@ -169,13 +179,18 @@ Each processor updates differently, because the hardware differs:
 |---|---|---|
 | **M7** | MCUboot image slot, MCUmgr over USB | MCUboot — ECDSA-P256, before boot |
 | **M4** | staged to QSPI, written to bank 2 by the M7 | the M7 — SHA-256 + ECDSA-P256 + vector-table sanity check |
-| **ESP32-C6** | its own OTA over Wi-Fi | ESP-IDF app descriptor + rollback |
+| **ESP32-C6** | relayed by the M7 over USB into the C6's spare OTA slot | the M7 — ECDSA-P256 before relaying a byte; then the C6 — image validation, and rollback unless the new image proves itself |
 
 One release key signs all of it, and a release is a single bundle:
 
 ```bash
 healthypi fw update --port <control-port> --bundle build/release/hpi6-firmware-1.0.0.zip
 ```
+
+The tool updates the M4 and the M7, resets, then updates the ESP32-C6 last — a
+reset after the C6's update but before its new image has proved itself would
+roll it back, so nothing resets the device during that window. The C6 path is
+new and **has not yet run on hardware**.
 
 If an update ever leaves a device unbootable, MCUboot's **serial recovery** takes
 over automatically: the device enumerates as a single CDC port named

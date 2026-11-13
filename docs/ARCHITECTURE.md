@@ -25,7 +25,8 @@ be updated independently of the M7.
 The ESP32-C6 firmware is **not in this repository**. It is a separate,
 dual-target project shared with HealthyPi 5:
 [`protocentral/healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32).
-`scripts/build.sh esp32` and `scripts/flash.sh esp32` delegate to it.
+`scripts/build.sh esp32` and `scripts/flash.sh esp32` delegate to it
+(see [§7](#7-the-esp32-c6-link)).
 
 ## 2. Data flow
 
@@ -177,7 +178,21 @@ UART touched no service code.
 |---|---|
 | `hp6_ecg_sample` resp/lead_i/lead_ii/v1 | `hpi_ecg_sample_multi` ch0/ch1/ch2/ch3 |
 | `hp6_ppg_sample` red/ir | `hpi_ppg_sample` red/ir |
-| `hp6_vitals` hr/spo2_x10/rr/temp_c_x100 | vitals payload hr/spo2/resp/temp_x10 |
+| `hp6_vitals` (all 16 bytes) | vitals payload `0x40` — the same record, verbatim |
+
+The vitals frame carries the canonical `hp6_vitals` record unchanged — HR,
+SpO₂ ×10, RR, temperature ×100, SDNN, RMSSD, LF/HF ×10 and the `HP6_VIT_*`
+flags — with no scaling, clamping or timestamp, so the co-processor can tell an
+ECG heart rate from a PPG pulse rate (`HR_FROM_PPG`) and show lead-off, weak-PPG
+and motion. This layout is HealthyBridge **1.1.0**: the C6 rejects the 12-byte
+payload older M7 images sent, and an older C6 cannot read this one, so the M7
+and the C6 must be updated together.
+
+The C6 reports its firmware version over the link (control command `0x31`
+GET_VERSION). The connectivity service asks once the link comes up, caches the
+answer and drops it whenever the C6 is powered down, faults or restarts; group-64
+`device_info` / `fw_versions` report it as `espfw`, which is empty while the C6
+is held in reset, before it has answered, or when its firmware predates 1.1.0.
 
 ### Control
 
@@ -197,6 +212,19 @@ reports "not ready" and the service stays idle. Build with
 | `0x0075` | `conn_enable` | write | `{radios}` — power the C6 and start radios (bit0 WiFi, bit1 BLE) |
 | `0x0076` | `conn_disable` | write | radios down, C6 back into reset |
 | `0x0077` | `conn_status` | read | `{link, radios, state, rssi, ssid, ip, ble_adv, ble_conn}` |
+
+A C6 restart the M7 did not cause — a panic, its watchdog, the restart after a
+firmware update — is detected from the C6's frame sequence number running
+backwards. The connectivity service then drops the cached version **and
+re-sends the radio state that was requested**: the C6 comes up with both radios
+off on every boot, so without that a unit streaming over Wi-Fi went silent until
+someone toggled the radio.
+
+When the link is up and the M7 has sent nothing for 5 s it sends one real
+`GET_STATUS` (a **keepalive**; the 2 s status poll is otherwise answered from a
+cache of the C6's own push and never reaches the wire). A freshly updated C6
+image keeps its slot only after it hears from the host, so the link must never
+be silent for long.
 
 ### Radios are off at boot
 
@@ -233,8 +261,22 @@ because a C6 held in reset cannot be flashed over its own USB port.
 
 The ESP32-C6 firmware is **not in this repository**. It lives in
 [`protocentral/healthybridge-esp32`](https://github.com/protocentral/healthybridge-esp32),
-a dual-target project shared with HealthyPi 5. `scripts/build.sh esp32` and
-`scripts/flash.sh esp32` delegate to it.
+a dual-target project shared with HealthyPi 5. `scripts/build.sh esp32` builds
+it (`hp6.sh`); `scripts/flash.sh esp32` flashes that build over the C6's own USB
+port with its `flash_hp6.sh` — bench and factory. The C6 uses an A/B OTA
+partition layout, so the mode is explicit: `--full` erases the whole chip and
+writes the merged image — the first flash of every unit, the only way onto the
+A/B table, and it erases the Wi-Fi credentials stored on the C6 — while
+`--app-only` rewrites the app and keeps them. Because the M7 holds the C6 in
+reset from boot, its USB port only enumerates after `healthypi conn enable
+--radios none` (or `hpi link on` on the dev shell).
+
+In the field the C6 is updated **through the M7**, over this link: group-64
+`espfw_*` (`0x00A6`–`0x00AA`) hands the image to
+`services/esp32_update_service.c`, which relays it in HealthyBridge frames
+`0x80`/`0x81` into the C6's inactive OTA slot. See
+[§9](#9-firmware-update-and-recovery). **This path has not yet run on
+hardware.**
 
 **The baud must match at both ends** — M7 `&uart4 current-speed` and the
 co-processor's `CONFIG_HB_UART_BAUD_HP6`. A mismatch does not fail gracefully; it
@@ -279,10 +321,10 @@ their hardware genuinely differs.
 |---|---|---|---|
 | **STM32H757 M7** | application | MCUboot image 0, stock MCUmgr **img group** over USB CDC1 | **MCUboot**, ECDSA-P256, before boot |
 | **STM32H757 M4** | algorithm core | group-64 `0x00A0-0x00A4` → QSPI staging → M7 writes bank 2 | **the M7 app**: SHA-256 + ECDSA-P256 + vector-table sanity |
-| **ESP32-C6** | network coprocessor | `esptool` over its own USB-Serial/JTAG port (`scripts/flash.sh esp32`) | ESP-IDF image checks |
+| **ESP32-C6** | network coprocessor | group-64 `0x00A6-0x00AA` → the M7 relays each chunk over the HealthyBridge UART into the C6's **inactive** OTA slot (nothing staged on the M7); the C6 switches slots on COMMIT and keeps the new image only after its link self-test. **Not yet run on hardware.** Bench/factory: `esptool` over its own USB port (`scripts/flash.sh esp32 --full` / `--app-only`) | **the M7 app**: ECDSA-P256 over the image's SHA-256 (same key and verifier as the M4), checked before anything is sent, plus the relayed bytes' SHA-256 before COMMIT; then **the C6**: SHA-256 of its flash, `esp_ota_end()` validation, project name, bootloader rollback |
 
-The M7 image, the M4 image and the release manifest are signed with **one**
-ECDSA-P256 release key — see [Keys](#keys).
+The M7 image, the M4 image, the C6 image and the release manifest are signed
+with **one** ECDSA-P256 release key — see [Keys](#keys).
 
 > **Downgrade protection covers the M7's normal update path only.** MCUboot
 > enforces `MCUBOOT_DOWNGRADE_PREVENTION` when it installs from the secondary
@@ -327,7 +369,8 @@ tools/ci/check_prod_surface.sh --release build/release/m7s
 ```
 
 fails unless the image carries `BOOTLOADER_MCUBOOT`, `MCUMGR_GRP_IMG`,
-`IMG_MANAGER`, `HPI_M4_UPDATE`, `HPI_RECOVERY_MODE` and `RETENTION_BOOT_MODE`,
+`IMG_MANAGER`, `HPI_M4_UPDATE`, `HPI_ESP32_UPDATE`, `HPI_RECOVERY_MODE` and
+`RETENTION_BOOT_MODE`,
 the bootloader carries serial recovery + signing + downgrade prevention, and the
 USB VID is no longer the Zephyr development pair. `scripts/release.sh` runs it
 and refuses to produce a bundle if it fails.
@@ -358,14 +401,43 @@ One file, one command, all three processors:
 healthypi fw update --port <CDC1-port> --bundle hpi6-firmware-1.0.0.zip
 ```
 
-The tool reads the device's current versions (group-64 `hpi/fw_versions`), skips
-what is already current, and applies the rest in the order **ESP32-C6 → M4 →
-M7**. The M7 is last on purpose: it is the processor running the update logic
-for the other two, so replacing it first would mean applying the rest with
-firmware that is about to be overwritten.
+The tool reads the device's current versions (group-64 `hpi/fw_versions`, and
+`espfw_status` for the C6), skips what is already current, and applies the rest
+in the order **M4 → M7 → reset → ESP32-C6**:
 
-`--dry-run` prints the plan without writing anything. `--force` reapplies images
-whose version already matches.
+1. the **M4** upload and commit, then the **M7** upload — both on the M7
+   firmware currently running;
+2. the reset that installs them (two when the M7 changed: the second pairs the
+   cores — see *Recovery-mode details* below), and the reconnect;
+3. the **ESP32-C6**, last, on the M7 firmware the bundle has just installed.
+
+The C6 is last because it is the one processor that must not be reset after its
+update: the M7 holds the C6 in reset across every M7 reset, and a C6 reset
+before its new image has reported VALID rolls the image back. Last also means a
+single run updates a unit whose old M7 predates the C6 commands — the M7 is
+updated first, and the C6 step runs on the new one.
+
+`--dry-run` prints the plan without writing anything (and does not power the
+C6). `--force` reapplies images whose version already matches, and is also what
+installs an **older** C6 image: the C6 has no downgrade protection of its own,
+so the tool refuses one unless forced. `--only m4|m7|esp32c6` restricts the run
+to one processor.
+
+**The C6's running version is only known while it is powered**, and every boot
+holds it in reset. When the version cannot be read, `fw update` powers the C6
+with **no radio** (`conn_enable` with `radios = 0` — the state `healthypi conn
+enable --radios none` gives), reads the version the M7 then caches, and puts the
+C6 back into reset afterwards unless it is mid-verification. With `--force` it
+skips that and lets the update session power it.
+
+Exit status: `0` done or nothing to do · `1` applied, but the device does not
+report what the bundle carries · `2` refused or failed (the message says what is
+running) · `5` the C6's new image failed its self-test and it **rolled back** to
+its old one · `6` the C6 outcome was **not confirmed** within 45 s — the C6 is
+left powered; check `healthypi fw esp32c6-status` until `busy: no` before
+resetting · `7` the C6's firmware **predates the update path** and needs one
+flash over its own USB port (case open; [healthybridge-esp32: Flashing a
+HealthyPi 6](https://github.com/Protocentral/healthybridge-esp32#flashing-a-healthypi-6)).
 
 **Ports:** CDC1 is the control/MCUmgr port; CDC0 is the `.HP6` sample stream and
 is never used for updates. The tool stops streaming before uploading — a live
@@ -374,16 +446,43 @@ cause of a slow update.
 
 #### What happens on the device
 
-1. **M7:** the image is streamed into the QSPI secondary slot (`slot1`), the
-   device reboots, MCUboot verifies the signature and version, then
-   **overwrite-installs** it into internal flash and boots it. Roughly 40 s to
-   upload at ~17 KB/s, plus ~5 s to install.
-2. **M4:** the image is streamed into the QSPI staging region, the M7 checks its
+1. **M4:** the image is streamed into the QSPI staging region, the M7 checks its
    digest, then its signature, then that its first two vectors look like an M4
    image, and only then erases and rewrites bank 2. A reset follows; the M4
    rebinds IPC ~7-10 s later.
-3. **ESP32-C6:** uploaded to the C6's own HTTP endpoint; it writes the inactive
-   OTA slot and rolls back by itself if the new image fails its self-test.
+2. **M7:** the image is streamed into the QSPI secondary slot (`slot1`), the
+   device reboots, MCUboot verifies the signature and version, then
+   **overwrite-installs** it into internal flash and boots it. Roughly 40 s to
+   upload at ~17 KB/s, plus ~5 s to install.
+3. **ESP32-C6:** the M7 checks the image's signature over its announced
+   SHA-256 *before* anything moves, then relays it chunk by chunk over the
+   HealthyBridge UART into the C6's inactive OTA slot, hashing each chunk the C6
+   acknowledges. Only when every byte has been relayed and the hash matches the
+   signed digest does the C6 get COMMIT; it re-hashes its flash, validates the
+   image and switches slots. It restarts into the new image **pending
+   verification** and keeps it only after it hears from the M7 within 60 s —
+   the M7's once-a-second status polls do that — otherwise the bootloader rolls
+   it back. **Any reset of the M7 or the C6 in that window rolls it back**, so
+   the device refuses `os reset`, `enter_recovery` and `conn_disable` while an
+   update is in flight or pending (group-64 274; `os reset` with `force`
+   overrides). Wire contract and polling rules:
+   [MCUMGR_COMMANDS.md §5.12](MCUMGR_COMMANDS.md#512-network-co-processor-esp32-c6-firmware-update).
+   **Not yet run on hardware.**
+
+> **Order for a three-processor update: the C6 last.** The device side needs
+> the M7 to keep running, undisturbed, from the C6's COMMIT until the new image
+> reports VALID — so the M7/M4 reset has to come *before* the C6 update, not
+> after it. `healthypi fw update` does exactly that (it used to apply ESP32-C6 →
+> M4 → M7, from before the C6 was updated through the M7). While
+> `espfw_status.busy` is true the tool sends no `os reset`, `enter_recovery` or
+> `conn_disable` — and neither do `healthypi device reset`, `fw enter-recovery`
+> or `conn disable`, which check first and explain rather than surface a raw
+> 274.
+>
+> **The host side has not run on hardware either.** It follows
+> [MCUMGR_COMMANDS.md §5.12](MCUMGR_COMMANDS.md#512-network-co-processor-esp32-c6-firmware-update)
+> step for step and is tested offline against a fake device; no C6 has been
+> updated by it.
 
 **Bank 2 and slot0 are never touched until the whole image has arrived and
 verified.** An interrupted or corrupt upload leaves the running firmware alone.
@@ -464,8 +563,12 @@ healthypi fw info --bundle build/release/hpi6-firmware-1.0.0.zip
 ```
 
 The manifest carries, per processor: version, sha256, size, transport, optional
-`min_version`, and (for the M4) the device-verifiable signature. Format detail:
-[the bundle format](#10-the-release-bundle).
+`min_version`, and (for the M4 and the ESP32-C6) the device-verifiable
+signature. `scripts/release.sh` **requires** the C6 app image — built in
+[healthybridge-esp32](https://github.com/Protocentral/healthybridge-esp32) with
+`./hp6.sh build`, checked for target, HP6 profile, OTA receiver and staleness —
+unless given `--no-esp32`, which says loudly that the bundle cannot update the
+C6. Format detail: [the bundle format](#10-the-release-bundle).
 
 ### Transports
 
@@ -478,8 +581,9 @@ The manifest carries, per processor: version, sha256, size, transport, optional
 ### Keys
 
 One ECDSA-P256 keypair signs everything: the M7 image (enforced by MCUboot), the
-M4 image (enforced by the M7 application, whose compiled-in copy of the public
-half is generated from the same PEM at build time), and the release manifest
+M4 and ESP32-C6 images (both enforced by the M7 application, through one
+verifier, `services/fw_release_sig.c`, whose compiled-in copy of the public half
+is generated from the same PEM at build time), and the release manifest
 (checked by host tools).
 
 - **Dev key** `keys/hp6_dev_ec256.pem` — generated locally on first signed build,
@@ -509,6 +613,15 @@ healthypi fw update --port <CDC1> --bundle build/release/hpi6-firmware-<ver>.zip
 #  b) lower version than installed           -> downgrade prevention
 #  c) M4 upload with a corrupted digest      -> bank 2 untouched (verify over SWD)
 #  d) M7 image uploaded as the M4 image      -> "not an M4 image" (vector check)
+#  e) C6 image signed with a different key   -> 268 at begin, C6 never powered
+#     (healthypi test run --destructive --group fw covers this one)
+
+# ESP32-C6 (none of this has run yet)
+#  f) C6-only:  healthypi fw update --bundle … --only esp32c6 --force
+#  g) pull the cable mid-transfer, and again between commit and VALID: the C6
+#     must keep its old image in the first case; in the second, check
+#     `healthypi fw esp32c6-status` once reconnected
+#  h) a unit whose C6 predates the update path -> exit 7, the USB-flash text
 
 # recovery — both entries
 #  1) erase slot0 over SWD  -> device must appear as "HealthyPi 6 Recovery"
@@ -556,7 +669,7 @@ hpi6-firmware-2.0.1.zip
 ├── manifest.sig      ECDSA-P256 over sha256(manifest.json), raw r||s (64 B)
 ├── m7.bin            MCUboot-signed M7 image
 ├── m4.bin            raw M4 image (no container of its own)
-└── esp32c6.bin       optional ESP32-C6 image
+└── esp32c6.bin       ESP32-C6 app image (not the merged flash image)
 ```
 
 File names inside the archive come from the manifest's `file` field; the names
@@ -588,6 +701,14 @@ in `build/release/`. It is not part of the bundle and is not signed.
       "size": 159952,
       "transport": "hpi-g64",
       "sig": "…128 hex chars…"
+    },
+    "esp32c6": {
+      "file": "esp32c6.bin",
+      "version": "1.1.0",
+      "sha256": "…",
+      "size": 1446336,
+      "transport": "hpi-g64-esp",
+      "sig": "…128 hex chars…"
     }
   }
 }
@@ -599,25 +720,42 @@ in `build/release/`. It is not part of the bundle and is not signed.
 | `release` | the release's name, conventionally the M7 version |
 | `hw_rev` | board revisions this bundle is valid for |
 | `created` | the release commit's timestamp, not the clock — a release build is reproducible |
-| `images.<proc>.transport` | `mcumgr-img` (stock SMP img group) · `hpi-g64` (group-64 0x00A0-0x00A4) · `esp-ota-http` (the C6's own endpoint) |
+| `images.<proc>.transport` | `mcumgr-img` (stock SMP img group) · `hpi-g64` (group-64 0x00A0-0x00A4) · `hpi-g64-esp` (group-64 0x00A6-0x00AA, relayed by the M7 into the C6's inactive OTA slot) |
 | `images.<proc>.min_version` | optional: refuse to apply over anything older |
-| `images.m4.sig` | ECDSA-P256 over that image's SHA-256, raw r||s, hex |
+| `images.m4.sig`, `images.esp32c6.sig` | ECDSA-P256 over that image's SHA-256, raw r||s, hex. **Required** for `hpi-g64-esp` |
+| `images.esp32c6.version` | read from the image's own ESP-IDF app descriptor — the string the C6 reports once it runs it |
+
+**The C6 entry changed in November 2026.** Before, it was `"transport":
+"esp-ota-http"`, unsigned, and no tool ever applied it (the C6 had no update
+path). That change is versioned the way this format versions an image's update
+path — by its `transport` — not by `format`, which stays `1`: a tool that does
+not know a transport skips that one image and says so (Compatibility rules,
+below), which is the right behaviour in both directions. So:
+
+- an **old bundle** (`esp-ota-http`) still verifies and its M4/M7 still apply;
+  `fw update` reports its C6 entry as unusable and skips it — never a partial
+  C6 update — and `--only esp32c6` refuses it outright;
+- a **new bundle** read by an older `healthypi` is likewise fine: that tool
+  skipped the C6 unconditionally;
+- a bundle with **no C6 entry** (`release.sh --no-esp32`) updates the M4/M7 and
+  leaves the C6 alone, and says so.
 
 `sort_keys=True` and two-space indent when written, so the byte stream that gets
 signed is deterministic for a given content.
 
-### Signatures — three of them, doing different jobs
+### Signatures — one key, four jobs
 
-This is the part worth being precise about, because "is it signed?" has three
+This is the part worth being precise about, because "is it signed?" has four
 different answers depending on what you are protecting against.
 
 | Signature | Covers | Enforced by | Protects against |
 |---|---|---|---|
 | MCUboot header on `m7.bin` | the M7 image | **the bootloader**, before it boots | a forged M7 image, at the only point that can actually stop it |
 | `images.m4.sig` in the manifest | the M4 image's digest | **the M7 application**, at group-64 commit | a forged M4 image — the M4 has no bootloader of its own |
+| `images.esp32c6.sig` in the manifest | the C6 image's digest | **the M7 application**, at `espfw_begin`, before a byte reaches the C6; the relayed bytes are hashed against that digest before COMMIT | a forged C6 image — the C6 checks no signature itself |
 | `manifest.sig` | the manifest, hence every digest in it | **the host tool** (`--pubkey`) | a tampered *bundle*, before anything is written |
 
-All three use the **same** ECDSA-P256 key. There is deliberately not a key per
+All of them use the **same** ECDSA-P256 key. There is deliberately not a key per
 processor: one key to hold, one to rotate, one to lose. The public half reaches
 the M7 application through `tools/build/gen_m4_pubkey.py`, which extracts it from
 the same PEM the MCUboot signing uses at build time — so the two cannot drift.
@@ -625,7 +763,9 @@ the same PEM the MCUboot signing uses at build time — so the two cannot drift.
 Note what the manifest signature is **not**: it is a host-side convenience, not a
 device-enforced control. A host that skips `--pubkey` still gets digest checking
 (cheap, catches the ordinary truncated-download failure), and the device still
-enforces its own two signatures regardless of what the host did.
+enforces its own signatures regardless of what the host did. With a key, the
+host also checks each image signature the device will check (M4, C6) against
+that key, so a bundle the device would refuse is refused before the transfer.
 
 #### Raw r||s, not DER
 
@@ -636,10 +776,12 @@ update path — buys nothing.
 
 ### Applying a bundle
 
-Order is fixed at `esp32c6 → m4 → m7` (`healthypi.fw.bundle.APPLY_ORDER`). The M7 goes **last**
-because it is the processor that runs the update logic for the other two:
-replacing it first would mean applying the rest with firmware that is about to be
-overwritten, across a reboot.
+Order is fixed at `m4 → m7 → (reset) → esp32c6`
+(`healthypi.fw.bundle.APPLY_ORDER`). The M4 and the M7 share one reset (two
+when the M7 changed); the C6 goes **last** because a reset after its commit, and
+before its new image reports VALID, rolls it back — and because then it is
+always updated by the M7 firmware the bundle just installed. See
+[§9](#normal-update--what-a-user-does).
 
 ```bash
 healthypi fw update --port <CDC1> --bundle hpi6-firmware-1.0.0.zip

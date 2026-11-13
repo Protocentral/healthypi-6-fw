@@ -86,6 +86,46 @@ int hpi_hb_encode_batch(uint8_t *out, size_t out_cap,
 			uint32_t timestamp_ms, uint16_t rate_hz,
 			const void *samples, uint16_t count, size_t sample_sz);
 
+/**
+ * @brief Encode a firmware-update request frame (TYPE 0x80) in one pass.
+ *
+ * Payload = {op, 0, param_len} | @p params | @p data, where param_len is
+ * params_len + data_len. Two parts so a DATA request (u32 offset + up to
+ * HPI_HB_OTA_MAX_CHUNK image bytes) is built straight into the transmit buffer
+ * with no intermediate copy:
+ *   BEGIN  params = struct hpi_hb_ota_begin, data = none
+ *   DATA   params = u32 offset (LE),         data = the chunk
+ *   COMMIT / ABORT / STATUS: neither.
+ *
+ * Refuses a DATA chunk of 0 or more than HPI_HB_OTA_MAX_CHUNK bytes -- the C6
+ * would answer BAD_REQUEST, so it is caught here instead.
+ *
+ * @return Total encoded length, or negative errno.
+ */
+int hpi_hb_encode_ota_req(uint8_t *out, size_t out_cap, uint16_t seq, uint8_t op,
+			  const void *params, uint16_t params_len,
+			  const uint8_t *data, uint16_t data_len);
+
+/**
+ * @brief Decode a firmware-update reply payload (TYPE 0x81).
+ *
+ * Checks the shape the contract guarantees -- a 12-byte ack for every op but
+ * STATUS, a 52-byte status for STATUS -- and that data_len agrees with the
+ * frame. Anything else is -EBADMSG and must be discarded, never half-trusted.
+ * The status record's version string is forced NUL-terminated.
+ */
+int hpi_hb_ota_parse_reply(const uint8_t *payload, uint16_t len,
+			   struct hpi_hb_ota_reply *out);
+
+/**
+ * @brief Does @p r answer the request (op @p op, DATA offset @p req_offset)?
+ *
+ * Stop-and-wait matching: same op and, for DATA, the same req_offset. Anything
+ * else is a stale or duplicate reply to an earlier request and is dropped.
+ */
+bool hpi_hb_ota_reply_matches(const struct hpi_hb_ota_reply *r, uint8_t op,
+			      uint32_t req_offset);
+
 /*
  * Streaming decoder.
  *

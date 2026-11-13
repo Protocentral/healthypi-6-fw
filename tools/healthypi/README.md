@@ -121,11 +121,13 @@ healthypi wifi-stream monitor --udp   # Wi-Fi packet rate and loss
 healthypi fw info --bundle hpi6-firmware-1.0.0.zip --pubkey release.pem   # offline
 healthypi fw update --bundle hpi6-firmware-1.0.0.zip                      # all processors
 healthypi fw update --bundle hpi6-firmware-1.0.0.zip --only m4 --force
+healthypi fw update --bundle hpi6-firmware-1.0.0.zip --only esp32c6 --dry-run
+healthypi fw esp32c6-status                                        # C6 update state, busy
 healthypi fw enter-recovery                                        # into MCUboot
 healthypi fw recover --port <recovery-port> --bundle hpi6-firmware-1.0.0.zip
 
 # acceptance suite (the bench gate)
-healthypi test list                        # the cases and what each needs
+healthypi test list                        # the 23 cases and what each needs
 healthypi test run                         # read-only by default
 healthypi test run --destructive --group fw
 healthypi test soak --iterations 60000     # 0 errors, p99 < 50 ms
@@ -136,8 +138,14 @@ healthypi hl eeprom read eeprom.bin        # non-zero exit on a bad CRC
 healthypi hl eeprom stack --modules EEG-8CH TRIGGER-IO AI-ACCELERATOR
 ```
 
-Update order is `esp32c6 → m4 → m7`; the M7 goes last because it is what applies
-the other two. The C6 is skipped over USB — it updates itself over Wi-Fi.
+Update order is `m4 → m7 → reset → esp32c6`. The C6 goes last: its new image is
+rolled back by any reset before it has proved itself, and the M7 holds the C6 in
+reset across every M7 reset. The C6 image is relayed by the M7 over the same USB
+cable (group-64 `espfw_*`); that path has not yet run on hardware. Exit codes,
+and what each C6 outcome means: `docs/ARCHITECTURE.md` §9.
+
+`device reset`, `conn disable` and `fw enter-recovery` check `espfw_status.busy`
+first and explain why they will not, rather than letting the device answer 274.
 
 The EEPROM verbs build the 256-byte image. Writing it to a real 24AA02 needs an
 external programmer (FT232H, Raspberry Pi I2C, CH341A, Bus Pirate) and that

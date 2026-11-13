@@ -160,14 +160,14 @@ def test_catalog_text(capsys):
     assert main(["catalog"]) == 0
     out = capsys.readouterr().out
     assert "group 64 (hpi)" in out
-    assert "34 live, 1 stub, 11 reserved" in out
+    assert "39 live, 1 stub, 11 reserved" in out
 
 
 def test_catalog_json(capsys):
     assert main(["catalog", "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["group_id"] == 64
-    assert len(doc["commands"]) == 46
+    assert len(doc["commands"]) == 51
     assert {c["name"] for c in doc["commands"] if c["status"] == "stub"} == {"wifi_scan"}
     assert doc["errors"]["267"] == "NO_MEDIA"
     assert "request" not in doc["commands"][0]  # schemas only with --full
@@ -181,6 +181,8 @@ def test_catalog_json_full(capsys):
     assert {f["name"] for f in begin["request"]} >= {"len", "sha"}
     assert doc["error_hints"]["270"]
     assert doc["stock_errors"]["0"]["4"] == "RTC_NOT_SET"
+    # espfw_* carry the per-request timeout a host must use.
+    assert by_name["espfw_chunk"]["timeout_s"] == 5.0
 
 
 def test_catalog_formats(capsys):

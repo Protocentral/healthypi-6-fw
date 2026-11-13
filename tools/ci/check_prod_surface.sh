@@ -115,9 +115,10 @@ if [ "$REQUIRE_RELEASE" = 1 ] || [ -n "$BOOT_CFG" ]; then
   fi
 
   # App side: bootloader-linked, stock img group for the M7, group-64 upload for
-  # the M4, and a way back into the bootloader.
+  # the M4 and the ESP32-C6, and a way back into the bootloader.
   for sym in CONFIG_BOOTLOADER_MCUBOOT CONFIG_MCUMGR_GRP_IMG CONFIG_IMG_MANAGER \
-             CONFIG_HPI_M4_UPDATE CONFIG_HPI_RECOVERY_MODE CONFIG_RETENTION_BOOT_MODE; do
+             CONFIG_HPI_M4_UPDATE CONFIG_HPI_ESP32_UPDATE \
+             CONFIG_HPI_RECOVERY_MODE CONFIG_RETENTION_BOOT_MODE; do
     is_y "$sym" "$APP_CFG" || fail "${sym} is not =y — the shipped app would not be field-updateable"
   done
 

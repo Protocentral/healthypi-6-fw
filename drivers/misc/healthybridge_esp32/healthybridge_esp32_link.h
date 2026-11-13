@@ -44,6 +44,15 @@ struct healthybridge_rx_stats {
 	uint32_t resync;   /**< decoder sync-hunt restarts */
 	uint32_t ovf;      /**< bytes dropped because the staging ring was full */
 	uint32_t stopped;  /**< receiver error events (framing/parity/overrun) */
+	/**
+	 * Times the co-processor was seen to restart: every release from reset
+	 * by link_power(true), plus every in-place reboot (panic, watchdog,
+	 * esp_restart after an OTA or provisioning) detected by its frame
+	 * sequence number running backwards. Monotonic; a caller holding state
+	 * learned from the peer (e.g. its firmware version) compares this
+	 * against the value it saw when it learned it.
+	 */
+	uint32_t peer_restarts;
 };
 
 /**
@@ -77,6 +86,16 @@ struct healthybridge_link_api {
 
 	int (*wifi_status)(const struct device *dev,
 			   struct hpi_hb_wifi_status_resp *out);
+
+	/**
+	 * Ask the co-processor for its firmware version (HB 0x31 GET_VERSION).
+	 * A round-trip: blocks up to the transport's command timeout. -EIO when
+	 * the peer acks with an error (an image older than HealthyBridge 1.1.0,
+	 * which has no such command); -ETIMEDOUT when it does not answer.
+	 */
+	int (*get_version)(const struct device *dev,
+			   struct hpi_hb_version_resp *out);
+
 	int (*wifi_enable)(const struct device *dev, bool on);
 
 	/** Start/stop BLE advertising on the co-processor (HB 0x10 / 0x11). */
@@ -93,6 +112,53 @@ struct healthybridge_link_api {
 	/** Receive-side counters, for diagnostics. -ENOSYS if the transport has
 	 *  no receive path worth reporting. */
 	int (*get_rx_stats)(const struct device *dev, struct healthybridge_rx_stats *out);
+
+	/**
+	 * Make sure the co-processor hears from this host: if nothing has been
+	 * transmitted for @p idle_ms, send a real GET_STATUS on the wire --
+	 * bypassing the status cache that wifi_status() answers from -- and
+	 * refresh that cache from the reply. Otherwise do nothing.
+	 *
+	 * Why: a freshly updated C6 image keeps its OTA slot only after it has
+	 * received a few CRC-valid frames from the host within 60 s of booting.
+	 * With the radios off and the M4 silent, everything this end used to
+	 * send was answered from cache, i.e. not sent at all.
+	 *
+	 * Blocking for at most one command round-trip when a frame is due.
+	 * Returns 0, or the command's error (-ETIMEDOUT still means the frame
+	 * went out; only the reply is missing).
+	 */
+	int (*keepalive)(const struct device *dev, uint32_t idle_ms);
+
+	/**
+	 * Send one firmware-update request (HealthyBridge 0x80) and wait for the
+	 * reply that answers it: a 0x81 with the same op and, for DATA, the same
+	 * req_offset. Stale and duplicate replies -- answers to an earlier
+	 * request that arrive late -- are discarded, never handed back.
+	 *
+	 * @p begin is the BEGIN params (NULL for every other op); @p offset and
+	 * @p data / @p len are the DATA params (ignored for every other op).
+	 * @p timeout_ms runs from the moment the frame has left the UART.
+	 *
+	 * The frame is transmitted with a deadline of at least
+	 * HB_UART_OTA_TX_DEADLINE_US: the C6 de-asserts RTS while it erases a
+	 * flash sector (~0.4 s), and the ordinary short deadline would cut the
+	 * frame mid-way.
+	 *
+	 * Returns 0 when a matching reply arrived -- whatever its status, which
+	 * the caller interprets -- with @p out filled; -ETIMEDOUT with none;
+	 * -EHOSTDOWN when the co-processor is held in reset; -EINVAL for a
+	 * request the contract does not allow (e.g. a DATA chunk over
+	 * HPI_HB_OTA_MAX_CHUNK); or a transmit error. One request at a time per
+	 * link: a second caller blocks until the first has its answer.
+	 *
+	 * Blocking: never call it from the system workqueue (the receive path
+	 * runs there, so the reply could never be delivered) or the LVGL thread.
+	 */
+	int (*ota_request)(const struct device *dev, uint8_t op,
+			   const struct hpi_hb_ota_begin *begin, uint32_t offset,
+			   const uint8_t *data, uint16_t len, uint32_t timeout_ms,
+			   struct hpi_hb_ota_reply *out);
 
 	/** Human-readable transport name for logs ("spi" / "uart"). */
 	const char *name;
@@ -151,6 +217,12 @@ static inline int healthybridge_wifi_status(const struct device *dev,
 	return HB_LINK_CALL(dev, wifi_status, out);
 }
 
+static inline int healthybridge_get_version(const struct device *dev,
+					    struct hpi_hb_version_resp *out)
+{
+	return HB_LINK_CALL(dev, get_version, out);
+}
+
 static inline int healthybridge_wifi_enable(const struct device *dev, bool on)
 {
 	return HB_LINK_CALL(dev, wifi_enable, on);
@@ -186,6 +258,21 @@ static inline int healthybridge_get_rx_stats(const struct device *dev,
 					     struct healthybridge_rx_stats *out)
 {
 	return HB_LINK_CALL(dev, get_rx_stats, out);
+}
+
+static inline int healthybridge_ota_request(const struct device *dev, uint8_t op,
+					    const struct hpi_hb_ota_begin *begin,
+					    uint32_t offset, const uint8_t *data,
+					    uint16_t len, uint32_t timeout_ms,
+					    struct hpi_hb_ota_reply *out)
+{
+	return HB_LINK_CALL(dev, ota_request, op, begin, offset, data, len,
+			    timeout_ms, out);
+}
+
+static inline int healthybridge_keepalive(const struct device *dev, uint32_t idle_ms)
+{
+	return HB_LINK_CALL(dev, keepalive, idle_ms);
 }
 
 static inline const char *healthybridge_link_name(const struct device *dev)

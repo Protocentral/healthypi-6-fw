@@ -132,6 +132,95 @@ int hpi_hb_encode_batch(uint8_t *out, size_t out_cap,
 	return put_crc(out, (uint16_t)payload_len);
 }
 
+/* ---- firmware update (0x80 / 0x81) -------------------------------------- */
+
+int hpi_hb_encode_ota_req(uint8_t *out, size_t out_cap, uint16_t seq, uint8_t op,
+			  const void *params, uint16_t params_len,
+			  const uint8_t *data, uint16_t data_len)
+{
+	if (out == NULL || (params_len > 0 && params == NULL) ||
+	    (data_len > 0 && data == NULL)) {
+		return -EINVAL;
+	}
+	if (op == HPI_HB_OTA_OP_DATA &&
+	    (params_len != sizeof(uint32_t) || data_len == 0 ||
+	     data_len > HPI_HB_OTA_MAX_CHUNK)) {
+		return -EINVAL;
+	}
+
+	size_t param_len = (size_t)params_len + data_len;
+	size_t payload_len = sizeof(struct hpi_hb_ota_req) + param_len;
+
+	if (payload_len > HPI_HB_MAX_PAYLOAD_SIZE) {
+		return -EINVAL;
+	}
+	if (HPI_HB_HEADER_SIZE + payload_len + HPI_HB_CRC_SIZE > out_cap) {
+		return -ENOMEM;
+	}
+
+	uint8_t *body = put_header(out, HPI_HB_MSG_TYPE_OTA_REQ, 0, seq,
+				   (uint16_t)payload_len);
+
+	/* Header field by field, little-endian, so the frame does not depend on
+	 * the host's struct layout (the test runs this on a PC). */
+	body[0] = op;
+	body[1] = 0;
+	body[2] = (uint8_t)(param_len & 0xFF);
+	body[3] = (uint8_t)(param_len >> 8);
+	body += sizeof(struct hpi_hb_ota_req);
+
+	if (params_len > 0) {
+		memcpy(body, params, params_len);
+		body += params_len;
+	}
+	if (data_len > 0) {
+		memcpy(body, data, data_len);
+	}
+
+	return put_crc(out, (uint16_t)payload_len);
+}
+
+int hpi_hb_ota_parse_reply(const uint8_t *payload, uint16_t len,
+			   struct hpi_hb_ota_reply *out)
+{
+	if (payload == NULL || out == NULL || len < sizeof(struct hpi_hb_ota_rsp)) {
+		return -EBADMSG;
+	}
+
+	uint8_t op = payload[0];
+	uint8_t status = payload[1];
+	uint16_t data_len = (uint16_t)payload[2] | ((uint16_t)payload[3] << 8);
+	const uint8_t *data = payload + sizeof(struct hpi_hb_ota_rsp);
+	size_t want = (op == HPI_HB_OTA_OP_STATUS) ? sizeof(struct hpi_hb_ota_status)
+						   : sizeof(struct hpi_hb_ota_ack);
+
+	/* Every reply carries its fixed body whatever the status; a frame that
+	 * does not is not one this contract produces. */
+	if (data_len != want || (size_t)len - sizeof(struct hpi_hb_ota_rsp) < want) {
+		return -EBADMSG;
+	}
+
+	memset(out, 0, sizeof(*out));
+	out->op = op;
+	out->status = status;
+	if (op == HPI_HB_OTA_OP_STATUS) {
+		memcpy(&out->u.st, data, sizeof(out->u.st));
+		out->u.st.version[sizeof(out->u.st.version) - 1] = '\0';
+	} else {
+		memcpy(&out->u.ack, data, sizeof(out->u.ack));
+	}
+	return 0;
+}
+
+bool hpi_hb_ota_reply_matches(const struct hpi_hb_ota_reply *r, uint8_t op,
+			      uint32_t req_offset)
+{
+	if (r == NULL || r->op != op) {
+		return false;
+	}
+	return op != HPI_HB_OTA_OP_DATA || r->u.ack.req_offset == req_offset;
+}
+
 /* ---- streaming decoder --------------------------------------------------
  *
  * The sync word is a little-endian uint16_t in the packed header, so on the

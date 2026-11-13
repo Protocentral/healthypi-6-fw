@@ -55,7 +55,18 @@ async def enter_recovery(target: Target, *, log: Log = _stdout) -> None:
                 "  Only the signed build (scripts/build.sh signed) supports it."
             )
 
+        # Entering recovery resets the M7, which holds the C6 in reset: during a
+        # C6 update, or before its new image is VALID, that rolls the C6 back.
+        # The device refuses with 274; say why before asking.
+        from . import esp32c6
+
+        why = await esp32c6.busy_reason(conn, g, is_error)
+        if why:
+            raise UpdateError("not entering recovery: " + why)
+
         resp = await conn.request(g.enter_recovery_write(arm=True, rst=True))
+        if esp32c6.is_update_active(resp, is_error):
+            raise UpdateError("not entering recovery: " + esp32c6.EXPLAIN_274)
         if is_error(resp):
             raise UpdateError(f"enter_recovery failed: {fmt_error(resp)}")
     finally:

@@ -10,7 +10,76 @@ Versions here are the **firmware** version reported by the device
 
 ## [Unreleased]
 
+### Added
+- **The ESP32-C6 firmware version is reported.** `device_info` and
+  `fw_versions` now fill `espfw` (it was always empty). The connectivity
+  service asks the C6 over HealthyBridge (new control command `0x31`
+  GET_VERSION) once the link comes up and caches the answer, so a group-64 read
+  never waits on the co-processor. The cache is dropped when the C6 is powered
+  down, its link faults, or it restarts (including an in-place reboot after its
+  own OTA). `espfw` is `""` while the C6 is in reset -- the boot default, until
+  `conn_enable` -- before it has answered, and on C6 firmware older than
+  HealthyBridge 1.1.0.
+- **The ESP32-C6 can be updated over USB, through the M7 -- not yet run on
+  hardware.** Group-64 `espfw_begin` / `espfw_chunk` / `espfw_commit` /
+  `espfw_status` / `espfw_abort` (`0x00A6`-`0x00AA`, signed builds,
+  `CONFIG_HPI_ESP32_UPDATE`; schema version `0x0003`). The M7 relays each chunk
+  over HealthyBridge (new frame types `0x80`/`0x81`) into the C6's inactive OTA
+  slot; nothing is staged on the M7. The image must carry an ECDSA-P256
+  signature with the release key -- checked before anything is sent, with the
+  same verifier as the M4 image -- and the C6 is sent COMMIT only once every
+  byte has been relayed and their SHA-256 matches the signed digest. The M7 then
+  watches the C6 restart and keeps it talking until the new image reports
+  VALID (or reports the rollback). `espfw_chunk` blocks for up to 1.6 s, so
+  hosts must use a 5 s per-request timeout for `espfw_*`. New group-64 errors
+  272 `ESP_NO_REPLY`, 273 `ESP_REFUSED`, 274 `ESP_UPDATE_ACTIVE`, 275
+  `IMAGE_INCOMPLETE`. Needs healthybridge-esp32 with the OTA receiver
+  (`hp6/c6-ota-receiver`). `healthypi fw update` uses it (next entry).
+- **`healthypi fw update` updates the ESP32-C6 -- not yet run on hardware.**
+  The host half of the path above (protocentral-healthypi 0.2.0): status
+  first, `begin`, poll to receiving, chunks in order (272: resend the same
+  chunk; 260: resume at `rx`; 273: start again), `commit` exactly once (never
+  resent, even when its reply is lost), then poll to done / rolled back /
+  failed, allowing 45 s. Every `espfw_*` request uses the 5 s timeout from the
+  command catalog, applied by the transport for any command that states one. The
+  C6's version is read while it is powered; on a unit that holds it in reset
+  (every boot) the tool powers it with no radio to ask, and puts it back. An
+  identical version is skipped and an older one refused unless `--force` (the
+  C6 has no downgrade protection). New exit codes: 5 rolled back, 6 outcome not
+  confirmed (C6 left powered), 7 C6 firmware predates the update path. New
+  verb `healthypi fw esp32c6-status`; new acceptance cases `espfw_status` and
+  `espfw rejects a bad signature` (23 cases).
+- **Resets that would roll a C6 update back are refused.** While a C6 update is
+  in flight or its new image is pending verification, `os reset` (unless
+  `force`), `enter_recovery` (arm) and `conn_disable` answer 274, and a
+  power-down requested from the UI or the shell waits.
+- **Keepalive on the C6 link.** When the link is up and the M7 has sent nothing
+  for 5 s it sends one real status request, so a pending C6 image always hears
+  from the host.
+
 ### Fixed
+- **A C6 image that fails its link self-test is now reported as rolled back.**
+  The M7 waited 20 s for the new image to report VALID, but the C6 allows
+  itself 60 s before rolling back, so the M7 gave up first and its status
+  stayed at `TIMEOUT` / `NOT_VALID` after the C6 had returned to its old image;
+  `healthypi fw update` waited only 45 s and exited 6 ("unconfirmed"). The M7
+  now waits 75 s and the tool 95 s, so the same case ends as `ROLLED_BACK`
+  and exit 5. Found and re-checked on hardware.
+- `healthypi fw update` / `fw info` on a corrupt or unreadable bundle exited 1,
+  which the exit-code table defines as "applied, but not as expected". It
+  exits 2 (refused): nothing is written.
+- After a C6 rollback the tool no longer says the new image "could not hold
+  the link" as if that were the only cause: a reset or power loss before the
+  image confirmed itself rolls it back too.
+- Serial writes to the device now time out after 5 s and are handled as a
+  request timeout. A write the OS would not complete could hang
+  `fw update` for as long as the OS allowed (about 30 minutes on the bench),
+  because the per-request timeout cannot interrupt a blocking write.
+- **The C6's radios come back after it restarts on its own.** A C6 restart the
+  M7 did not cause (panic, watchdog, the restart after a firmware update) left
+  both radios off while the M7 believed them on, so Wi-Fi/BLE streaming stopped
+  until toggled by hand. The connectivity service now re-sends the requested
+  radio state when it detects the restart.
 - **QSPI flash is 64 MiB on HealthyPi 6 v5 and later.** The board definition
   declared the 1 Gbit (128 MiB) W25Q01JV and placed the `/lfs` LittleFS at
   `0x4000000`; the fitted part is 512 Mbit (64 MiB), which ignores the higher
@@ -82,6 +151,42 @@ Versions here are the **firmware** version reported by the device
   5 s, so the floor can be set from bench data.
 
 ### Changed
+- **`scripts/flash.sh esp32` takes `--full` or `--app-only`.** It ran the C6
+  repo's `./hp6.sh flash`, which does not erase, so it could not perform the
+  first flash onto the C6's A/B partition layout. It now runs healthybridge-esp32's
+  `flash_hp6.sh` on its `build.hp6` and makes the choice explicit: `--full`
+  (erase the chip, write the merged image; the first flash of every unit;
+  erases stored Wi-Fi credentials) or `--app-only` (keeps them). It refuses a
+  C6 checkout without A/B support or without an A/B HP6 build, says the C6 must
+  first be released from reset (`healthypi conn enable --radios none`), and
+  lists the boot log lines to expect instead of the old `hb_spi` tag.
+  `scripts/flash.sh factory` points at `esp32 --full`.
+- **Update order is M4 → M7 → reset → ESP32-C6** (was ESP32-C6 → M4 → M7).
+  Any M7 reset holds the C6 in reset, and a C6 reset before its new image has
+  proved itself rolls it back, so the C6 goes after every reset -- which also
+  lets one run update a unit whose old M7 predates the C6 commands (the M7 goes
+  first, the C6 step runs on the new one). `healthypi device reset`, `conn
+  disable` and `fw enter-recovery` check `espfw_status.busy` first and explain,
+  instead of surfacing the device's 274.
+- **The bundle's ESP32-C6 entry is signed and applied.** Its transport is now
+  `hpi-g64-esp` with a `sig` like the M4's (ECDSA-P256 over the image's
+  SHA-256, release key), and its version is read from the image's app
+  descriptor; `fw info` and the update check every image signature against the
+  key. `format` stays 1: an older bundle's unsigned `esp-ota-http` C6 entry is
+  reported and skipped (its M4/M7 still apply), and older tools skipped the C6
+  anyway. `scripts/release.sh` now **requires** the C6 app image from
+  healthybridge-esp32's `build.hp6` -- checking target, HP6 profile, OTA receiver
+  and staleness -- and no longer builds it; `--no-esp32` makes a bundle without
+  it and says that bundle cannot update the C6.
+- **HealthyBridge vitals carry the full canonical record (wire change; flash
+  the M7 together with healthybridge-esp32 1.1.0).** The vitals frame (`0x40`)
+  sent to the ESP32-C6 is now the 16-byte `hp6_vitals` record as-is: heart rate,
+  SpO₂ ×10, respiration rate, temperature ×100, SDNN, RMSSD, LF/HF ×10 and the
+  `HP6_VIT_*` flags. It used to be a 12-byte form that clamped every rate to a
+  byte, rounded SpO₂ to whole percent and temperature to tenths, dropped HRV,
+  and sent the flags as 0 -- so the co-processor could not tell an ECG heart
+  rate from a PPG pulse rate, nor show lead-off, weak PPG or motion. A C6 on
+  1.1.0 rejects the old payload and an older C6 misreads the new one.
 - The release bundle is now named `hpi6-firmware-<version>.zip` instead of
   `hpi6-<version>.hpifw`. The format and signing are unchanged: it was always a
   plain zip. Tools read it by content, so existing `.hpifw` files still work.

@@ -26,6 +26,7 @@
 #ifndef HPI_CONNECTIVITY_HEALTHYBRIDGE_SERVICE_H
 #define HPI_CONNECTIVITY_HEALTHYBRIDGE_SERVICE_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -103,9 +104,54 @@ void hpi_connectivity_disable(void);
 /* Cached; never blocks and never issues a round-trip. */
 void hpi_connectivity_get_status(struct hpi_conn_status *out);
 
+/*
+ * The co-processor's firmware version string (e.g. "1.1.0"), from the cache
+ * conn_thread fills over HealthyBridge GET_VERSION once the link comes up.
+ * Never blocks and never touches the UART -- safe from SMP handlers and the
+ * LVGL thread.
+ *
+ * @p out is always NUL-terminated, and is "" unless the return is 0:
+ *   0           known
+ *   -EHOSTDOWN  co-processor held in reset (the boot default)
+ *   -EAGAIN     powered but has not answered yet (starting, or restarted)
+ *   -ENOTSUP    its firmware predates GET_VERSION, or connectivity is
+ *               compiled out
+ *   -ENODEV     service not running
+ * The cache is dropped on power-down, link fault and any C6 restart.
+ */
+int hpi_connectivity_esp_version(char *out, size_t cap);
+
 /* True when the co-processor is powered and answering -- not merely that the
  * service thread started. Drives the status-bar link glyph. */
 bool hpi_connectivity_ready(void);
+
+/*
+ * Link ownership for a co-processor firmware update (services/
+ * esp32_update_service.c is the only caller).
+ *
+ * hold(): power the C6 if it is held in reset, and for as long as the hold
+ * lasts
+ *   - stop forwarding waveforms and vitals to it, and stop the status poll,
+ *     version fetch and keepalive once the link is up -- the updater's own
+ *     frames are the traffic, and a short-deadline frame cut off mid-way by
+ *     the C6 holding RTS through a flash erase would cost it a reply;
+ *   - never power it down: enable/disable requests from anywhere (the UI's
+ *     Wi-Fi toggle, the shell) are recorded and applied after release, so a
+ *     C6 whose new image is pending verification is never reset (a reset
+ *     then rolls it back).
+ * Non-blocking; hpi_connectivity_ready() says when the link is up.
+ *
+ * release(keep_powered): end the hold and apply whatever is requested --
+ * including putting the C6 back into reset if that is what was asked for
+ * before or during the update. keep_powered = true overrides that, leaving the
+ * C6 powered with no radio: for an outcome the updater could not confirm, where
+ * the image may still be pending and a reset would roll it back.
+ *
+ * Returns -ENODEV when the service is not running.
+ */
+int hpi_connectivity_update_hold(void);
+void hpi_connectivity_update_release(bool keep_powered);
+bool hpi_connectivity_update_held(void);
 
 /*
  * Compatibility wrappers over the two calls above, kept because the shell and

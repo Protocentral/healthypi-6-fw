@@ -76,6 +76,8 @@ def _run_device(args, coro_factory) -> int:
                 resp = await coro_factory(conn, g)
                 if resp is None:
                     return 0
+                if isinstance(resp, _Exit):
+                    return resp.code
                 if is_error(resp):
                     return _fail(fmt_error(resp), 2)
                 _emit(args, _model_dict(resp))
@@ -146,6 +148,51 @@ def _conn_enable(args) -> int:
     return _run_device(args, lambda conn, g: conn.request(g["conn_enable"](radios=mask)))
 
 
+async def _c6_busy_refusal(conn, g):
+    """Explain, instead of sending, a reset-type command a C6 update forbids.
+
+    Returns the text when ``espfw_status.busy`` is set, else None (also when the
+    firmware has no espfw_* at all). The device refuses these with 274 anyway;
+    asking first turns a raw error code into an instruction.
+    """
+    from ..fw import esp32c6
+    from ..smp.group64 import is_error
+
+    return await esp32c6.busy_reason(conn, g, is_error)
+
+
+def _explain_274(resp) -> bool:
+    """Print the 274 explanation if this reply is that refusal."""
+    from ..fw import esp32c6
+    from ..smp.group64 import is_error
+
+    if resp is not None and esp32c6.is_update_active(resp, is_error):
+        print(f"error: {esp32c6.EXPLAIN_274}", file=sys.stderr)
+        return True
+    return False
+
+
+def cmd_conn_disable(args) -> int:
+    """Radios down and the C6 back into reset -- unless a C6 update forbids it."""
+
+    async def run(conn, g):
+        why = await _c6_busy_refusal(conn, g)
+        if why:
+            print(f"error: not disabling: {why}", file=sys.stderr)
+            return _Exit(2)
+        resp = await conn.request(g.conn_disable())
+        return _Exit(2) if _explain_274(resp) else resp
+
+    return _run_device(args, run)
+
+
+class _Exit:
+    """A coroutine result meaning "already reported; exit with this code"."""
+
+    def __init__(self, code: int):
+        self.code = code
+
+
 def cmd_device_reset(args) -> int:
     """Reboot the device (stock MCUmgr os reset).
 
@@ -167,10 +214,16 @@ def cmd_device_reset(args) -> int:
     async def reset(conn, g):
         from ..smp.group64 import is_error
 
+        why = await _c6_busy_refusal(conn, g)
+        if why:
+            print(f"error: not resetting: {why}", file=sys.stderr)
+            return _Exit(2)
         try:
             resp = await conn.request(ResetWrite(), timeout_s=3.0)
         except (TimeoutError, asyncio.TimeoutError):
             resp = None  # rebooted before the reply got out: that is success
+        if _explain_274(resp):
+            return _Exit(2)
         if resp is not None and is_error(resp):
             return resp  # a refusal: _run_device names it and exits non-zero
         print(
@@ -534,7 +587,10 @@ def _bundle_or_fail(args):
     try:
         return Bundle(args.bundle), None
     except BundleError as exc:
-        return None, _fail(str(exc))
+        # 2 = refused (healthypi.fw.errors): a corrupt or unreadable bundle is
+        # refused before anything is written. It returned 1, which the same
+        # table defines as "applied, but not as expected".
+        return None, _fail(str(exc), 2)
 
 
 def cmd_fw_keys(args) -> int:
@@ -594,9 +650,13 @@ def cmd_fw_bundle_create(args) -> int:
         ImageSpec("m4", Path(args.m4), args.m4_version, "hpi-g64", sign=True),
     ]
     if args.esp32c6:
+        # The C6 app image (not the merged flash image). Signed like the M4's:
+        # the M7 verifies this signature over the image's SHA-256 before it
+        # relays a byte. The version defaults to the one compiled into the
+        # image's app descriptor -- what the C6 will report once it runs it.
         specs.append(
-            ImageSpec("esp32c6", Path(args.esp32c6), args.esp32c6_version,
-                      "esp-ota-http")
+            ImageSpec("esp32c6", Path(args.esp32c6), args.esp32c6_version or "",
+                      "hpi-g64-esp", sign=True)
         )
     try:
         out = create(
@@ -640,7 +700,7 @@ def _fw_device(args, coro_factory) -> int:
     try:
         return asyncio.run(coro_factory(target))
     except UpdateError as exc:
-        return _fail(str(exc), 2)
+        return _fail(str(exc), getattr(exc, "code", 2))
     except serial_smp.UnparseableReplyError as exc:
         return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
@@ -648,7 +708,10 @@ def _fw_device(args, coro_factory) -> int:
     except KeyboardInterrupt:
         return _fail(
             "interrupted — no flash region is left half-written: the device "
-            "only commits after a complete, verified image.",
+            "only commits after a complete, verified image.\n"
+            "  If this was during the ESP32-C6 step AFTER its commit, do not reset "
+            "or unplug the device: check `healthypi fw esp32c6-status` until it "
+            "shows busy: no.",
             130,
         )
 
@@ -674,9 +737,33 @@ def cmd_fw_update(args) -> int:
             )
         except BundleError as exc:
             return _fail(str(exc))
-        return 0 if res.ok else 1
+        return res.exit_code
 
     return _fw_device(args, run)
+
+
+def cmd_fw_esp32c6_status(args) -> int:
+    """The ESP32-C6 update service's state (espfw_status), read-only."""
+
+    async def run(conn, g):
+        from ..fw import esp32c6
+        from ..smp.group64 import fmt_error, is_error
+
+        resp = await conn.request(g.espfw_status())
+        if is_error(resp):
+            print(
+                f"error: espfw_status refused: {fmt_error(resp)}\n"
+                "  This M7 firmware has no ESP32-C6 update commands (an older or "
+                "a development build).",
+                file=sys.stderr,
+            )
+            return _Exit(2)
+        if getattr(args, "json", False):
+            return resp
+        print(esp32c6.describe_status(resp))
+        return None
+
+    return _run_device(args, run)
 
 
 def cmd_fw_enter_recovery(args) -> int:
@@ -1218,6 +1305,8 @@ def _command_json(c, full: bool) -> dict[str, Any]:
         "unlock": bool(c.meta.get("unlock")),
         "signed_build": bool(c.meta.get("signed_build")),
     }
+    if "timeout_s" in c.meta:
+        out["timeout_s"] = c.meta["timeout_s"]
     if full:
         for key in ("request", "response", "write_request", "write_response"):
             fields = getattr(c, key)
@@ -1482,7 +1571,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_conn_enable)
     p = cns.add_parser("disable", help="radios down, co-processor into reset")
     _add_device_opts(p)
-    p.set_defaults(func=_simple("conn_disable"))
+    p.set_defaults(func=cmd_conn_disable)
 
     # -- module / diag / lock ----------------------------------------------
     md = sub.add_parser("module", help="HealthyLink expansion modules")
@@ -1551,13 +1640,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the release .zip, or the folder it was extracted to")
     p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
                    "(default: the HealthyPi 6 release key(s) shipped with this tool)")
-    p.add_argument("--only", choices=("esp32c6", "m4", "m7"),
+    p.add_argument("--only", choices=("m4", "m7", "esp32c6"),
                    help="restrict to one processor")
     p.add_argument("--force", action="store_true",
                    help="reapply even when versions already match")
     p.add_argument("--dry-run", action="store_true",
                    help="show the plan, write nothing")
     p.set_defaults(func=cmd_fw_update)
+
+    p = fws.add_parser("esp32c6-status",
+                       help="the ESP32-C6 update state: progress, outcome, busy")
+    _add_device_opts(p)
+    p.set_defaults(func=cmd_fw_esp32c6_status)
 
     p = fws.add_parser("enter-recovery",
                        help="reboot into MCUboot serial recovery")
@@ -1581,8 +1675,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--m7-version", required=True)
     p.add_argument("--m4", required=True, help="raw M4 image")
     p.add_argument("--m4-version", required=True)
-    p.add_argument("--esp32c6", help="optional C6 image")
-    p.add_argument("--esp32c6-version", default="unknown")
+    p.add_argument("--esp32c6",
+                   help="the C6 APP image (healthybridge-esp32 build.hp6/"
+                        "healthybridge_esp32c6.bin, not the merged image); signed "
+                        "into the bundle. Omit it and the bundle cannot update the C6")
+    p.add_argument("--esp32c6-version",
+                   help="default: the version in the image's app descriptor; if "
+                        "given, it must match it")
     p.add_argument("--release", required=True, help="release version string")
     p.add_argument("--hw-rev", nargs="+", default=["v5"])
     p.add_argument("--key", required=True, help="ECDSA P-256 signing key (PEM)")
@@ -1592,9 +1691,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_fw_bundle_create)
 
     fw.epilog = (
-        "Update order is esp32c6 → m4 → m7; the M7 goes last because it applies "
-        "the others. The C6 is skipped over USB — it updates itself over Wi-Fi. "
-        "Use the CDC 1 (control) port."
+        "Update order is m4 → m7 → reset → esp32c6. The C6 goes last because a "
+        "reset after its commit would roll its new image back; it is relayed by "
+        "the M7 over USB. Use the CDC 1 (control) port. Exit codes: 0 done, 1 "
+        "applied but not as expected, 2 refused/failed, 5 C6 rolled back, 6 C6 "
+        "outcome unconfirmed, 7 C6 needs a one-time USB flash."
     )
 
     # -- hl (HealthyLink module artifacts) ----------------------------------
