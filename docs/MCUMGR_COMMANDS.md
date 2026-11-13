@@ -499,6 +499,8 @@ Request `{}` →
 | `vflags` | uint | Raw vitals flags (see [HP6_DATA_FORMAT.md](HP6_DATA_FORMAT.md)) |
 
 The mask is debounced (~100 ms) and named by **electrode**, not by AFE channel.
+On v5 hardware the `8` (V1) bit never asserts, a board-level limitation in
+firmware 1.0.0: `v1` false does not mean the V1 electrode is attached.
 A large `age_ms` with `ok` false means the ECG front end has gone quiet — which
 is *not* the same as "all electrodes connected", and the mask should be treated
 as stale rather than as good news.

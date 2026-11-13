@@ -91,6 +91,64 @@ Versions here are the **firmware** version reported by the device
   are unchanged. **Settings start empty on the first boot after updating**, as
   LittleFS moves. The release check now fails a build whose QSPI partitions do
   not fit the declared part, or a v5+ board that declares anything but 64 MiB.
+- `healthypi test run` against a port that does not answer exited 1 with a
+  traceback, the same code as a test FAIL. It now exits 3 with a message.
+- **Heart rate, SpO2 and HRV no longer stay on screen after the M4 stops
+  sending them.** Their 5 s freshness limit was only checked when a new vitals
+  message arrived, so if the M4 crashed, hung, was being updated or simply went
+  quiet, the last values stayed on the display, in the live stream, on the
+  ESP32 link and in the lead-off diagnostic reply as if they were current.
+  The M7 now publishes an updated vitals sample at the moment each value
+  expires, with expired values reading 0 ("not available"); values return with
+  the next message from the M4. SpO2 and the weak-perfusion flag now expire
+  with the PPG data they came from -- before, SpO2 had no freshness limit at
+  all.
+- **HRV frequency domain (M4).** Three defects found by the new host test of the
+  HRV maths (`app_m4/tests/hrv/`) are fixed. VLF/LF/HF band powers were exactly
+  1/64 of the true value (the frequency step was applied twice). The spectrum
+  was taken over the *oldest* 64 s of the up-to-4-minute RR history rather than
+  the newest, so LF/HF could describe data about three minutes old. With 32–64 s
+  of data the record was tapered with a truncated window and normalised as if it
+  were whole, reading 20–50 % low and weighting the record unevenly in time.
+  Band powers and LF/HF now agree with an independent reference; only LF/HF is
+  carried in `hp6_vitals`, so the scale fix changes nothing a host sees; the
+  other two do change the LF/HF it receives. Not yet checked on hardware.
+- **ECG heart rate follows a change in seconds, not minutes (M4).** It was the
+  mean of the whole 256-beat RR history, so a step from 60 to 100 BPM took 236
+  beats (~2.4 minutes) to be reported within 5 BPM. It is now the median of the
+  newest 8 RR intervals: the same step, either direction, settles in 5 beats,
+  and a single premature, missed or extra beat no longer moves the reading (a
+  plain mean of 8 would have swung it by up to 8 BPM). A steady rhythm reads
+  exactly as before, and the first rate still appears after 4 beats. HRV is
+  unchanged and still uses the full history. Checked on the host
+  (`app_m4/tests/hrv/`); not yet checked against real QRS detection on hardware.
+- **A stale ECG heart rate is withdrawn after 5 s (M4).** With HRV on (the
+  default) the M4 re-sends its ECG vitals every 5 s whether or not a beat was
+  detected, still carrying the last rate, and the M7 counts an ECG rate as
+  fresh for 5 s from each message's arrival. So if QRS detection stopped while
+  the electrodes stayed on -- asystole, a flat or very low-amplitude trace, a
+  detector that lost the signal -- the last heart rate could stay on the
+  display, in the stream and in recordings indefinitely, as a live ECG rate.
+  The M4 now reports no rate (0, confidence 0) once no RR interval has been
+  accepted for 5 s of signal, and sends that at once; the M7 then falls back
+  to a fresh PPG rate (flagged as such) or shows none. A rhythm below 30 BPM,
+  which the M4 cannot measure, now also clears the rate instead of keeping the
+  last one. After a pause the rate returns after 4 beats and is built only from
+  intervals after the pause. A steady 30 BPM and a single missed beat at
+  normal rates do not trigger it; below about 36 BPM one missed beat does.
+  Checked on the host; not yet checked on hardware.
+
+### Added
+- **`scripts/release.sh` gates a bundle on hardware.** `--port <CDC1>` (or
+  `HP6_RELEASE_PORT`) runs the group-64 acceptance suite (`healthypi test run`)
+  on the attached unit first and refuses to build on any FAIL or if the suite
+  cannot run. SKIPs are listed and allowed, and the report is kept as
+  `build/release/hw-gate.json`. Without a port it refuses unless `--no-hw-gate`
+  is given, which prints a warning that the bundle was not hardware-gated.
+- `CONFIG_HPI_RESP_MIN_AMP_UV` (default 100, unchanged): the respiration-rate
+  detector's amplitude floor, now configurable. With `resp_debug.conf` the
+  detector logs the filtered amplitude it sees and the rate it produced every
+  5 s, so the floor can be set from bench data.
 
 ### Changed
 - **`scripts/flash.sh esp32` takes `--full` or `--app-only`.** It ran the C6
@@ -149,8 +207,10 @@ The first public release. Nothing had shipped before it, so both cores start at
 - PPG on the TI AFE4400, 22-bit at 250 Hz. The rate has a single source of truth
   in `CONFIG_AFE4400_PRF_HZ`, which programs the AFE *and* derives the rate
   advertised on the wire, so hardware and metadata cannot drift apart.
-- ECG lead-off detection: comparators configured, electrode mask debounced and
-  published, and an ECG-derived heart rate suppressed while any electrode is off.
+- ECG lead-off detection for RA, LA and LL: comparators configured, electrode
+  mask debounced and published, and an ECG-derived heart rate suppressed while
+  any electrode is off. V1 is wired into the mask but never asserts on v5 (see
+  Known limitations).
 - Temperature (ams AS6221), motion (BMI323), fuel gauge (MAX17048) and a
   TI BQ24074 linear charger.
 
@@ -159,7 +219,11 @@ The first public release. Nothing had shipped before it, so both cores start at
   per-consumer lock-free rings and drop-on-full, so a slow consumer can never
   back-pressure acquisition.
 - Cortex-M4 as a calculations-only core over OpenAMP/RPMSG. QRS detection and
-  heart rate are live; SpO₂ and EEG band power are present but not enabled.
+  ECG heart rate are live. SpO₂ and a PPG pulse rate are computed and published,
+  but the R→SpO₂ curve is inherited and uncalibrated on this hardware. HRV
+  (SDNN/RMSSD, LF/HF) is computed by default but not yet validated against a
+  reference. EEG band power is a stub: EEG batches are received and counted,
+  not analysed.
 - HealthyLink expansion framework: provider registry, interface arbiter and a
   supervisor that quarantines a faulting module without disturbing acquisition.
 
@@ -223,9 +287,11 @@ The first public release. Nothing had shipped before it, so both cores start at
   reference oximeter on this hardware. Do not treat the value as clinical.
 - **HRV** (SDNN/RMSSD, LF/HF) is computed, but has not been validated against a
   known RR series.
-- **Lead-off** detects RA, LA and LL. **V1 is not detected** — a board-level
-  fault, not a firmware one. The comparator threshold has not been checked on a
-  body.
+- **Lead-off** detects RA, LA and LL. **V1 is not detected on v5** — its bit
+  in the lead-off mask never asserts, so the absence of a V1 lead-off warning
+  does not mean the V1 electrode is attached. This is a board-level limitation,
+  not a firmware one, and 1.0.0 ships with it. The comparator threshold has not been
+  checked on a body.
 - **EEG and NPU expansion modules** are experimental. The NPU link works; the
   inference path is a stub on the module side, and the module's firmware lives
   in the separate `Protocentral/healthylink-compute-fw` repository.

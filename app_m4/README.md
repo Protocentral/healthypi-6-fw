@@ -8,9 +8,10 @@ to test it.**
 > ⚠️ **The M4's intended scope is wider than what is validated.** It is designed for QRS
 > detection, heart rate, SpO₂, HRV and EEG band power. **The ECG→HR path is the only one
 > that has been watched producing a plausible number.** HRV is on by default since
-> 2026-08-31 and now runs on every device, but nothing has ever checked its output
-> against a known RR series; SpO₂ is compiled in and receiving data but yields nothing
-> (it decimates its input twice — see §4 F2); EEG is a stub. Details in §4.
+> 2026-08-31 and now runs on every device; its maths is checked on the host against a
+> reference (`tests/hrv/`), but its output has never been checked on hardware; SpO₂ is
+> computed and published (the double decimation in §4 F2 is fixed) but its R→SpO₂ table
+> is inherited from HealthyPi 5 and uncalibrated on this hardware; EEG is a stub. Details in §4.
 
 ---
 
@@ -36,7 +37,7 @@ to test it.**
 | `src/main.c` | 547 | Boot, IPC bring-up, **PPG/EEG queues + work handlers + stats**, 10 s monitor loop |
 | `src/ipc_module.c` / `.h` | 442 | OpenAMP REMOTE endpoint: init (7 s wait), send, callback dispatch table |
 | `src/algorithm_module.c` / `.h` | 1460 | **The live path:** ECG QRS detection, HR, HRV time+freq domain |
-| `src/spo2_module.c` / `.h` | 1590 | SpO2 + PPG-HR (HP5-derived R-ratio table). Compiled **in**; registers its own `PPG_RAW` callback. Produces nothing — see §4 F2 |
+| `src/spo2_module.c` / `.h` | 1590 | SpO2 + PPG-HR (HP5-derived R-ratio table). Compiled **in**; registers its own `PPG_RAW` callback. Publishes `PPG_VITALS`; uncalibrated — see §4 F2 |
 | ~~`src/spo2_algorithm.h`~~ | — | **Removed** (2026-08-30). Was the Maxim/HP5 SpO2 reference header; it was included by nothing. |
 | ~~`src/test_ipc.c` / `.h`~~ | — | **Removed** (2026-06-09). Was the Phase-0 echo responder; IPC init now called directly from `main()` via `hpi_ipc_init()`. |
 | `../src/ring_buffer.c` | — | Pulled in via `CMakeLists.txt` |
@@ -92,21 +93,25 @@ raw batches M7→M4, `*_VITALS` M4→M7, `*_CONFIG` M7→M4. Batch size 16 sampl
 
 | Capability | State | Notes |
 |------------|-------|-------|
-| **ECG → QRS → HR** | ✅ **Live** | Only fully-working path. Simplified Pan-Tompkins on Lead I |
-| **HRV time domain** (SDNN/RMSSD/pNN50) | 🟡 **Runs, not yet validated** | `HRV_ENABLED_DEFAULT=true` since 2026-08-31. Before that it defaulted false and nothing in either core ever called `algorithm_set_hrv_enabled(true)`, so SDNN/RMSSD were computed by no one and the fields they travel in read 0 on every device ever built. Updates every 5 s, needs ≥8 RR intervals. The numbers have never been compared against a known RR series |
-| **HRV freq domain** (LF/HF via CMSIS-DSP FFT) | 🟡 **Runs, not yet validated** | Same default; updates every 60 s, needs ≥32 RR intervals. Never compared against a reference spectrum |
-| **SpO2 + PPG-HR** | 🔴 **Runs, outputs nothing** | Compiled **in** (`main.c:483` is `#if 1`), starts, and registers `PPG_RAW` itself (`spo2_module.c:1285`). Broken by the double decimation in **F2** below |
+| **ECG → QRS → HR** | ✅ **Live** | Only fully-working path. Simplified Pan-Tompkins on Lead I. **Rate = median of the newest 8 RR intervals** (`HR_WINDOW_RR`; fewer while fewer exist), first reported after 3 intervals = 4 beats (`HR_MIN_RR_COUNT`, unchanged). Follows a 60↔100 BPM step in 5 beats and is not moved by a single premature, missed or extra beat (host-measured, `tests/hrv/`). Until 2026-11-12 it was the mean of the whole 256-interval history: 236 beats (~142 s) for the same step. HRV still reads the full history. **The rate expires** (0, confidence 0, state LEARNING, sent at once) when no RR interval has been accepted for 5 s of samples (`HR_STALE_SAMPLES`); after that the window restarts, so the next rate needs 3 new intervals (4 beats) and contains no pre-pause interval. Before 2026-11-12 it never expired on the M4, and the HRV-pass re-sends (every 5 s) kept the M7's 5 s freshness window open on the last rate indefinitely through asystole or a lost signal with the leads on. Not yet checked against real QRS detection on hardware |
+| **HRV time domain** (SDNN/RMSSD/pNN50) | 🟡 **Runs, not yet validated** | `HRV_ENABLED_DEFAULT=true` since 2026-08-31. Before that it defaulted false and nothing in either core ever called `algorithm_set_hrv_enabled(true)`, so SDNN/RMSSD were computed by no one and the fields they travel in read 0 on every device ever built. Updates every 5 s, needs ≥8 RR intervals. **Maths checked on the host** against a reference (`tests/hrv/`, §6): SDNN/RMSSD/pNN50 agree within 1 ms / 1 %. Not yet checked on hardware with real QRS timing |
+| **HRV freq domain** (LF/HF via CMSIS-DSP FFT) | 🟡 **Runs, not yet validated** | Same default; updates every 60 s over the **newest** 64 s of RR, needs ≥32 RR intervals and ≥32 s. **Maths checked on the host** (`tests/hrv/`, §6): VLF/LF/HF in ms², LF/HF and LFnu/HFnu agree with the reference within 10 % / 3 points. Three defects the host test found are fixed (2026-11-12): band powers were 1/64 of true (D1, `df` applied twice); the spectrum covered the *oldest* 64 s of the up-to-4-minute buffer (D2); and 32–64 s of data got the first L points of a 256-point window with the full window's normalisation, 20–50 % low and unevenly weighted in time (D3; now a Hann window of the record's own length). Only the LF/HF ratio reaches `hp6_vitals`; the M7 drops the absolute powers. Not yet checked on hardware |
+| **SpO2 + PPG-HR** | 🟡 **Runs, uncalibrated** | Compiled **in** (`main.c` `#if 1`), starts, registers `PPG_RAW` itself and sends `PPG_VITALS`. The double decimation in **F2** below is fixed; the R→SpO₂ lookup (`uch_spo2_table`, from HealthyPi 5) has never been checked against a reference oximeter on this hardware |
 | **EEG band power** | 🔴 **Stub** | `eeg_work_handler` only counts batches/sequence errors. `// TODO Phase 3: EEG frequency band analysis`. No FFT yet |
 | **IPC ACKs to M7** | 🔴 Disabled | All `hpi_ipc_send(STATUS, ack)` blocks are `#if 0` — were a suspected buffer-saturation source |
 | **Arrhythmia flags** | 🟡 Trivial | Only brady/tachy from HR thresholds in `send_ecg_vitals()`; real classification is on the NPU module |
 
-### F2 — the SpO2 defect, in one place
+### F2 — the SpO2 decimation defect (fixed)
+
+**Fixed in code:** `spo2_module.c` no longer decimates; it uses every sample and
+a `BUILD_ASSERT` ties `SPO2_SAMPLE_RATE_HZ` to `HPI_PPG_M4_RATE_HZ`. The record
+of the defect is kept below because it explains the window constants.
 
 The M7 **already** decimates PPG from 250 Hz to 125 Hz before sending it here
 (`app_m7/src/platform/ipc.c`, `PPG_M4_RATE_HZ 125`, `PPG_DECIM 2`), and
 `spo2_module.h` agrees: `SPO2_SAMPLE_RATE_HZ 125`.
 
-But `spo2_module.c:82-85` still believes it is fed the raw AFE rate:
+But `spo2_module.c` used to believe it was fed the raw AFE rate:
 
 ```c
 #define HP6_SAMPLE_RATE     500     /* wrong twice: the AFE4400 runs at 250 Hz,
@@ -115,7 +120,7 @@ But `spo2_module.c:82-85` still believes it is fed the raw AFE rate:
 #define DOWNSAMPLE_RATIO    (HP6_SAMPLE_RATE / HP5_SAMPLE_RATE)  /* 4 */
 ```
 
-and applies it for real at `spo2_module.c:1039-1044`, keeping one sample in four.
+and applied it for real, keeping one sample in four.
 **125 / 4 = 31.25 Hz.** Everything downstream assumes 125 Hz: `SPO2_BUFFER_SIZE
 250` is commented "2 seconds" but is 8; the DC filter is tuned for `fs=125 Hz`;
 the peak-spacing gate of 10-250 samples means 30-200 BPM at 125 Hz but 7.5-50 BPM
@@ -148,21 +153,37 @@ Plan: `fw-internal-docs/release/RELEASE_1_0_0_FEATURE_COMPLETION_PLAN.md` W1.
      is imperfect.
   3. Filter coefficients (`bp_filter_b/a`) are declared but the actual filter is a
      hand-rolled 2nd difference — the coeff arrays are unused.
+- **Rate expiry:** `expire_stale_heart_rate()` withdraws the rate once no RR interval
+  has been *accepted* for `HR_STALE_SAMPLES` = 2500 samples (5 s), counted in sample
+  indices like RR itself. 5 s is 2.5× the longest accepted interval (2000 ms = 30 BPM),
+  so a steady 30 BPM and a 60 BPM rhythm with one missed beat never trip it; it equals
+  the M7's `HR_STALE_MS`. Keyed on accepted intervals rather than detections, so a
+  rhythm below 30 BPM (every interval rejected by the gate) also expires the rate
+  instead of leaving the last measurable one up. Trade-off: below ~36 BPM a single
+  missed beat leaves > 5 s between accepted intervals and withdraws the rate until 3 new
+  ones. On expiry: HR 0 / confidence 0 / RR 0 / state LEARNING, brady/tachy clear (they
+  derive from the rate), the 8-interval HR window (`hr_rr_count`) restarts. The RR
+  history and HRV are untouched; the interval spanning the pause (> 5 s) is already
+  rejected by the 300–2000 ms gate, so it reaches neither HR nor HRV. **The HRV series
+  is still spliced across a pause** (pre- and post-pause intervals are adjacent in the
+  buffer, as after any rejected interval); the M7 blanks HRV while it has no ECG rate.
 - **Output:** `send_ecg_vitals()` packs `struct hpi_ipc_ecg_vitals` (HR, RR, QRS count,
   confidence, signal quality, HRV fields, `algorithm_state`, arrhythmia/flags) and sends
-  `0x21`. Triggered on QRS, on HR change, or right after an HRV calc.
+  `0x21`. Triggered on QRS, on any HR change (including to 0, i.e. an expiry), or right
+  after an HRV calc. The HRV-pass sends happen whether or not a beat arrived, which is
+  why the rate must expire on the M4: the M7 times an ECG rate from message *arrival*.
 
 ---
 
 ## 5. Suggested pick-up order for the unfinished work
 
-1. **Fix + validate SpO2** — there is no `#if 0` to flip; the module is already
-   compiled in and already receives PPG. Delete the second decimation (**F2**
-   above), re-check every window constant against a real 125 Hz, then verify
-   R-ratio→SpO2 against a reference oximeter. The calibration constants
-   `SPO2_CALIBRATION_A/B` are inherited from HP5 and have never been measured on
-   this AFE and optical stack — do not present SpO2 as a clinical number until
-   they have been.
+1. **Validate SpO2** — the module is compiled in, receives PPG at 125 Hz and the
+   second decimation (**F2** above) is gone. What is missing is calibration:
+   verify R-ratio→SpO2 against a reference oximeter. The conversion is the
+   `uch_spo2_table` lookup inherited from HP5 (the `SPO2_CALIBRATION_A/B`
+   constants in `spo2_module.h` are declared but unused) and has never been
+   measured on this AFE and optical stack — do not present SpO2 as a clinical
+   number until it has been.
 2. **Validate HRV** — there is nothing left to enable; it is on by default and the RR
    timebase is now the sample index, so what is missing is evidence the numbers are
    right. Feed a known RR series with published SDNN/RMSSD/LF-HF and compare against
@@ -209,7 +230,26 @@ with M7; filter on the `[M4]`/module tags — `algorithm_module`, `ipc_module_m4
 **HRV testing:** HRV is on by default, so `HRV calculated: SDNN=… RMSSD=…` / `HRV freq:
 …` lines appear on their own once enough beats have accumulated — time domain needs ≥8 RR
 intervals (every 5 s), frequency domain ≥32 (every 60 s). Seeing the lines only proves the
-path runs; the values are unvalidated (§5.2).
+path runs; it says nothing about the values.
+
+**HRV maths on the host:** `python3 app_m4/tests/hrv/test_hrv.py` compiles
+`algorithm_module.c` itself for the workstation (Zephyr headers shimmed, real
+CMSIS-DSP from the west workspace or `$CMSIS_DSP`), feeds known RR series through
+`update_rr_interval()`, and compares SDNN/RMSSD/pNN50, band powers, LF/HF and
+LFnu/HFnu with `tests/hrv/hrv_oracle.py`, a from-the-definitions Python reference.
+Known defects are expected failures with their numbers; the run fails on a new
+failure *or* on a known one starting to pass. CI runs it (`m4-hrv-host`). It does not
+exercise QRS detection — RR intervals go straight into the buffer, or, for the
+`stale:`/`expire:`/`no-expiry:` cases, beats are placed at exact sample indices and run
+through `track_rhythm()` + `ecg_report()` (the thread's path from a detected QRS to the
+`ECG_VITALS` it sends), with a model of the M7's `publish_vitals()` arbitration on top. The frequency-domain
+defects D1–D3 it found are fixed, and so is the heart-rate lag it measured (whole-history
+mean, now a median of the newest 8; see §4): the `HR …` cases check the step response
+both ways, steady state, single outliers and start-up from 1 interval up; the stale-rate
+cases check expiry 5 s after the last interval (HRV on and off, every re-send after it 0),
+recovery from 0 after exactly 3 new intervals with no pre-pause contribution, that a missed
+beat at 60 BPM and a steady 30 BPM do not expire, and the < 36 BPM trade-off. No expected
+failures remain.
 
 **Pre-commit:** `scripts/build.sh m4` builds clean; IPC callbacks stay enqueue-only;
 messages ≤512 B; plain `%u`/`%d` for `uint32_t`/`int32_t` in logs (both cores are
@@ -224,8 +264,9 @@ messages ≤512 B; plain `%u`/`%d` for `uint32_t`/`int32_t` in logs (both cores 
   assuming which. **EEG** really is a stub. **HRV** is no longer disabled (on by
   default since 2026-08-31), so zeroed HRV fields are now a data or algorithm
   question, not a missing enable call. **SpO2** was never disabled either — it is
-  compiled in and receiving data, and fails for a real reason (F2, the double
-  decimation). Assuming a disable flag is what kept that defect hidden.
+  compiled in and receiving data; it used to fail for a real reason (F2, the
+  double decimation, now fixed). Assuming a disable flag is what kept that
+  defect hidden.
 - **CMSIS-DSP FFT uses static RAM buffers** (`hrv_interp/window/fft_output/power_spectrum`,
   ~4 KB) and an init-once `arm_rfft_fast_instance_f32`; FFT runs in the ECG thread, so its
   4 KB stack must accommodate the call depth.

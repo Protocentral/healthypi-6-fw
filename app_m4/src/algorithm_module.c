@@ -29,6 +29,41 @@ LOG_MODULE_REGISTER(algorithm_module, LOG_LEVEL_INF);
 #define ECG_BUFFER_SIZE         256    /* Circular buffer for context */
 #define RR_HISTORY_SIZE         256    /* Sized for frequency-domain HRV */
 
+/* Heart rate: the median of the newest HR_WINDOW_RR intervals (fewer while
+ * fewer exist), reported once HR_MIN_RR_COUNT intervals = 4 detected beats
+ * are in. The RR history above is untouched by this: HRV still reads all of
+ * it. The rate used to be the mean of the whole 256-interval history, which
+ * took 236 beats (~142 s) to follow a step from 60 to 100 BPM; the median of
+ * 8 follows it in 5 beats and is unmoved by a single ectopic, missed or extra
+ * beat, where a mean of 8 settles in 8 and swings by up to 8 BPM on one bad
+ * interval. Numbers: app_m4/tests/hrv/test_hrv.py. */
+#define HR_WINDOW_RR            8
+#define HR_MIN_RR_COUNT         3
+
+/* A heart rate expires when no RR interval has been accepted for this many
+ * ECG samples (5 s at 500 Hz). Counted in samples, so it is the signal's time,
+ * not the time a batch happened to be processed.
+ *
+ * Why it is needed: ECG_VITALS is re-sent after every HRV pass (5 s, and 60 s
+ * for the spectrum) whether or not a beat arrived, and the M7 treats an ECG
+ * rate as fresh for 5 s from each message's ARRIVAL. Without an expiry here a
+ * rate survived asystole, a flat line or a detector that stopped finding QRS
+ * for as long as the electrodes stayed on.
+ *
+ * Why 5 s: the longest interval the gate accepts is 2000 ms (30 BPM), so a
+ * steady 30 BPM refreshes the rate every 2 s, and a 60 BPM rhythm with one
+ * missed beat (one 2000 ms interval) never comes close. Below ~36 BPM a missed
+ * beat leaves a 3-interval gap between accepted intervals and does expire the
+ * rate: at that rate a dropped beat is enough doubt to withdraw the number. It
+ * is also the M7's own HR_STALE_MS, so with or without HRV re-sends a rate is
+ * never shown for more than ~5 s after the last interval that supports it.
+ *
+ * Keyed on the last ACCEPTED interval, not the last detection: the rate is made
+ * of accepted intervals only, so its age is theirs. A rhythm below 30 BPM (every
+ * interval rejected) or a detector firing faster than the 300 ms gate therefore
+ * expires the rate too, rather than leaving the last good one on screen. */
+#define HR_STALE_SAMPLES        (5U * HPI_ECG_M4_RATE_HZ)
+
 /* HRV Configuration - can be toggled at runtime via algorithm_set_hrv_enabled().
  *
  * ON by default since 2026-08-31. It defaulted to false "to save CPU", and
@@ -124,6 +159,14 @@ struct ecg_algorithm_state {
     size_t rr_index;                      /* Circular buffer index */
     size_t rr_total_count;                /* Total RR intervals ever recorded */
 
+    /* Heart-rate window: how many of the newest rr_intervals belong to the
+     * current run of beats (0..HR_WINDOW_RR). Reset to 0 when the rate expires,
+     * so a rate after a gap is built from post-gap intervals only and the
+     * HR_MIN_RR_COUNT start-up rule applies again. HRV ignores it. */
+    size_t hr_rr_count;
+    uint64_t last_rr_sample;              /* Sample index closing the newest accepted RR */
+    uint16_t last_sent_hr;                /* heart_rate of the last ECG_VITALS sent */
+
     /* HRV state */
     struct hrv_time_domain hrv;           /* Latest time domain HRV metrics */
     struct hrv_freq_domain hrv_freq;      /* Latest frequency domain HRV metrics */
@@ -191,7 +234,14 @@ static int calculate_derivative(const int32_t *input, int32_t *output, size_t co
 static int square_signal(const int32_t *input, int32_t *output, size_t count);
 static int moving_window_integration(const int32_t *input, int32_t *output, size_t count);
 static uint8_t assess_signal_quality(const int32_t *samples, size_t count);
+static uint16_t rr_ms_from_sample_delta(uint64_t d);
 static void update_rr_interval(uint16_t interval_ms);
+static void update_heart_rate(struct ecg_algorithm_results *results);
+static void expire_stale_heart_rate(void);
+static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
+                         struct ecg_algorithm_results *results);
+static void ecg_report(const struct ecg_algorithm_results *results,
+                       uint32_t now_ms);
 static void calculate_hrv_time_domain(struct hrv_time_domain *hrv);
 static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq);
 static void send_ecg_vitals(void);
@@ -305,6 +355,11 @@ void algorithm_reset(void)
     memset(ecg_state.rr_intervals, 0, sizeof(ecg_state.rr_intervals));
     ecg_state.rr_count = 0;
     ecg_state.rr_index = 0;
+    ecg_state.hr_rr_count = 0;
+    ecg_state.last_rr_sample = 0;
+    ecg_state.current_hr = 0;
+    ecg_state.hr_confidence = 0;
+    ecg_state.current_rr_ms = 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -363,57 +418,71 @@ static void ecg_algorithm_thread_func(void *p1, void *p2, void *p3)
             algo_stats.queue_max_usage = queue_usage;
         }
         
-        /* Calculate HRV periodically when enabled and we have enough data */
-        uint32_t current_time = k_uptime_get_32();
-        bool hrv_just_calculated = false;
-
-        if (hrv_enabled) {
-            /* Time domain HRV: every 5 seconds with minimum 8 RR intervals */
-            if (ecg_state.rr_count >= HRV_MIN_RR_COUNT &&
-                (current_time - ecg_state.last_hrv_update_ms) >= HRV_UPDATE_INTERVAL_MS) {
-                LOG_INF("HRV time domain trigger: rr_count=%u, time_since_last=%u ms",
-                        ecg_state.rr_count,
-                        current_time - ecg_state.last_hrv_update_ms);
-                calculate_hrv_time_domain(&ecg_state.hrv);
-                ecg_state.last_hrv_update_ms = current_time;
-                hrv_just_calculated = true;
-            }
-
-            /* Frequency domain HRV: every 60 seconds with minimum 32 RR intervals */
-            if (ecg_state.rr_count >= HRV_FREQ_MIN_RR_COUNT &&
-                (current_time - ecg_state.last_hrv_freq_update_ms) >= HRV_FREQ_UPDATE_INTERVAL_MS) {
-                LOG_INF("HRV freq domain trigger: rr_count=%u, time_since_last=%u ms",
-                        ecg_state.rr_count,
-                        current_time - ecg_state.last_hrv_freq_update_ms);
-                calculate_hrv_freq_domain(&ecg_state.hrv_freq);
-                ecg_state.last_hrv_freq_update_ms = current_time;
-                hrv_just_calculated = true;
-            }
-        }
-
-        /* Send ECG vitals to M7:
-         * - On every QRS detection (for real-time RR interval)
-         * - When HR changes significantly
-         * - Immediately after HRV calculation (to send VALID state) */
-        static uint16_t last_sent_hr = 0;
-        bool hr_changed = (results.heart_rate != last_sent_hr) && (results.heart_rate > 0);
-
-        if (results.qrs_detected) {
-            send_beat_notify(&results);
-        }
-        if (results.qrs_detected || hr_changed || hrv_just_calculated) {
-            send_ecg_vitals();
-            if (hr_changed) {
-                algo_stats.hr_updates_sent++;
-                last_sent_hr = results.heart_rate;
-            }
-        }
+        ecg_report(&results, k_uptime_get_32());
 
         /* Periodic status logging - simplified QRS counter only (every 500 batches = ~16 seconds) */
         if (algo_stats.ecg_batches_processed % 500 == 0) {
             LOG_INF("QRS: %u detected, HR=%u bpm",
                     algo_stats.qrs_detections_total,
                     ecg_state.current_hr);
+        }
+    }
+}
+
+/* After each batch: run the HRV passes when due and decide whether the M7 gets
+ * an ECG_VITALS (and a BEAT_NOTIFY). Pulled out of the thread loop, unchanged
+ * apart from the hr_changed rule below, so the host test can drive it. */
+static void ecg_report(const struct ecg_algorithm_results *results,
+                       uint32_t now_ms)
+{
+    /* Calculate HRV periodically when enabled and we have enough data */
+    uint32_t current_time = now_ms;
+    bool hrv_just_calculated = false;
+
+    if (hrv_enabled) {
+        /* Time domain HRV: every 5 seconds with minimum 8 RR intervals */
+        if (ecg_state.rr_count >= HRV_MIN_RR_COUNT &&
+            (current_time - ecg_state.last_hrv_update_ms) >= HRV_UPDATE_INTERVAL_MS) {
+            LOG_INF("HRV time domain trigger: rr_count=%u, time_since_last=%u ms",
+                    ecg_state.rr_count,
+                    current_time - ecg_state.last_hrv_update_ms);
+            calculate_hrv_time_domain(&ecg_state.hrv);
+            ecg_state.last_hrv_update_ms = current_time;
+            hrv_just_calculated = true;
+        }
+
+        /* Frequency domain HRV: every 60 seconds with minimum 32 RR intervals */
+        if (ecg_state.rr_count >= HRV_FREQ_MIN_RR_COUNT &&
+            (current_time - ecg_state.last_hrv_freq_update_ms) >= HRV_FREQ_UPDATE_INTERVAL_MS) {
+            LOG_INF("HRV freq domain trigger: rr_count=%u, time_since_last=%u ms",
+                    ecg_state.rr_count,
+                    current_time - ecg_state.last_hrv_freq_update_ms);
+            calculate_hrv_freq_domain(&ecg_state.hrv_freq);
+            ecg_state.last_hrv_freq_update_ms = current_time;
+            hrv_just_calculated = true;
+        }
+    }
+
+    /* Send ECG vitals to M7:
+     * - On every QRS detection (for real-time RR interval)
+     * - When the reported HR changes, INCLUDING to 0. A rate that expires
+     *   (HR_STALE_SAMPLES) is sent at once as 0 / confidence 0; this used
+     *   to require heart_rate > 0, so the withdrawal would only have gone
+     *   out with the next HRV pass, or never with HRV off.
+     * - Immediately after HRV calculation (to send VALID state). These
+     *   re-sends carry whatever current_hr is, which is why it must expire
+     *   on the M4: they arrive every 5 s and would otherwise keep the M7's
+     *   5 s freshness window open on the last rate indefinitely. */
+    bool hr_changed = (results->heart_rate != ecg_state.last_sent_hr);
+
+    if (results->qrs_detected) {
+        send_beat_notify(results);
+    }
+    if (results->qrs_detected || hr_changed || hrv_just_calculated) {
+        send_ecg_vitals();
+        if (hr_changed) {
+            algo_stats.hr_updates_sent++;
+            ecg_state.last_sent_hr = results->heart_rate;
         }
     }
 }
@@ -479,15 +548,34 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
     moving_window_integration(squared, integrated, ECG_BATCH_SIZE);
 
     /* QRS detection */
-    size_t qrs_index;
+    size_t qrs_index = 0;
     int qrs_found = qrs_detect(integrated, ECG_BATCH_SIZE, &qrs_index);
     
     /* Build results */
     memset(results, 0, sizeof(*results));
     results->timestamp = k_uptime_get_32();
     results->signal_quality = quality;
-    
-    if (qrs_found > 0) {
+
+    /* qrs_index is the QRS position within this batch, and sample_count has
+     * already been advanced past the batch, so the absolute index is
+     * sample_count - ECG_BATCH_SIZE + qrs_index. */
+    track_rhythm(qrs_found > 0,
+                 (uint64_t)ecg_state.sample_count - ECG_BATCH_SIZE + qrs_index,
+                 results);
+
+    ecg_state.batches_processed++;
+
+    return 0;
+}
+
+/* Everything ecg_process_batch() does once the detector has run: RR interval,
+ * rate expiry, heart rate. qrs_sample is the absolute sample index of the QRS
+ * (ignored when !qrs_found); ecg_state.sample_count must already include this
+ * batch. Separate so the host test can drive it with beats at known samples. */
+static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
+                         struct ecg_algorithm_results *results)
+{
+    if (qrs_found) {
         /* QRS detected! */
         algo_stats.qrs_detections_total++;
         ecg_state.qrs_count++;
@@ -504,49 +592,99 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
          * numbers looked plausible and measured mostly the scheduler. HR
          * survived it (averaged over >= 3 intervals) but HRV cannot.
          *
-         * qrs_index is the QRS position within this batch, and sample_count has
-         * already been advanced past the batch, so the absolute index is
-         * sample_count - ECG_BATCH_SIZE + qrs_index. At 500 Hz that is 2 ms
-         * resolution, set by the ADC, and free of scheduling noise. */
+         * qrs_sample is an absolute sample index (see ecg_process_batch()). At
+         * 500 Hz that is 2 ms resolution, set by the ADC, and free of
+         * scheduling noise.
+         *
+         * The interval that spans a pause long enough to expire the rate is
+         * > HR_STALE_SAMPLES (5 s), far outside the 2000 ms gate, so it is
+         * rejected here and enters neither the HR window nor HRV. */
         uint32_t current_time_ms = results->timestamp;
-        uint64_t qrs_sample = ecg_state.sample_count - ECG_BATCH_SIZE + qrs_index;
         uint16_t rr_ms = 0;
 
         if (ecg_state.last_qrs_sample > 0) {
-            uint64_t d = qrs_sample - ecg_state.last_qrs_sample;
-            uint32_t ms = (uint32_t)((d * 1000U) / HPI_ECG_M4_RATE_HZ);
+            rr_ms = rr_ms_from_sample_delta(qrs_sample - ecg_state.last_qrs_sample);
 
-            /* Validate physiological range for HR calculation (300-2000ms = 30-200 BPM) */
-            if (ms >= 300U && ms <= 2000U) {
-                rr_ms = (uint16_t)ms;
+            if (rr_ms != 0) {
                 update_rr_interval(rr_ms);
                 results->rr_interval_ms = rr_ms;
                 ecg_state.current_rr_ms = rr_ms;
+                ecg_state.last_rr_sample = qrs_sample;
             }
         }
 
         ecg_state.last_qrs_sample = qrs_sample;
         ecg_state.last_qrs_time_ms = current_time_ms;  /* refractory gate only */
     }
-    
-    /* Calculate heart rate from RR intervals */
-    if (ecg_state.rr_count >= 3) {
-        results->heart_rate = calculate_heart_rate(ecg_state.rr_intervals, 
-                                                     ecg_state.rr_count);
+
+    expire_stale_heart_rate();
+    update_heart_rate(results);
+}
+
+/* Withdraw the heart rate when no RR interval has been accepted for
+ * HR_STALE_SAMPLES (see its definition for the why and the why-5-s).
+ *
+ * On expiry:
+ *  - the rate reads 0 with confidence 0 -- the "no rate" the M4 has always
+ *    reported before its first 3 intervals, and what the M7 treats as no ECG
+ *    rate (falls back to a fresh PPG rate, else none);
+ *  - the HR window restarts (hr_rr_count = 0), so after the pause the first
+ *    rate again needs HR_MIN_RR_COUNT new intervals and is the median of those
+ *    alone: a pre-pause interval in the window would be a number about a
+ *    rhythm that may no longer exist;
+ *  - current_rr_ms is cleared: "latest RR" is as stale as the rate;
+ *  - brady/tachy clear by themselves, being derived from current_hr in
+ *    send_ecg_vitals(); on recovery they follow the new rate only.
+ * The RR history (rr_intervals/rr_count) and HRV are left alone: HRV is its own
+ * 5 s / 60 s pass over the full history, and the M7 blanks HRV whenever it has
+ * no ECG rate. The QRS detector is not touched either. */
+static void expire_stale_heart_rate(void)
+{
+    if (ecg_state.hr_rr_count == 0) {
+        return;
+    }
+    if ((uint64_t)ecg_state.sample_count - ecg_state.last_rr_sample <= HR_STALE_SAMPLES) {
+        return;
+    }
+
+    LOG_WRN("ECG rate expired: no RR interval for %u samples (HR was %u)",
+            (uint32_t)((uint64_t)ecg_state.sample_count - ecg_state.last_rr_sample),
+            ecg_state.current_hr);
+
+    ecg_state.hr_rr_count = 0;
+    ecg_state.current_hr = 0;
+    ecg_state.hr_confidence = 0;
+    ecg_state.current_rr_ms = 0;
+}
+
+/* Heart rate from the RR buffer into results and ecg_state.current_hr (which
+ * ECG_VITALS and BEAT_NOTIFY carry to the M7). Pulled out of
+ * ecg_process_batch() so the host test can drive the real start-up rule. */
+static void update_heart_rate(struct ecg_algorithm_results *results)
+{
+    /* hr_rr_count, not rr_count: after an expiry the window holds only the
+     * intervals since, so the start-up rule and the median both see the new
+     * run of beats alone (calculate_heart_rate() reads the newest `count`). */
+    if (ecg_state.hr_rr_count >= HR_MIN_RR_COUNT) {
+        results->heart_rate = calculate_heart_rate(ecg_state.rr_intervals,
+                                                   ecg_state.hr_rr_count,
+                                                   ecg_state.rr_index);
         ecg_state.current_hr = results->heart_rate;
-        
-        /* Confidence based on RR interval variability */
-        results->confidence = (ecg_state.rr_count >= 8) ? 90 : 
-                             (ecg_state.rr_count >= 5) ? 70 : 50;
+
+        /* Confidence from how much history there is (unchanged) */
+        results->confidence = (ecg_state.hr_rr_count >= 8) ? 90 :
+                             (ecg_state.hr_rr_count >= 5) ? 70 : 50;
         ecg_state.hr_confidence = results->confidence;
     } else {
-        results->heart_rate = ecg_state.current_hr;  /* Use last known */
-        results->confidence = 0;  /* Not enough data */
+        /* No rate: before the first HR_MIN_RR_COUNT intervals, and again after
+         * an expiry until as many new ones. This used to report the "last
+         * known" current_hr, which is 0 in both cases now that an expiry
+         * clears it; say so rather than rely on it. */
+        results->heart_rate = 0;
+        results->confidence = 0;
+        ecg_state.current_hr = 0;
+        ecg_state.hr_confidence = 0;
     }
-    
-    ecg_state.batches_processed++;
-    
-    return 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -796,6 +934,20 @@ static uint8_t assess_signal_quality(const int32_t *samples, size_t count)
 /* Heart Rate Calculation                                                     */
 /*----------------------------------------------------------------------------*/
 
+/* RR interval in ms from the distance, in samples, between two QRS detections.
+ * Returns 0 when it falls outside the physiological range accepted for HR and
+ * HRV (300-2000 ms = 30-200 BPM). Pulled out of ecg_process_batch() unchanged
+ * so the host test (app_m4/tests/hrv) can exercise the gate directly. */
+static uint16_t rr_ms_from_sample_delta(uint64_t d)
+{
+    uint32_t ms = (uint32_t)((d * 1000U) / HPI_ECG_M4_RATE_HZ);
+
+    if (ms >= 300U && ms <= 2000U) {
+        return (uint16_t)ms;
+    }
+    return 0;
+}
+
 static void update_rr_interval(uint16_t interval_ms)
 {
     /* Add to circular buffer */
@@ -805,28 +957,47 @@ static void update_rr_interval(uint16_t interval_ms)
     if (ecg_state.rr_count < RR_HISTORY_SIZE) {
         ecg_state.rr_count++;
     }
+    if (ecg_state.hr_rr_count < HR_WINDOW_RR) {
+        ecg_state.hr_rr_count++;
+    }
 }
 
-uint16_t calculate_heart_rate(const uint16_t *rr_intervals, size_t count)
+uint16_t calculate_heart_rate(const uint16_t *rr_intervals, size_t count,
+                              size_t next_index)
 {
-    if (!rr_intervals || count == 0) {
+    if (!rr_intervals || count == 0 || count > RR_HISTORY_SIZE) {
         return 0;
     }
 
-    /* Average RR intervals */
-    uint32_t sum = 0;
-    for (size_t i = 0; i < count; i++) {
-        sum += rr_intervals[i];
+    /* The newest min(count, HR_WINDOW_RR) intervals, walking back from the
+     * slot before next_index (the buffer is circular), insertion-sorted. */
+    uint16_t win[HR_WINDOW_RR];
+    size_t n = (count < HR_WINDOW_RR) ? count : HR_WINDOW_RR;
+
+    for (size_t i = 0; i < n; i++) {
+        size_t idx = (next_index + RR_HISTORY_SIZE - 1 - i) % RR_HISTORY_SIZE;
+        uint16_t v = rr_intervals[idx];
+        size_t j = i;
+
+        while (j > 0 && win[j - 1] > v) {
+            win[j] = win[j - 1];
+            j--;
+        }
+        win[j] = v;
     }
 
-    uint32_t avg_rr_ms = sum / count;
+    /* Median; for an even count the integer mean of the middle two. A median
+     * rather than a mean so one premature, missed or extra beat does not move
+     * the reading at all (a mean of 8 moves by up to 8 BPM). */
+    uint32_t med_rr_ms = (n & 1U) ? win[n / 2]
+                                  : ((uint32_t)win[n / 2 - 1] + win[n / 2]) / 2U;
 
     /* Convert to BPM: HR = 60000 / RR_ms */
-    if (avg_rr_ms == 0) {
+    if (med_rr_ms == 0) {
         return 0;
     }
 
-    uint16_t hr = 60000 / avg_rr_ms;
+    uint16_t hr = 60000 / med_rr_ms;
 
     /* Clamp to physiological range */
     if (hr < 30) hr = 30;
@@ -947,7 +1118,8 @@ static void calculate_hrv_time_domain(struct hrv_time_domain *hrv)
  * @brief Linearly interpolate RR intervals to uniform sampling rate
  *
  * RR intervals are unevenly spaced - we interpolate to HRV_INTERP_RATE Hz
- * for FFT processing. Uses simple linear interpolation.
+ * for FFT processing. Uses simple linear interpolation. If the intervals span
+ * more than output_len samples, the most recent output_len are returned.
  *
  * @param rr_intervals Source RR intervals in ms (circular buffer)
  * @param rr_count Number of RR intervals
@@ -971,13 +1143,21 @@ static size_t interpolate_rr_intervals(const uint16_t *rr_intervals, size_t rr_c
     }
 
     /* Calculate number of output samples based on interpolation rate */
-    size_t num_samples = (size_t)(total_time_sec * HRV_INTERP_RATE);
+    size_t total_samples = (size_t)(total_time_sec * HRV_INTERP_RATE);
+    size_t num_samples = total_samples;
     if (num_samples > output_len) {
         num_samples = output_len;
     }
     if (num_samples < 8) {
         return 0;  /* Not enough data */
     }
+
+    /* When the buffer spans more than output_len samples, keep the NEWEST
+     * ones: start the grid (total_samples - num_samples) samples in, so the
+     * output is the tail of the full interpolation, on the same grid. Starting
+     * at t = 0 here used to analyse the oldest 64 s of up to ~4 min of RR. */
+    float32_t dt = 1.0f / HRV_INTERP_RATE;
+    float32_t t_start = (float32_t)(total_samples - num_samples) * dt;
 
     /* Build cumulative time array and RR values */
     size_t rr_idx = 0;
@@ -994,9 +1174,8 @@ static size_t interpolate_rr_intervals(const uint16_t *rr_intervals, size_t rr_c
     rr_next = (float32_t)rr_intervals[next_idx];
 
     /* Interpolate to uniform rate */
-    float32_t dt = 1.0f / HRV_INTERP_RATE;
     for (size_t i = 0; i < num_samples; i++) {
-        float32_t t = i * dt;
+        float32_t t = t_start + i * dt;
 
         /* Advance through RR intervals until we bracket current time */
         while (t >= t_next && rr_idx < rr_count - 1) {
@@ -1061,9 +1240,28 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
     arm_mean_f32(hrv_interp_buffer, interp_samples, &mean_val);
     arm_offset_f32(hrv_interp_buffer, -mean_val, hrv_interp_buffer, interp_samples);
 
-    /* Step 3: Apply Hanning window using CMSIS-DSP multiply */
+    /* Step 3: Apply a Hann window of the segment's OWN length L and keep its
+     * energy Σw² for the normalisation in Step 6.
+     *
+     * With 64 s of data (L = 256) that is the precomputed table. With 32-64 s
+     * (128 <= L < 256) a window of length L is computed here; the segment is
+     * then zero-padded to 256 for the FFT. This used to apply the first L
+     * points of the 256-point window -- a taper that falls to zero at the old
+     * end only and peaks near the new end, so it weighted the record unevenly
+     * in time -- and normalise by the full window's energy, which read 20-50 %
+     * low. Computing L cosines costs well under 0.1 ms once a minute, and needs
+     * no extra buffer. */
     size_t fft_len = (interp_samples < HRV_FFT_SIZE) ? interp_samples : HRV_FFT_SIZE;
-    arm_mult_f32(hrv_interp_buffer, hrv_hanning_window, hrv_window_buffer, fft_len);
+    float32_t window_power = 0.0f;  /* Σw² of the window actually applied */
+
+    for (size_t n = 0; n < fft_len; n++) {
+        float32_t w = (fft_len == HRV_FFT_SIZE)
+            ? hrv_hanning_window[n]
+            : 0.5f * (1.0f - arm_cos_f32(2.0f * PI * (float32_t)n /
+                                         (float32_t)(fft_len - 1)));
+        hrv_window_buffer[n] = hrv_interp_buffer[n] * w;
+        window_power += w * w;
+    }
 
     /* Zero-pad if necessary */
     if (fft_len < HRV_FFT_SIZE) {
@@ -1077,22 +1275,28 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
     /* FFT output is interleaved real/imag: [Re0, Im0, Re1, Im1, ...] */
     arm_cmplx_mag_squared_f32(hrv_fft_output, hrv_power_spectrum, HRV_FFT_SIZE / 2);
 
-    /* Step 6: Normalize power spectrum. PSD normalization is
-     * 2 / (N * window_power), with Hanning window power ≈ N * 0.375; the ×2
-     * accounts for the one-sided spectrum. Band powers are later integrated
-     * by multiplying by df = fs/N, which supplies the remaining per-Hz
-     * scaling. */
-    float32_t window_power = (float32_t)HRV_FFT_SIZE * 0.375f;  /* Hanning window power */
+    /* Step 6: Normalize power spectrum to power per bin, in ms².
+     *
+     * The one-sided PSD is P[k] = 2|X[k]|² / (fs · Σw²) in ms²/Hz, and a
+     * band's power is Σ P[k] · df with df = fs/N. The fs cancels:
+     *     P[k] · df = 2|X[k]|² / (N · Σw²)
+     * so this factor already yields ms² per bin and the band sums below are
+     * the band powers directly. (They used to be multiplied by df once more,
+     * which made every band power exactly 1/64 of the true value.)
+     * N is the FFT length (256) even when the segment is shorter and
+     * zero-padded; Σw² is that of the window applied (Step 3). */
     float32_t norm_factor = 2.0f / ((float32_t)HRV_FFT_SIZE * window_power);
 
     for (int i = 0; i < HRV_FFT_SIZE / 2; i++) {
         hrv_power_spectrum[i] *= norm_factor;
     }
 
-    LOG_DBG("HRV FFT: N=%d, window_power=%.1f, norm=%.6f",
-            HRV_FFT_SIZE, (double)window_power, (double)norm_factor);
+    LOG_DBG("HRV FFT: N=%d, L=%u, window_power=%.1f, norm=%.6f",
+            HRV_FFT_SIZE, (unsigned)fft_len, (double)window_power,
+            (double)norm_factor);
 
-    /* Step 7: Integrate power in frequency bands */
+    /* Step 7: Integrate power in frequency bands (bins are already ms², see
+     * Step 6 -- do not scale by df again). */
     float32_t freq_resolution = HRV_INTERP_RATE / HRV_FFT_SIZE;  /* Hz per bin */
     float32_t vlf_power = 0, lf_power = 0, hf_power = 0;
 
@@ -1107,11 +1311,6 @@ static void calculate_hrv_freq_domain(struct hrv_freq_domain *hrv_freq)
             hf_power += hrv_power_spectrum[i];
         }
     }
-
-    /* Scale by frequency resolution to get integrated power in ms² */
-    vlf_power *= freq_resolution;
-    lf_power *= freq_resolution;
-    hf_power *= freq_resolution;
 
     float32_t total_power = vlf_power + lf_power + hf_power;
 
@@ -1205,8 +1404,9 @@ static void send_ecg_vitals(void)
     vitals.hrv_hf_nu = ecg_state.hrv_freq.hf_nu;
     vitals.hrv_freq_valid = ecg_state.hrv_freq.valid;
 
-    /* Algorithm state */
-    if (ecg_state.rr_count < 3) {
+    /* Algorithm state. LEARNING whenever there is no rate -- at start-up and
+     * after an expiry (hr_rr_count is reset then; rr_count never shrinks). */
+    if (ecg_state.hr_rr_count < HR_MIN_RR_COUNT) {
         vitals.algorithm_state = HPI_ECG_ALGO_STATE_LEARNING;
     } else if (ecg_state.hrv.valid) {
         vitals.algorithm_state = HPI_ECG_ALGO_STATE_VALID;

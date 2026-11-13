@@ -375,6 +375,24 @@ the bootloader carries serial recovery + signing + downgrade prevention, and the
 USB VID is no longer the Zephyr development pair. `scripts/release.sh` runs it
 and refuses to produce a bundle if it fails.
 
+`release.sh` also gates on hardware. Given a unit's control port, it runs the
+group-64 acceptance suite against that unit before it builds anything:
+
+```bash
+scripts/release.sh --port <CDC1-port>          # or HP6_RELEASE_PORT=<CDC1-port>
+```
+
+This is `healthypi test run --json`, read-only cases only. Any FAIL refuses the
+bundle, and so does a suite that cannot run (wrong port, no reply) or one that
+passes nothing. SKIPs, such as a case that needs an SD card or an unlocked
+device, are listed and do not fail the gate. The report is kept as
+`build/release/hw-gate.json`. The gate tests the unit as it is and does not
+flash it, so put the candidate build on the unit first. `release.sh` prints the
+M7 version the unit reports and warns if it is not the version being released.
+Without a port `release.sh` refuses to run. `--no-hw-gate` builds anyway, with a
+warning that the bundle was not hardware-gated. That is for rehearsing the
+pipeline, not for a bundle that will be published.
+
 ### Normal update — what a user does
 
 One file, one command, all three processors:
@@ -540,7 +558,7 @@ files plus an ordering rule is how a device ends up with an M7 that no longer
 understands its M4.
 
 ```bash
-scripts/release.sh                       # build prod + package + verify
+scripts/release.sh --port <CDC1>         # hw gate + build prod + package + verify
 healthypi fw info --bundle build/release/hpi6-firmware-1.0.0.zip
 ```
 
@@ -582,9 +600,10 @@ Run on a `healthypi6_v5` board with an ST-Link attached:
 
 ```bash
 source ~/zephyrproject/.venv/bin/activate
-scripts/release.sh                                   # must refuse on a dev VID
 scripts/flash.sh signed                              # MCUboot + signed app
 healthypi device info --port <CDC1>                  # group-64 reachable
+scripts/release.sh --port <CDC1>                     # suite on the unit, then bundle;
+                                                     # must refuse on a dev VID
 
 # full update cycle from the bundle
 healthypi fw update --port <CDC1> --bundle build/release/hpi6-firmware-<ver>.zip
@@ -654,7 +673,9 @@ hpi6-firmware-2.0.1.zip
 ```
 
 File names inside the archive come from the manifest's `file` field; the names
-above are what `scripts/release.sh` writes.
+above are what `scripts/release.sh` writes. The hardware-gate report
+(`hw-gate.json`, [§9](#9-firmware-update-and-recovery)) sits next to the bundle
+in `build/release/`. It is not part of the bundle and is not signed.
 
 ### `manifest.json`
 
