@@ -435,9 +435,15 @@ class EegSample(Sample):
 
 
 class EventType(IntEnum):
-    """``hp6_event.type`` -- see ``core/sample_formats.h``."""
+    """``hp6_event.type`` -- see ``core/sample_formats.h``.
+
+    Readers must accept values not listed here: new types arrive without a
+    format version bump.
+    """
 
     USER_MARK = 1
+    PAUSE = 2
+    RESUME = 3
 
 
 @dataclass(slots=True)

@@ -10,6 +10,7 @@
 
 #include "usbd.h"
 #include "platform/fs_mount.h"
+#include "platform/ext_ram.h"
 
 #include <zephyr/device.h>
 #include <zephyr/usb/usbd.h>
@@ -34,9 +35,18 @@ static const struct device *const usb_cdc_dev =
 	DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
 
 /* 16 KiB buys ~700 ms of producer headroom at full stream rate, absorbing host
- * read-gap bursts without dropping frames. */
+ * read-gap bursts without dropping frames.
+ *
+ * Lives in external SDRAM (platform/ext_ram.h): it is filled by the stream
+ * service thread (hpi_usb_stream_write) and drained by cdc0_interrupt_handler,
+ * which on the USB-next stack is NOT an ISR -- usbd_cdc_acm runs the UART
+ * "irq" callback from its own cdc_acm_work_q thread -- and uart_fifo_fill()
+ * memcpy()s out of it into the class's own TX ring, so the USB controller
+ * never DMAs from here. First touched after hpi_usb_start(), long after the
+ * SDRAM is up; ring_buf indices live in ringbuf_usb_cdc (internal RAM), so the
+ * NOLOAD storage needs no clearing. */
 #define RING_BUF_SIZE 16384
-static uint8_t ring_buffer[RING_BUF_SIZE];
+static HPI_EXT_RAM uint8_t ring_buffer[RING_BUF_SIZE];
 static struct ring_buf ringbuf_usb_cdc;
 static bool rx_throttled;
 
