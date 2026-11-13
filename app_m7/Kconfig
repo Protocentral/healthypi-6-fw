@@ -76,6 +76,28 @@ config HPI_RESP_DEBUG
 	  with only noise means no modulation or a demodulation phase null
 	  (sweep CONFIG_SENSOR_ADS129XX_RESP_PHASE). Off for production.
 
+	  Also makes the respiration-rate detector (core/resp_rate.c) log, every
+	  5 s, the band-limited amplitude it sees (peak-to-peak and extremes of
+	  the filtered signal), its envelope, the threshold in force and the
+	  rate it produced -- the evidence for choosing HPI_RESP_MIN_AMP_UV.
+
+config HPI_RESP_MIN_AMP_UV
+	int "Respiration-rate detector amplitude floor (filtered uV)"
+	default 100
+	range 1 100000
+	help
+	  The respiration-rate detector ignores a peak or trough of the
+	  band-limited (~0.08-0.45 Hz) thoracic-impedance signal smaller than
+	  this, in microvolts, and reports 0 bpm until breaths clear it. The
+	  threshold actually used is the larger of this floor and a quarter of
+	  the signal envelope.
+
+	  100 was chosen before the respiration front end worked and has not
+	  been checked against a real breathing signal; a bench estimate puts a
+	  breath nearer 18 uV at the input, so it may be too high. Change it
+	  only on bench evidence: build with resp_debug.conf
+	  (CONFIG_HPI_RESP_DEBUG) and read the filtered amplitude it logs.
+
 config HPI_NPU_UART
 	bool "NPU transport over USART2 (1 Mbaud) -- primary HealthyLink Compute link"
 	default n

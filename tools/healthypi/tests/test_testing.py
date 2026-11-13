@@ -292,6 +292,81 @@ def test_group_filter():
         S._REGISTRY[:] = saved
 
 
+# ------------------------------------------------- CLI exit-code contract --
+#
+# scripts/release.sh gates a bundle on `healthypi test run --json`: exit 0 = no
+# FAIL, 1 = a FAIL (the JSON names it), anything else = the suite never ran.
+# These pin that contract without a device.
+
+
+class _FakeSession:
+    def __init__(self, port=None, **kw):
+        self.port = port
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+
+def _patch_run(monkeypatch, results):
+    from healthypi.transport import serial_smp
+
+    async def fake_run(conn, **kw):
+        rep = Report()
+        for r in results:
+            rep.results.append(r)
+            if kw.get("on_result"):
+                kw["on_result"](r)
+        return rep
+
+    monkeypatch.setattr(serial_smp, "session", _FakeSession)
+    monkeypatch.setattr(testing, "run", fake_run)
+
+
+def test_cli_run_exits_0_with_skips_and_reports_them(monkeypatch, capsys):
+    import json
+
+    from healthypi.cli.main import main
+
+    _patch_run(monkeypatch, [Result("a", Outcome.PASS), Result("b", Outcome.SKIP, "why")])
+    assert main(["test", "run", "--port", "x", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert (out["passed"], out["failed"], out["skipped"]) == (1, 0, 1)
+    assert {"name": "b", "outcome": "SKIP", "detail": "why", "ms": 0.0} in out["results"]
+
+
+def test_cli_run_exits_1_on_a_fail_and_names_it(monkeypatch, capsys):
+    import json
+
+    from healthypi.cli.main import main
+
+    _patch_run(monkeypatch, [Result("a", Outcome.PASS), Result("b", Outcome.FAIL, "bad")])
+    assert main(["test", "run", "--port", "x", "--json"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False
+    assert [r["name"] for r in out["results"] if r["outcome"] == "FAIL"] == ["b"]
+
+
+@pytest.mark.parametrize("exc", [TimeoutError("Failed to connect"), OSError(2, "No such file")])
+def test_cli_run_unreachable_port_is_not_a_fail(monkeypatch, capsys, exc):
+    """A dead port must exit 3 with nothing on stdout -- not a traceback, whose
+    exit status 1 is indistinguishable from a FAIL."""
+    from healthypi.cli.main import main
+    from healthypi.transport import serial_smp
+
+    class _Dead(_FakeSession):
+        async def __aenter__(self):
+            raise exc
+
+    monkeypatch.setattr(serial_smp, "session", _Dead)
+    assert main(["test", "run", "--port", "/dev/nope", "--json"]) == 3
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    assert "/dev/nope" in cap.err
+
+
 # ------------------------------------------------------------- smpgroup ---
 
 
