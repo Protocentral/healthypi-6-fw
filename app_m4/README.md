@@ -94,8 +94,8 @@ raw batches M7→M4, `*_VITALS` M4→M7, `*_CONFIG` M7→M4. Batch size 16 sampl
 | Capability | State | Notes |
 |------------|-------|-------|
 | **ECG → QRS → HR** | ✅ **Live** | Only fully-working path. Simplified Pan-Tompkins on Lead I |
-| **HRV time domain** (SDNN/RMSSD/pNN50) | 🟡 **Runs, not yet validated** | `HRV_ENABLED_DEFAULT=true` since 2026-08-31. Before that it defaulted false and nothing in either core ever called `algorithm_set_hrv_enabled(true)`, so SDNN/RMSSD were computed by no one and the fields they travel in read 0 on every device ever built. Updates every 5 s, needs ≥8 RR intervals. The numbers have never been compared against a known RR series |
-| **HRV freq domain** (LF/HF via CMSIS-DSP FFT) | 🟡 **Runs, not yet validated** | Same default; updates every 60 s, needs ≥32 RR intervals. Never compared against a reference spectrum |
+| **HRV time domain** (SDNN/RMSSD/pNN50) | 🟡 **Runs, not yet validated** | `HRV_ENABLED_DEFAULT=true` since 2026-08-31. Before that it defaulted false and nothing in either core ever called `algorithm_set_hrv_enabled(true)`, so SDNN/RMSSD were computed by no one and the fields they travel in read 0 on every device ever built. Updates every 5 s, needs ≥8 RR intervals. **Maths checked on the host** against a reference (`tests/hrv/`, §6): SDNN/RMSSD/pNN50 agree within 1 ms / 1 %. Not yet checked on hardware with real QRS timing |
+| **HRV freq domain** (LF/HF via CMSIS-DSP FFT) | 🟡 **Runs, not yet validated** | Same default; updates every 60 s, needs ≥32 RR intervals and ≥32 s. **Host test (`tests/hrv/`) finds three defects:** band powers are 1/64 of true (D1), the spectrum covers the *oldest* 64 s of the buffer (D2), and 32–64 s of data gets a truncated window (D3). LF/HF and LFnu/HFnu over a 64 s buffer are correct |
 | **SpO2 + PPG-HR** | 🟡 **Runs, uncalibrated** | Compiled **in** (`main.c` `#if 1`), starts, registers `PPG_RAW` itself and sends `PPG_VITALS`. The double decimation in **F2** below is fixed; the R→SpO₂ lookup (`uch_spo2_table`, from HealthyPi 5) has never been checked against a reference oximeter on this hardware |
 | **EEG band power** | 🔴 **Stub** | `eeg_work_handler` only counts batches/sequence errors. `// TODO Phase 3: EEG frequency band analysis`. No FFT yet |
 | **IPC ACKs to M7** | 🔴 Disabled | All `hpi_ipc_send(STATUS, ack)` blocks are `#if 0` — were a suspected buffer-saturation source |
@@ -214,7 +214,16 @@ with M7; filter on the `[M4]`/module tags — `algorithm_module`, `ipc_module_m4
 **HRV testing:** HRV is on by default, so `HRV calculated: SDNN=… RMSSD=…` / `HRV freq:
 …` lines appear on their own once enough beats have accumulated — time domain needs ≥8 RR
 intervals (every 5 s), frequency domain ≥32 (every 60 s). Seeing the lines only proves the
-path runs; the values are unvalidated (§5.2).
+path runs; it says nothing about the values.
+
+**HRV maths on the host:** `python3 app_m4/tests/hrv/test_hrv.py` compiles
+`algorithm_module.c` itself for the workstation (Zephyr headers shimmed, real
+CMSIS-DSP from the west workspace or `$CMSIS_DSP`), feeds known RR series through
+`update_rr_interval()`, and compares SDNN/RMSSD/pNN50, band powers, LF/HF and
+LFnu/HFnu with `tests/hrv/hrv_oracle.py`, a from-the-definitions Python reference.
+Known defects are expected failures with their numbers; the run fails on a new
+failure *or* on a known one starting to pass. CI runs it (`m4-hrv-host`). It does not
+exercise QRS detection — RR intervals go straight into the buffer.
 
 **Pre-commit:** `scripts/build.sh m4` builds clean; IPC callbacks stay enqueue-only;
 messages ≤512 B; plain `%u`/`%d` for `uint32_t`/`int32_t` in logs (both cores are

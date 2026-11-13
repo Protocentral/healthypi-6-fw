@@ -51,6 +51,24 @@ jobs:
              -o /tmp/vitals_arbiter_test
           /tmp/vitals_arbiter_test
 
+  m4-hrv-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The M4's HRV maths (algorithm_module.c, compiled unmodified for the
+      # host with the real CMSIS-DSP FFT) against a from-the-definitions Python
+      # reference. Needs only CMSIS-DSP, not the west workspace. Keep `ref` at
+      # the cmsis-dsp revision zephyr's west.yml pins (v4.4-branch).
+      - uses: actions/checkout@v4
+        with:
+          repository: zephyrproject-rtos/cmsis-dsp
+          ref: 97512610ec92058f0119450b9e743eeb7e95b5c8
+          path: cmsis-dsp
+      - name: M4 HRV maths match the reference
+        env:
+          CMSIS_DSP: ${{ github.workspace }}/cmsis-dsp
+        run: python3 app_m4/tests/hrv/test_hrv.py
+
   no-private-keys:
     runs-on: ubuntu-latest
     steps:
