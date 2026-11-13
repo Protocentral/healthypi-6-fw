@@ -47,7 +47,9 @@ LOG_MODULE_REGISTER(hpi_resp, CONFIG_HPI_APP_LOG_LEVEL);
 #define RESP_HP_R_Q15       32115
 #define RESP_LP_A_Q15       3506
 #define RESP_ENV_DECAY_Q15  32735   /* 0.999/sample ≈ 14 s tau at 25 Hz */
-#define RESP_MIN_AMP        100     /* filtered µV; below this stay at 0 */
+/* Filtered µV; below this stay at 0. Unvalidated -- see the Kconfig help, and
+ * CONFIG_HPI_RESP_DEBUG for the amplitude log that should set it. */
+#define RESP_MIN_AMP        CONFIG_HPI_RESP_MIN_AMP_UV
 
 #define RESP_N_INT          3
 
@@ -73,6 +75,17 @@ static uint8_t  int_i;
 static bool     logged_lock;
 static bool     logged_zero;
 static int64_t  stats_ms;
+
+#if defined(CONFIG_HPI_RESP_DEBUG)
+/* What the detector saw since the last stats line, for bench tuning of
+ * RESP_MIN_AMP: extremes of the filtered signal, the last threshold in force,
+ * and how many extrema it accepted. Reset on every log. */
+static int32_t  dbg_y_max;
+static int32_t  dbg_y_min;
+static int32_t  dbg_thresh;
+static uint32_t dbg_ext;
+static uint32_t dbg_n;
+#endif
 
 static int32_t q15_mul(int32_t x, int32_t a)
 {
@@ -190,6 +203,17 @@ static void resp_on_ds(int32_t x, uint32_t t_ms)
         thresh = RESP_MIN_AMP;
     }
 
+#if defined(CONFIG_HPI_RESP_DEBUG)
+    if (dbg_n == 0U || y > dbg_y_max) {
+        dbg_y_max = y;
+    }
+    if (dbg_n == 0U || y < dbg_y_min) {
+        dbg_y_min = y;
+    }
+    dbg_n++;
+    dbg_thresh = thresh;
+#endif
+
     bool local_max = (y_z1 > y_z2) && (y_z1 >= y);
     bool local_min = (y_z1 < y_z2) && (y_z1 <= y);
 
@@ -201,9 +225,13 @@ static void resp_on_ds(int32_t x, uint32_t t_ms)
         }
     }
 
-    if (polarity > 0 && local_max && y_z1 > thresh) {
-        resp_accept_ext(t_ms);
-    } else if (polarity < 0 && local_min && y_z1 < -thresh) {
+    bool ext = (polarity > 0 && local_max && y_z1 > thresh) ||
+               (polarity < 0 && local_min && y_z1 < -thresh);
+
+    if (ext) {
+#if defined(CONFIG_HPI_RESP_DEBUG)
+        dbg_ext++;
+#endif
         resp_accept_ext(t_ms);
     }
 
@@ -291,6 +319,20 @@ static void resp_maybe_log(void)
 
     hpi_bus_sub_get_stats(g_sub, &st);
     LOG_INF("resp: %u bpm env=%d drop=%u", rr, env, st.frames_dropped);
+
+#if defined(CONFIG_HPI_RESP_DEBUG)
+    /* n=0: no downsampled point reached the filter in this window (leads off,
+     * or no ECG frames), so the amplitude fields mean nothing. */
+    LOG_INF("resp dbg: filtered p-p=%d uV (max %d, min %d) env=%d thresh=%d "
+            "(floor %d) extrema=%u n=%u -> %u bpm",
+            dbg_n ? (dbg_y_max - dbg_y_min) : 0, dbg_y_max, dbg_y_min, env,
+            dbg_thresh, RESP_MIN_AMP, dbg_ext, dbg_n, rr);
+    dbg_y_max = 0;
+    dbg_y_min = 0;
+    dbg_thresh = 0;
+    dbg_ext = 0;
+    dbg_n = 0;
+#endif
 }
 
 static void resp_thread_fn(void *p1, void *p2, void *p3)

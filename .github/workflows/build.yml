@@ -35,6 +35,22 @@ jobs:
              -o /tmp/hb_codec_test
           /tmp/hb_codec_test
 
+  vitals-arbiter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Which sensor's heart rate the device shows, and when HR/SpO2/HRV stop
+      # being shown because the M4 went quiet. Pure logic over timestamps, so
+      # it is pinned on the host rather than left to a bench session.
+      - name: M7 vitals arbitration and expiry rules
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+             -I app_m7/tests/host/stubs -I app_m7/src -I app_m7/src/platform \
+             app_m7/tests/host/test_vitals_arbiter.c \
+             app_m7/src/platform/vitals_arbiter.c \
+             -o /tmp/vitals_arbiter_test
+          /tmp/vitals_arbiter_test
+
   m4-hrv-host:
     runs-on: ubuntu-latest
     steps:

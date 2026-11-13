@@ -1124,12 +1124,23 @@ def cmd_test_run(args) -> int:
                             print(f"  {r.name}: {r.detail}")
             return 0 if report.ok else 1
 
+    # Exit codes are the contract scripts/release.sh gates on: 0 = no FAIL,
+    # 1 = at least one FAIL (and the --json report says which), anything else =
+    # the suite never ran. A port that does not answer must therefore land in
+    # "never ran", not escape as a traceback whose exit status (1) reads as FAIL.
     try:
         return asyncio.run(_main())
     except serial_smp.UnparseableReplyError as exc:
         return _fail(str(exc), 2)
     except serial_smp.NoDeviceError as exc:
         return _fail(str(exc), 3)
+    except (TimeoutError, asyncio.TimeoutError, OSError) as exc:
+        where = args.port or "the detected port"
+        return _fail(
+            f"could not talk to {where} ({exc}). Is it CDC 1 (the control "
+            "port), and is the unit out of Transfer Mode and recovery?",
+            3,
+        )
     except KeyboardInterrupt:
         return 130
 
