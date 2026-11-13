@@ -34,6 +34,40 @@ Versions here are the **firmware** version reported by the device
   the next message from the M4. SpO2 and the weak-perfusion flag now expire
   with the PPG data they came from -- before, SpO2 had no freshness limit at
   all.
+- **HRV frequency domain (M4).** Three defects found by the new host test of the
+  HRV maths (`app_m4/tests/hrv/`) are fixed. VLF/LF/HF band powers were exactly
+  1/64 of the true value (the frequency step was applied twice). The spectrum
+  was taken over the *oldest* 64 s of the up-to-4-minute RR history rather than
+  the newest, so LF/HF could describe data about three minutes old. With 32–64 s
+  of data the record was tapered with a truncated window and normalised as if it
+  were whole, reading 20–50 % low and weighting the record unevenly in time.
+  Band powers and LF/HF now agree with an independent reference; only LF/HF is
+  carried in `hp6_vitals`, so the scale fix changes nothing a host sees; the
+  other two do change the LF/HF it receives. Not yet checked on hardware.
+- **ECG heart rate follows a change in seconds, not minutes (M4).** It was the
+  mean of the whole 256-beat RR history, so a step from 60 to 100 BPM took 236
+  beats (~2.4 minutes) to be reported within 5 BPM. It is now the median of the
+  newest 8 RR intervals: the same step, either direction, settles in 5 beats,
+  and a single premature, missed or extra beat no longer moves the reading (a
+  plain mean of 8 would have swung it by up to 8 BPM). A steady rhythm reads
+  exactly as before, and the first rate still appears after 4 beats. HRV is
+  unchanged and still uses the full history. Checked on the host
+  (`app_m4/tests/hrv/`); not yet checked against real QRS detection on hardware.
+- **A stale ECG heart rate is withdrawn after 5 s (M4).** With HRV on (the
+  default) the M4 re-sends its ECG vitals every 5 s whether or not a beat was
+  detected, still carrying the last rate, and the M7 counts an ECG rate as
+  fresh for 5 s from each message's arrival. So if QRS detection stopped while
+  the electrodes stayed on -- asystole, a flat or very low-amplitude trace, a
+  detector that lost the signal -- the last heart rate could stay on the
+  display, in the stream and in recordings indefinitely, as a live ECG rate.
+  The M4 now reports no rate (0, confidence 0) once no RR interval has been
+  accepted for 5 s of signal, and sends that at once; the M7 then falls back
+  to a fresh PPG rate (flagged as such) or shows none. A rhythm below 30 BPM,
+  which the M4 cannot measure, now also clears the rate instead of keeping the
+  last one. After a pause the rate returns after 4 beats and is built only from
+  intervals after the pause. A steady 30 BPM and a single missed beat at
+  normal rates do not trigger it; below about 36 BPM one missed beat does.
+  Checked on the host; not yet checked on hardware.
 
 ### Added
 - **`scripts/release.sh` gates a bundle on hardware.** `--port <CDC1>` (or
