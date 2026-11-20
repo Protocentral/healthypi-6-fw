@@ -53,10 +53,22 @@ need_build() {
     fi
 }
 
+# Release images are flashed exactly as built. `west flash` re-runs CMake and
+# recompiles from the CURRENT checkout first unless told not to, so pointing the
+# factory step at a release tree used to program whatever the checkout held at
+# that moment: on the bench (2026-11-12) a tree built as 1.0.1 was silently
+# rebuilt and flashed as 1.0.0. The signed and factory paths therefore pass
+# --no-rebuild; the dev m7/m4 targets keep west's rebuild-on-flash convenience.
+NO_REBUILD=(--no-rebuild)
+
+sha_of() {   # <file> -> sha256 hex
+    shasum -a 256 "$1" | cut -d' ' -f1
+}
+
 flash_m4() {
     need_build build/m4 "M4" "scripts/build.sh m4"
     echo "--- M4 ---"
-    west flash -d build/m4
+    west flash -d build/m4 "$@"
 }
 
 flash_m7() {
@@ -74,8 +86,8 @@ flash_signed() {
         echo "❌ no signed build at $out — run: scripts/build.sh signed" >&2
         exit 1
     fi
-    echo "--- MCUboot + signed M7 ---"
-    west flash -d "$out"
+    echo "--- MCUboot + signed M7 (as built, no rebuild) ---"
+    west flash -d "$out" "${NO_REBUILD[@]}"
     echo "✅ signed M7 flashed. The M4 is NOT an MCUboot image and is not"
     echo "   touched by this — flash it with: scripts/flash.sh m4"
 }
@@ -118,7 +130,10 @@ flash_factory() {
             exit 1
         }
     fi
-    flash_m4
+    echo "  M7 image sha256: $(sha_of "$out/app_m7/zephyr/zephyr.signed.bin")"
+    echo "  M4 image sha256: $(sha_of build/m4/zephyr/zephyr.bin)"
+    echo "  (record these for the unit; neither is rebuilt before programming)"
+    flash_m4 "${NO_REBUILD[@]}"
     HPI_SIGNED_OUT="$out" flash_signed
     cat <<'EOF'
 
