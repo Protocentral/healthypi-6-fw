@@ -57,15 +57,19 @@ bool hpi_ipc_ready(void)
  * computed from them by hpi_vit_arbitrate() (vitals_arbiter.c, which holds the
  * source-arbitration and expiry rules). Those inputs EXPIRE, and an expiry is
  * a change in what is true even when no message arrives -- the M4 crashed,
- * hung, is being updated, or simply stopped sending. So the bus is fed from
- * one delayable work item, vitals_work, which runs:
- *   - immediately on every vitals message (ept_recv reschedules it), and
- *   - at the instant the next still-fresh input ages out (one timer, re-armed
- *     on every run; at most two pending expiries -- ECG and PPG),
- * and publishes on every message plus once per expiry that changed the output.
- * There is no periodic tick: with every input fresh it only waits on the
- * timer, and once everything has been cleared nothing is armed at all. If the
- * M4 never binds it never runs, and the vitals stay "not available".
+ * hung, is being updated, or simply stopped sending. The sample also carries
+ * two M7 measurements, temperature and respiration rate, which do not depend
+ * on the M4 at all. So the bus is fed from one delayable work item,
+ * vitals_work, which runs:
+ *   - immediately on every vitals message (ept_recv reschedules it),
+ *   - at the instant the next still-fresh input ages out (at most two pending
+ *     expiries -- ECG and PPG), and
+ *   - at least every HPI_VIT_PERIOD_MS (1 s), from boot, M4 or not,
+ * re-arming one timer for whichever of the last two comes first. It publishes
+ * on every message, once per expiry that changed the output, and once a
+ * period otherwise. Without the periodic run, temperature and respiration rate
+ * froze at their last values whenever the M4 went quiet (no ECG beats, no
+ * finger on the PPG) and never appeared at all without an M4.
  *
  * Concurrency. ept_recv runs on the RPMSG backend's workqueue; vitals_work on
  * the system workqueue. vit_lock (a spinlock: nothing blocks under it) guards
@@ -83,6 +87,7 @@ static struct k_spinlock vit_lock;
 static struct hpi_vit_inputs vit_in;      /* vit_lock */
 static bool vit_arrived;                  /* vit_lock: a message since last run */
 static struct hp6_vitals g_vitals;        /* vit_lock; last sample published */
+static int64_t last_pub_at = -1;          /* vitals_work only; -1 = never */
 
 void hpi_ipc_last_vitals(struct hp6_vitals *out)
 {
@@ -132,9 +137,11 @@ static void vitals_work_fn(struct k_work *work)
     v.temp_c_x100 = hpi_temp_c_x100();
     v.rr_bpm = hpi_resp_rate_bpm();
 
-    /* A message is always published (the ~1 Hz cadence consumers see); an
-     * expiry only when it changed what the M4-derived fields say. */
-    if (arrived || hpi_vit_arbitrated_differ(&v, &last_pub)) {
+    /* A message is always published; an expiry only when it changed what the
+     * M4-derived fields say; and at least once a period, so the M7's own
+     * measurements keep flowing while the M4 is quiet. */
+    if (arrived || hpi_vit_arbitrated_differ(&v, &last_pub) ||
+        hpi_vit_period_due(now, last_pub_at)) {
         key = k_spin_lock(&vit_lock);
         g_vitals = v;
         k_spin_unlock(&vit_lock, key);
@@ -148,14 +155,14 @@ static void vitals_work_fn(struct k_work *work)
             .payload = &v,
         };
         (void)hpi_bus_publish(&f);
+        last_pub_at = now;
     }
 
-    /* Come back once, when the freshest-expiring input ages out. */
-    int64_t next = hpi_vit_next_expiry(&in, now);
+    /* Come back when the freshest-expiring input ages out or the period is
+     * up, whichever is first. Always armed: there is always a next period. */
+    int64_t next = hpi_vit_next_run(&in, now, last_pub_at);
 
-    if (next != HPI_VIT_NO_EXPIRY) {
-        (void)k_work_reschedule(&vitals_work, K_MSEC(next - now));
-    }
+    (void)k_work_reschedule(&vitals_work, K_MSEC(next - now));
 }
 
 /* Called from ept_recv (RPMSG workqueue): hand the evaluation off. */
@@ -275,11 +282,23 @@ static void on_beat_notify(const struct hpi_ipc_beat_notify *b)
 
 static void on_m4_version(const struct hpi_ipc_version *v)
 {
+    /* The M4 re-sends VERSION every 2 s as its heartbeat, so it proves the M4
+     * alive even when it has nothing to compute -- with no ECG beats and no
+     * finger on the PPG it sends no vitals, which used to read as FAILED. An
+     * M4 that sends VERSION only at bind still works; it is then watched by its
+     * vitals alone, as before. */
+    hpi_health_alive(HPI_SUBSYS_M4_IPC);
+
     /* Copy defensively: the payload is fixed-size but the sender's string may
      * not be terminated if a future M4 fills the field completely. */
-    memcpy(m4_version, v->version, sizeof(m4_version) - 1);
-    m4_version[sizeof(m4_version) - 1] = '\0';
-    LOG_INF("M4 firmware version: %s", m4_version);
+    char ver[sizeof(m4_version)];
+
+    memcpy(ver, v->version, sizeof(ver) - 1);
+    ver[sizeof(ver) - 1] = '\0';
+    if (strcmp(ver, m4_version) != 0) {
+        memcpy(m4_version, ver, sizeof(m4_version));
+        LOG_INF("M4 firmware version: %s", m4_version);
+    }
 }
 
 static void ept_recv(const void *data, size_t len, void *priv)
@@ -491,6 +510,9 @@ static struct k_thread ipc_thread_data;
 
 int hpi_ipc_init(void)
 {
+    /* Vitals run from boot: temperature and respiration rate come from the
+     * M7 and must be published whether or not the M4 ever binds. */
+    (void)k_work_schedule(&vitals_work, K_MSEC(HPI_VIT_PERIOD_MS));
     k_thread_create(&ipc_thread_data, ipc_thread_stack, IPC_THREAD_STACK,
                     ipc_thread, NULL, NULL, NULL, 6, 0, K_NO_WAIT);
     k_thread_name_set(&ipc_thread_data, "hpi_ipc");

@@ -34,6 +34,35 @@ static struct {
 /* Statistics */
 static struct hpi_ipc_stats ipc_stats = {0};
 
+/* The VERSION message doubles as the M4's heartbeat. It is re-sent this often
+ * for as long as the link is up, so the M7 can tell a live M4 that has nothing
+ * to compute (no ECG beats, no finger on the PPG: no vitals) from a dead one.
+ * The M7 marks the link DEGRADED after 8 s without a sign of life and FAILED
+ * after 16 s (app_m7 main.c, health.c), so 2 s leaves a wide margin. */
+#define HPI_IPC_HEARTBEAT_MS 2000
+
+static void heartbeat_work_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(heartbeat_work, heartbeat_work_fn);
+
+/* Report the firmware version: once at bind, then as the heartbeat. */
+static int send_version(void)
+{
+	struct hpi_ipc_version ver = {0};
+
+	strncpy(ver.version, APP_VERSION_STRING, sizeof(ver.version) - 1);
+	return hpi_ipc_send(HPI_IPC_MSG_TYPE_VERSION, &ver, sizeof(ver));
+}
+
+static void heartbeat_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	/* A failed send is not fatal: the next period tries again, and the M7
+	 * reports the gap as DEGRADED/FAILED, which is then the truth. */
+	(void)send_version();
+	(void)k_work_reschedule(&heartbeat_work, K_MSEC(HPI_IPC_HEARTBEAT_MS));
+}
+
 /* IPC endpoint callbacks */
 static void hpi_ipc_ept_bound(void *priv)
 {
@@ -154,15 +183,14 @@ int hpi_ipc_init(void)
 	 * observable (surfaced as m4fw in device_info / fw_versions). Non-fatal:
 	 * a send failure must not fail the bind. */
 	{
-		struct hpi_ipc_version ver = {0};
-		strncpy(ver.version, APP_VERSION_STRING, sizeof(ver.version) - 1);
-		int vret = hpi_ipc_send(HPI_IPC_MSG_TYPE_VERSION, &ver, sizeof(ver));
+		int vret = send_version();
 		if (vret < 0) {
 			LOG_WRN("M4: version report failed (%d) - continuing", vret);
 		} else {
-			LOG_INF("M4: reported version %s", ver.version);
+			LOG_INF("M4: reported version %s", APP_VERSION_STRING);
 		}
 	}
+	(void)k_work_schedule(&heartbeat_work, K_MSEC(HPI_IPC_HEARTBEAT_MS));
 
 	return 0;
 }

@@ -58,6 +58,18 @@ Versions here are the **firmware** version reported by the device
   from the host.
 
 ### Fixed
+- **Temperature and respiration rate no longer freeze when the M4 goes
+  quiet.** Both are M7 measurements, but the vitals sample that carries them
+  was published only when an M4 vitals message arrived (or an M4 value
+  expired). With no ECG beats and no finger on the PPG they held their last
+  values on the display, the stream, recordings and the C6, and with no M4
+  they never appeared. The sample is now published at least once a second
+  from boot, M4 or not; M4 messages and expiries still publish at once.
+- **An idle M4 is no longer reported FAILED.** The M7 judged the M4 alive only
+  by its vitals, which stop when there is nothing to compute, so `m4-ipc` went
+  DEGRADED after 8 s and FAILED after 16 s with no sensors attached. The M4
+  now re-sends its VERSION message every 2 s as a heartbeat, and the M7 counts
+  it. An M4 without the heartbeat is still watched by its vitals, as before.
 - **A C6 image that fails its link self-test is now reported as rolled back.**
   The M7 waited 20 s for the new image to report VALID, but the C6 allows
   itself 60 s before rolling back, so the M7 gave up first and its status
