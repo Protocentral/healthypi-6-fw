@@ -58,6 +58,21 @@ Versions here are the **firmware** version reported by the device
   from the host.
 
 ### Fixed
+- **Live waveforms redraw smoothly again, and no longer lose beats.** Every
+  waveform point redrew its whole chart, and LVGL 9.5 (Zephyr 4.4) walks the
+  entire object tree on every redraw request. The cost grew with the backlog,
+  so once the UI slowed it fell to about 3 updates a second and its 8-frame
+  bus ring overflowed, dropping whole 32 ms ECG frames (a QRS each) from the
+  display: on a 120 BPM simulator about 1 beat in 7 went missing. Points are
+  now written straight into the chart and each chart is redrawn once per UI
+  pass, and the UI's ring holds 16 frames (falling back to 12 or 8 if the heap
+  is short). Display only: streaming, recordings and the M4 always had every
+  sample.
+- **ECG beats are drawn at a consistent height.** The display kept every 4th
+  sample, which clipped the tip of the R wave by a varying amount, so beats
+  differed by 10-20 % and an occasional one looked like a small QRS. It now
+  averages adjacent sample pairs and keeps the pair furthest from the last
+  point drawn (5-10 % on the bench simulator).
 - **Temperature and respiration rate no longer freeze when the M4 goes
   quiet.** Both are M7 measurements, but the vitals sample that carries them
   was published only when an M4 vitals message arrived (or an M4 value

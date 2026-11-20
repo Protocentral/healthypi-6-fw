@@ -629,6 +629,24 @@ void hpi_ui_chart_hide_points(lv_obj_t *chart)
 }
 
 /* ---- waveform panel ---- */
+/* Every waveform created, for hpi_ui_waveform_flush_all(). Waveforms live in
+ * screen state for the life of the UI and are never destroyed. */
+#define WF_REGISTRY_MAX 8
+static struct hpi_ui_waveform *s_wf_registry[WF_REGISTRY_MAX];
+static uint8_t s_wf_count;
+
+void hpi_ui_waveform_flush_all(void)
+{
+	for (uint8_t i = 0; i < s_wf_count; i++) {
+		struct hpi_ui_waveform *w = s_wf_registry[i];
+
+		if (w->dirty && w->chart != NULL) {
+			w->dirty = false;
+			lv_chart_refresh(w->chart);
+		}
+	}
+}
+
 void hpi_ui_waveform_create(struct hpi_ui_waveform *w, lv_obj_t *parent,
 			    const char *label, lv_color_t color,
 			    uint16_t points, int32_t ymin, int32_t ymax,
@@ -679,6 +697,12 @@ void hpi_ui_waveform_create(struct hpi_ui_waveform *w, lv_obj_t *parent,
 	w->target   = WF_TARGET;
 	w->bl_shift = bl_shift ? bl_shift : 9;
 	w->primed   = false;
+	w->dirty    = false;
+	if (s_wf_count < WF_REGISTRY_MAX) {
+		s_wf_registry[s_wf_count++] = w;
+	} else {
+		LOG_ERR("waveform registry full: a waveform will not redraw");
+	}
 
 	int32_t init_peak = half / 2 > w->floor ? half / 2 : w->floor;
 
@@ -754,7 +778,25 @@ void hpi_ui_waveform_push(struct hpi_ui_waveform *w, int32_t v)
 	} else if (disp < -WF_CHART_HALF) {
 		disp = -WF_CHART_HALF;
 	}
-	lv_chart_set_next_value(w->chart, w->series, disp);
+	/* Write the point straight into the series and advance the shift-mode
+	 * start point; hpi_ui_waveform_flush_all() invalidates the chart once per
+	 * UI pass. lv_chart_set_next_value() would invalidate the whole chart on
+	 * EVERY point (shift mode), and in LVGL 9.5 each invalidation also walks
+	 * the entire object tree looking for blurred widgets. At ~125 points/s per
+	 * waveform that cost grew with the backlog: a slow pass left more points
+	 * for the next one, the UI fell to ~3 passes/s, its bus ring overflowed
+	 * and whole ECG frames (a QRS each) were dropped from the display. */
+	{
+		int32_t *y = lv_chart_get_series_y_array(w->chart, w->series);
+		uint32_t cnt = lv_chart_get_point_count(w->chart);
+		uint32_t sp = lv_chart_get_x_start_point(w->chart, w->series);
+
+		if (y != NULL && cnt > 0U && sp < cnt) {
+			y[sp] = disp;
+			lv_chart_set_x_start_point(w->chart, w->series, (sp + 1U) % cnt);
+			w->dirty = true;
+		}
+	}
 
 	/* Adapt the gain a few times/sec so the windowed peak fills ~WF_TARGET of
 	 * the window; damped to avoid visible amplitude jumps, with the peak

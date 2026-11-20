@@ -63,11 +63,17 @@ static void ui_trace(const char *step)
 #endif
 }
 
-/* The UI is a decimating live-preview consumer drained every loop (~30 ms), so
- * a small ring is plenty. It also subscribes LAST, so it must stay frugal with
- * the shared bus heap: a larger ring (32 frames ~= 21 KB) overflows the 64 KB
- * heap and the UI gets no data at all. 8 frames buffers ~2 drain cycles. */
-#define UI_RING_FRAMES   8
+/* The UI is a decimating live-preview consumer drained every loop. It has to
+ * hold the frames that arrive while one pass renders: ~52 frames/s (ECG ~31,
+ * PPG ~16, vitals), and a Live-screen render measured at 66-230 ms. 8 frames
+ * (~150 ms) overflowed on the slow renders and dropped whole ECG frames -- a
+ * QRS each -- from the display. 16 frames covers ~300 ms. It subscribes LAST,
+ * so it stays frugal with the shared bus heap (32 frames ~= 21 KB overflowed
+ * the 64 KB heap and the UI got no data at all): it asks for 16 and falls back
+ * rather than go without. */
+#define UI_RING_FRAMES   16
+#define UI_RING_FALLBACK 12
+#define UI_RING_MIN      8
 #define UI_LOOP_CAP_MS   30
 /* Service-backed screens (Record/Status) poll their service this often; the
  * bus-backed Home screen updates per-frame in ui_drain_bus() instead. */
@@ -301,11 +307,68 @@ static void ui_build_screens(void)
  * than the producer takes to refill, the loop never empties and the UI thread
  * never reaches lv_timer_handler() again. Dropping frames is correct for a
  * preview consumer, and the bus already counts the drops. */
-#define UI_DRAIN_MAX  (UI_RING_FRAMES * 2)
+#define UI_DRAIN_MAX  (UI_RING_FRAMES * 2)   /* sized for the largest ring */
+
+/* ECG decimation for the display (ECG_DECIM = 4, ~500 -> ~125 points/s).
+ *
+ * Taking every 4th sample cut the tip of the R wave by a varying amount,
+ * depending on where the kept samples fell, so beats were drawn 10-20 %
+ * shorter or taller than their neighbours and an occasional one looked like a
+ * small QRS. Instead, average each adjacent pair (that also cancels a 250 Hz
+ * sample-to-sample alternation seen on the bench, which a peak pick would
+ * otherwise draw as noise) and keep, of the group's two pair averages, the one
+ * furthest from the last point drawn: the R tip always survives. Display
+ * only; the stream, recordings and the M4 get every sample. */
+BUILD_ASSERT(ECG_DECIM == 4, "ecg_decim_add() pairs samples within a group of 4");
+
+struct ecg_decim {
+	int32_t last;        /* lead II of the last point drawn */
+	int32_t pair_ecg;    /* first sample of the pair being built */
+	int32_t pair_resp;
+	int32_t best;        /* this group's pick so far (a pair average) */
+	int32_t best_resp;
+	uint32_t best_dev;
+	uint8_t lead_off;    /* OR over the group */
+	uint8_t n;           /* samples in the group so far */
+};
+
+/* Feed one sample; true when a group is complete and *out_* hold its point. */
+static bool ecg_decim_add(struct ecg_decim *d, int32_t ecg, int32_t resp,
+			  uint8_t lead_off, int32_t *out_ecg, int32_t *out_resp,
+			  uint8_t *out_off)
+{
+	d->lead_off = (d->n == 0U) ? lead_off : (uint8_t)(d->lead_off | lead_off);
+	if ((d->n & 1U) == 0U) {
+		d->pair_ecg = ecg;
+		d->pair_resp = resp;
+		d->n++;
+		return false;
+	}
+	int32_t avg = (int32_t)(((int64_t)d->pair_ecg + ecg) / 2);
+	int32_t avg_resp = (int32_t)(((int64_t)d->pair_resp + resp) / 2);
+	int64_t diff = (int64_t)avg - d->last;
+	uint32_t dev = (uint32_t)(diff < 0 ? -diff : diff);
+
+	if (d->n == 1U || dev > d->best_dev) {
+		d->best = avg;
+		d->best_resp = avg_resp;
+		d->best_dev = dev;
+	}
+	if (++d->n < ECG_DECIM) {
+		return false;
+	}
+	*out_ecg = d->best;
+	*out_resp = d->best_resp;
+	*out_off = d->lead_off;
+	d->last = d->best;
+	d->n = 0U;
+	return true;
+}
 
 static void ui_drain_bus(void)
 {
-	static uint32_t ne, np;
+	static uint32_t np;
+	static struct ecg_decim ecg_d;
 	struct hpi_sample_frame f;
 	bool home = (s_active == HPI_UI_SCREEN_HOME);
 	bool live = (s_active == HPI_UI_SCREEN_LIVE);
@@ -316,18 +379,22 @@ static void ui_drain_bus(void)
 		case HPI_CH_ECG: {
 			const struct hp6_ecg_sample *s = f.payload;
 			for (uint16_t i = 0; i < f.sample_count; i++) {
-				if ((home || live) && (ne++ % ECG_DECIM) == 0) {
-					/* lead_off travels with the samples, so both
-					 * screens learn the electrode state directly
-					 * from the producer -- it does not depend on
-					 * the M4 being alive to send vitals. */
-					if (home) {
-						hpi_scr_home_push_ecg(s[i].lead_ii,
-								      s[i].lead_off);
-					} else {  /* Live: ECG lane + Resp lane (resp rides in the ECG sample) */
-						hpi_scr_live_push_ecg(s[i].lead_ii, s[i].resp,
-								      s[i].lead_off);
-					}
+				int32_t ecg, resp;
+				uint8_t off;
+
+				if (!(home || live) ||
+				    !ecg_decim_add(&ecg_d, s[i].lead_ii, s[i].resp,
+						   s[i].lead_off, &ecg, &resp, &off)) {
+					continue;
+				}
+				/* lead_off travels with the samples, so both
+				 * screens learn the electrode state directly
+				 * from the producer -- it does not depend on
+				 * the M4 being alive to send vitals. */
+				if (home) {
+					hpi_scr_home_push_ecg(ecg, off);
+				} else {  /* Live: ECG lane + Resp lane (resp rides in the ECG sample) */
+					hpi_scr_live_push_ecg(ecg, resp, off);
 				}
 			}
 			break;
@@ -413,7 +480,21 @@ static void ui_thread(void *a, void *b, void *c)
 				HPI_CH_BIT(HPI_CH_VITALS) | HPI_CH_BIT(HPI_CH_INFER),
 		.ring_frames = UI_RING_FRAMES,
 	};
-	s_sub = hpi_bus_subscribe(&cfg);
+	static const uint16_t depths[] = {
+		UI_RING_FRAMES, UI_RING_FALLBACK, UI_RING_MIN,
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(depths); i++) {
+		cfg.ring_frames = depths[i];
+		s_sub = hpi_bus_subscribe(&cfg);
+		if (s_sub != NULL) {
+			if (i > 0) {
+				LOG_WRN("UI: bus ring %u frames (wanted %u; heap tight)",
+					depths[i], depths[0]);
+			}
+			break;
+		}
+	}
 	if (s_sub == NULL) {
 		LOG_ERR("UI bus subscribe failed");
 	}
@@ -538,6 +619,8 @@ static void ui_thread(void *a, void *b, void *c)
 		if (s_sub) {
 			ui_drain_bus();
 		}
+		/* One redraw per chart per pass, however many points arrived. */
+		hpi_ui_waveform_flush_all();
 
 		/* Record/Status read their services, not the bus -- poll them on a
 		 * slow cadence (this is the UI thread, so the calls are LVGL-safe). */
