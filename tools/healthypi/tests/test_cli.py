@@ -183,6 +183,13 @@ def test_catalog_json_full(capsys):
     assert doc["stock_errors"]["0"]["4"] == "RTC_NOT_SET"
     # espfw_* carry the per-request timeout a host must use.
     assert by_name["espfw_chunk"]["timeout_s"] == 5.0
+    # ...and the espfw_status code tables a host explains outcomes with.
+    esp = doc["espfw"]
+    assert esp["states"]["6"] == "DONE"
+    assert esp["errors"]["3"] == "NO_OTA"
+    assert esp["c6_errors"]["15"] == "NO_SLOT"
+    assert esp["max_chunk"] == 1016
+    assert esp["timeout_s"] == 5.0
 
 
 def test_catalog_formats(capsys):

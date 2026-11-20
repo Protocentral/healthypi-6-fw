@@ -1376,6 +1376,17 @@ def cmd_catalog(args) -> int:
                 g: {k: v[0] for k, v in codes.items()}
                 for g, codes in catalog.STOCK_ERRORS.items()
             }
+            # What a host needs to drive and explain an ESP32-C6 update, beyond
+            # the command schemas: espfw_status's three code namespaces and the
+            # chunk/timeout limits (MCUMGR_COMMANDS.md §5.12).
+            doc["espfw"] = {
+                "states": catalog.ESPFW_STATES,
+                "errors": catalog.ESPFW_ERRORS,
+                "c6_errors": catalog.ESPFW_C6_ERRORS,
+                "max_chunk": catalog.ESPFW_MAX_CHUNK,
+                "timeout_s": catalog.ESPFW_TIMEOUT_S,
+                "chunk_device_bound_s": catalog.ESPFW_CHUNK_DEVICE_BOUND_S,
+            }
         _emit(args, doc)
         return 0
     print(catalog.HPI_GROUP.describe())
