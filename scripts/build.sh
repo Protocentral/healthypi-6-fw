@@ -55,6 +55,16 @@ build_signed() {
     local flavor="${1:-dev}"
     local out="${HPI_SIGNED_OUT:-build/m7s}"
 
+    # External signing: HP6_SIGNING_KEY may be a PUBLIC key (a .pub.pem). The
+    # build then embeds it -- in MCUboot and in the M7's M4/C6 verifier, which
+    # is all the build ever needs -- and leaves the M7 image unsigned, for
+    # tools/ci/release_sign.sh to sign where the private key lives. This is how
+    # CI builds a release without the release key (.github/workflows/release.yml).
+    local external=0
+    if [ -f "$HP6_SIGNING_KEY" ] && grep -q -- '-----BEGIN PUBLIC KEY-----' "$HP6_SIGNING_KEY"; then
+        external=1
+    fi
+
     if [ ! -f "$HP6_SIGNING_KEY" ]; then
         echo "=============================================================="
         echo "No signing key at $HP6_SIGNING_KEY — generating a LOCAL DEV key."
@@ -66,6 +76,18 @@ build_signed() {
 
     echo "▶ SIGNED M7 ($flavor): MCUboot + image 0 → $out"
     echo "  key: $HP6_SIGNING_KEY"
+    local unsigned_args=()
+    if [ "$external" = 1 ]; then
+        echo "  PUBLIC key only: the M7 image is left UNSIGNED (sign it with"
+        echo "  tools/ci/release_sign.sh). MCUboot and the M4/C6 verifier embed it."
+        # Zephyr signs the app with CONFIG_MCUBOOT_SIGNATURE_KEY_FILE, which
+        # sysbuild copies from the bootloader's key. Emptying it for the app only
+        # keeps the key in MCUboot and skips the signing step (Zephyr's
+        # documented "sign externally" path, cmake/mcuboot.cmake).
+        # (A plain -Dapp_m7_CONFIG_MCUBOOT_SIGNATURE_KEY_FILE does not work:
+        # sysbuild re-applies the bootloader key after it. app_m7/sysbuild.cmake.)
+        unsigned_args=(-DHP6_SIGN_EXTERNALLY=ON)
+    fi
     # The key must be passed as an ABSOLUTE path: a relative Kconfig key path
     # resolves against the west topdir / MCUboot repo, not this repo.
     west build -p always --sysbuild -b "$HPI_BOARD_M7" -d "$out" app_m7 \
@@ -74,7 +96,18 @@ build_signed() {
            -Dapp_m7_EXTRA_CONF_FILE="prj.${flavor}.conf;$M7_CONF_BASE;prj.signed.conf" \
            -Dapp_m7_CONFIG_HPI_M4_SIGNING_KEY=\""$HP6_SIGNING_KEY"\" \
            -Dapp_m7_EXTRA_DTC_OVERLAY_FILE="$M7_OVERLAYS;$HPI_BOARD_DIR/healthypi6_v5_mcuboot_app.overlay" \
-           -Dmcuboot_EXTRA_DTC_OVERLAY_FILE="$HPI_BOARD_DIR/healthypi6_v5_mcuboot_boot.overlay"
+           -Dmcuboot_EXTRA_DTC_OVERLAY_FILE="$HPI_BOARD_DIR/healthypi6_v5_mcuboot_boot.overlay" \
+           ${unsigned_args[@]+"${unsigned_args[@]}"}
+
+    if [ "$external" = 1 ]; then
+        write_sign_args "$out"
+        echo ""
+        echo "✅ UNSIGNED release build in $out"
+        echo "   bootloader : $out/mcuboot/zephyr/zephyr.hex  (embeds $HP6_SIGNING_KEY)"
+        echo "   app        : $out/app_m7/zephyr/zephyr.bin   (unsigned)"
+        echo "   sign with  : tools/ci/release_sign.sh"
+        return
+    fi
 
     echo ""
     echo "✅ signed build in $out"
@@ -82,6 +115,36 @@ build_signed() {
     echo "   app (slot0): $out/app_m7/zephyr/zephyr.signed.hex  @ 0x08020000"
     echo "   OTA payload: $out/app_m7/zephyr/zephyr.signed.bin"
     echo "   flash with : scripts/flash.sh signed   (M4 via scripts/flash.sh m4)"
+}
+
+# The imgtool arguments an external signer must use, read from the build's own
+# configuration so they cannot drift from what MCUboot expects: version, header
+# size and slot size exactly as cmake/mcuboot.cmake computes them. Written next
+# to the unsigned image as one argument per line.
+write_sign_args() {
+    local out="$1" cfg="$1/app_m7/zephyr/.config"
+    local ver hdr slot
+    ver="$(sed -n 's/^CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\(.*\)"$/\1/p' "$cfg")"
+    hdr="$(sed -n 's/^CONFIG_ROM_START_OFFSET=\(.*\)$/\1/p' "$cfg")"
+    # The slot size is not in .config; take it from the build's own (dry) sign
+    # rule, which Zephyr still emits for the unsigned image's hex/bin metadata,
+    # or else from the devicetree slot1 partition the same way mcuboot.cmake does.
+    slot="$(python3 - "$out/app_m7/zephyr/zephyr.dts" <<'PY'
+import re, sys
+dts = open(sys.argv[1]).read()
+m = re.search(r'slot1_partition:\s*partition@[0-9a-fA-F]+\s*\{[^}]*?reg\s*=\s*<\s*(0x[0-9a-fA-F]+|\d+)\s+(0x[0-9a-fA-F]+|\d+)\s*>', dts, re.S)
+if not m:
+    sys.exit("slot1_partition not found in zephyr.dts")
+print(int(m.group(2), 0))
+PY
+)"
+    [ -n "$ver" ] && [ -n "$hdr" ] && [ -n "$slot" ] || {
+        echo "❌ could not read the imgtool arguments from $out" >&2; exit 1; }
+    local extra=()
+    grep -q '^CONFIG_MCUBOOT_IMGTOOL_OVERWRITE_ONLY=y' "$cfg" && extra=(--overwrite-only --align 1)
+    printf '%s\n' --version "$ver" --header-size "$hdr" --slot-size "$slot" ${extra[@]+"${extra[@]}"} \
+        > "$out/app_m7/zephyr/imgtool_sign.args"
+    echo "   sign args  : $(tr '\n' ' ' < "$out/app_m7/zephyr/imgtool_sign.args")"
 }
 
 build_esp32() {

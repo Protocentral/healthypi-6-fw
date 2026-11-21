@@ -1,0 +1,4 @@
+# The healthybridge-esp32 (ESP32-C6) release a firmware release bundles.
+# A tag of Protocentral/healthybridge-esp32; the release workflow builds it
+# with ESP-IDF 6.1.1 and refuses if its version.txt does not match the tag.
+v1.2.0

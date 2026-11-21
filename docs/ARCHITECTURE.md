@@ -562,6 +562,15 @@ scripts/release.sh --port <CDC1>         # hw gate + build prod + package + veri
 healthypi fw info --bundle build/release/hpi6-firmware-1.0.0.zip
 ```
 
+An official release is made by `.github/workflows/release.yml` on a `vX.Y.Z`
+tag. It runs the same build, with the C6 taken from the
+healthybridge-esp32 tag in `tools/ci/healthybridge-release.ref`, and produces
+a **draft** release: the bundle plus the factory images (`mcuboot.hex`,
+`app_m7.signed.hex`, `m4.hex`). `release.sh` stays the local path for bench
+and own-key builds. The hardware gate it runs is done by hand on the draft
+before it is published. Running the workflow manually is a dry run: it signs
+with a throwaway key and publishes nothing.
+
 The manifest carries, per processor: version, sha256, size, transport, optional
 `min_version`, and (for the M4 and the ESP32-C6) the device-verifiable
 signature. `scripts/release.sh` **requires** the C6 app image — built in
@@ -589,8 +598,11 @@ is generated from the same PEM at build time), and the release manifest
 - **Dev key** `keys/hp6_dev_ec256.pem` — generated locally on first signed build,
   never committed. A device flashed with one dev key will refuse an image signed
   with another; that is the mechanism working, not a fault.
-- **Release key** — air-gapped, passed as `HP6_SIGNING_KEY=/abs/path`. Never
-  reaches the repo, CI, or a developer machine.
+- **Release key**: used only by the release workflow's signing job, which gets
+  it from a GitHub Actions environment secret gated by approval and by `v*`
+  tags. The build job embeds only the public key and leaves the M7 unsigned.
+  The master copies are offline. It never reaches the repo, a repository
+  secret or a developer machine. Detail: [`../keys/README.md`](../keys/README.md).
 - Losing the release key means shipped units can no longer receive updates over
   any non-SWD path. Custody procedure: [`../keys/README.md`](../keys/README.md).
 
