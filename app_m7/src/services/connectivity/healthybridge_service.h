@@ -159,12 +159,25 @@ bool hpi_connectivity_update_held(void);
  * a negative errno; -ENOTSUP when connectivity is compiled out.
  */
 int hpi_connectivity_wifi_status(struct hpi_wifi_info *out);
+/*
+ * Store Wi-Fi credentials on the C6 (password NULL/"" = open network). 0 means
+ * stored: the C6 joins at once if Wi-Fi is on, otherwise on the next
+ * hpi_connectivity_wifi_enable(true); poll wifi_status for the outcome.
+ * -EHOSTDOWN: the C6 is in reset (power it first). -EAGAIN: not answering yet.
+ * -EBUSY: a C6 update is in progress. -EINVAL: lengths out of range.
+ * -ENOTSUP: the C6 image predates the command (provision via the portal).
+ * -ENOSPC: the C6's NVS write failed. -ETIMEDOUT: no reply.
+ */
 int hpi_connectivity_wifi_connect(const char *ssid, const char *password);
+/* Erase the stored credentials and turn Wi-Fi off. Errors as above. */
+int hpi_connectivity_wifi_forget(void);
+/* Turn Wi-Fi off, keeping the credentials. */
 int hpi_connectivity_wifi_disconnect(void);
 int hpi_connectivity_wifi_enable(bool on);
 int hpi_connectivity_ble_enable(bool on);
 /* Open the ESP32 SoftAP captive portal for provisioning. Powers the C6 and
- * lifts the WiFi gate first -- it is the only way credentials ever get in. */
+ * lifts the WiFi gate first. While it is up, wifi_status reports state 3 and
+ * the portal's network name in `ssid` (C6 firmware that has WIFI_SET_CREDS). */
 int hpi_connectivity_wifi_softap(void);
 
 #ifdef __cplusplus

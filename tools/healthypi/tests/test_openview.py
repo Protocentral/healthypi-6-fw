@@ -15,6 +15,7 @@ import struct
 import pytest
 
 from healthypi import openview as ov
+from healthypi.openview import protocol as ovp
 from healthypi.openview.monitor import Stats, _Decoder
 
 
@@ -157,6 +158,61 @@ def test_summary_shape():
         "gaps",
         "loss_pct",
         "bad_packets",
+        "other_frames",
         "resync_bytes",
     }
     assert s["packets"] == 1 and s["lost"] == 0
+
+
+def _hrv_frame(footer=(ovp.FOOTER0, ovp.FOOTER1)) -> bytes:
+    """A 27-byte HRV frame (type 0x03) as the C6 sends with each vitals update."""
+    return (
+        bytes((ovp.SYNC0, ovp.SYNC1, 20, ovp.VERSION_V2, ovp.TYPE_HRV))
+        + bytes(range(20))
+        + bytes(footer)
+    )
+
+
+def test_hrv_frame_is_the_documented_length():
+    assert len(_hrv_frame()) == ovp.HRV_PACKET_LEN
+
+
+def test_decoder_steps_over_hrv_frames_without_calling_them_bad():
+    """The bench stream (2026-11-21) carried one HRV frame per ~330 data
+    packets; each was counted as a bad packet plus ~26 resync bytes, so a clean
+    stream reported 87 "undecodable" packets a minute."""
+    stats = Stats()
+    dec = _Decoder(stats)
+    blob = ov.pack(_pkt(seq=1)) + _hrv_frame() + ov.pack(_pkt(seq=2))
+    got = list(dec.feed(blob))
+    assert [p.seq for p in got] == [1, 2]
+    assert stats.other_frames == 1
+    assert stats.bad_packets == 0
+    assert stats.resync_bytes == 0
+    assert stats.lost == 0
+
+
+def test_decoder_buffers_an_hrv_frame_split_across_reads():
+    stats = Stats()
+    dec = _Decoder(stats)
+    blob = _hrv_frame() + ov.pack(_pkt(seq=7))
+    for cut in (3, 10, 26):
+        stats = Stats()
+        dec = _Decoder(stats)
+        got = list(dec.feed(blob[:cut])) + list(dec.feed(blob[cut:]))
+        assert [p.seq for p in got] == [7], cut
+        assert (stats.other_frames, stats.bad_packets, stats.resync_bytes) == (1, 0, 0), cut
+
+
+def test_decoder_still_counts_a_corrupt_hrv_frame_as_bad():
+    stats = Stats()
+    dec = _Decoder(stats)
+    list(dec.feed(_hrv_frame(footer=(0xFF, 0xFF)) + ov.pack(_pkt(seq=3))))
+    assert stats.packets == 1
+    assert stats.other_frames == 0
+    assert stats.bad_packets >= 1
+
+
+def test_iter_packets_steps_over_hrv_frames():
+    blob = ov.pack(_pkt(seq=1)) + _hrv_frame() + ov.pack(_pkt(seq=2))
+    assert [p.seq for p in ovp.iter_packets(blob)] == [1, 2]

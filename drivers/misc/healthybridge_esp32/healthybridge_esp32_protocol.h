@@ -261,6 +261,12 @@ struct hpi_hb_control_cmd {
 #define HPI_HB_CMD_WIFI_ENABLE          0x20  /* = HB_CMD_WIFI_ENABLE  (STA, stored creds) */
 #define HPI_HB_CMD_WIFI_DISABLE         0x21  /* = HB_CMD_WIFI_DISABLE (stop STA / AP) */
 #define HPI_HB_CMD_WIFI_SOFTAP          0x22  /* = HB_CMD_WIFI_SOFTAP  (captive portal) */
+/* = HB_CMD_WIFI_SET_CREDS, params = struct hpi_hb_wifi_connect_params (98 B).
+ * Stores the credentials and, if Wi-Fi is in use, reconnects with them. Added
+ * after HealthyBridge 1.1.0: an older image answers HPI_HB_RESP_ERROR. */
+#define HPI_HB_CMD_WIFI_SET_CREDS       0x23
+/* = HB_CMD_WIFI_FORGET, no params: erase the stored credentials, Wi-Fi off. */
+#define HPI_HB_CMD_WIFI_FORGET          0x24
 #define HPI_HB_CMD_GET_STATUS           0x30  /* = HB_CMD_GET_STATUS -> HB_TYPE_STATUS reply */
 /* = HB_CMD_GET_VERSION -> CONTROL_RESP, data = struct hpi_hb_version_resp
  * (36 B). Added in HealthyBridge 1.1.0: an older C6 image answers with a bare
@@ -271,8 +277,8 @@ struct hpi_hb_control_cmd {
  * Any command not listed above is NOT IMPLEMENTED by the external ESP firmware
  * and is deliberately left undefined here, so a caller cannot send a command
  * the ESP will ignore — or worse, alias onto a different handler. WiFi
- * credentials are provisioned through the SoftAP captive portal
- * (HPI_HB_CMD_WIFI_SOFTAP), not pushed over the link.
+ * credentials reach the C6 two ways: over this link (HPI_HB_CMD_WIFI_SET_CREDS)
+ * or through the SoftAP captive portal (HPI_HB_CMD_WIFI_SOFTAP).
  */
 
 /* Response status codes */
@@ -281,6 +287,8 @@ struct hpi_hb_control_cmd {
 #define HPI_HB_RESP_PENDING             0x02
 #define HPI_HB_RESP_NOT_SUPPORTED       0x03
 #define HPI_HB_RESP_BUSY                0x04
+#define HPI_HB_RESP_BAD_PARAMS          0x05  /* = HB_CTRL_STATUS_BAD_PARAMS */
+#define HPI_HB_RESP_STORE_FAIL          0x06  /* = HB_CTRL_STATUS_STORE_FAIL (C6 NVS) */
 
 /* WiFi state values (in response data) */
 #define HPI_WIFI_STATE_DISCONNECTED      0x00
@@ -296,7 +304,12 @@ struct hpi_hb_control_cmd {
 #define HPI_MQTT_STATE_ERROR             0xFF
 
 /**
- * @brief WiFi connect parameters (for HPI_HB_CMD_WIFI_CONNECT)
+ * @brief WiFi credentials (params of HPI_HB_CMD_WIFI_SET_CREDS).
+ *
+ * Must equal the ESP side's `struct hb_wifi_creds_hp6` byte for byte. Lengths
+ * are explicit and the strings are not NUL-terminated on the wire, so a 32-byte
+ * SSID and a 64-digit hex PSK both fit. ssid_len 1..32; password_len 0 (open)
+ * or 8..64. Unused bytes are zero.
  */
 struct hpi_hb_wifi_connect_params {
     uint8_t ssid_len;
@@ -304,6 +317,9 @@ struct hpi_hb_wifi_connect_params {
     char ssid[32];
     char password[64];
 } __attribute__((packed));
+
+HPI_HB_STATIC_ASSERT(sizeof(struct hpi_hb_wifi_connect_params) == 98,
+		     "must match hb_wifi_creds_hp6 on the C6");
 
 /**
  * @brief Link status: WiFi association plus BLE advertising/connection state.

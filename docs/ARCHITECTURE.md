@@ -205,9 +205,9 @@ reports "not ready" and the service stays idle. Build with
 | id | command | dir | action |
 |---|---|---|---|
 | `0x0070` | `wifi_status` | read | `{state, rssi, ssid, ip}` from the ESP32 |
-| `0x0071` | `wifi_scan` | read | `ENOTSUP` — provisioning goes through the SoftAP captive portal |
-| `0x0072` | `wifi_set` | write | `{ssid, pw}` → connect (unlock-gated) |
-| `0x0073` | `wifi_forget` | write | disconnect (unlock-gated) |
+| `0x0071` | `wifi_scan` | read | `ENOTSUP` — the SoftAP portal lists networks; `wifi_set` takes a known one |
+| `0x0072` | `wifi_set` | write | `{ssid, pw}` → stored on the C6, joined if Wi-Fi is on (unlock-gated) |
+| `0x0073` | `wifi_forget` | write | erase the stored credentials, Wi-Fi off (unlock-gated) |
 | `0x0074` | `wifi_softap` | write | bring the provisioning access point up or down |
 | `0x0075` | `conn_enable` | write | `{radios}` — power the C6 and start radios (bit0 WiFi, bit1 BLE) |
 | `0x0076` | `conn_disable` | write | radios down, C6 back into reset |

@@ -324,19 +324,47 @@ A powered-down or still-starting co-processor answers a well-formed
 `state = 0` (disconnected) rather than an error, because neither is a fault. Read
 `0x0077` if you need to distinguish them.
 
+While the provisioning portal is up (`state = 3`), `ssid` is the portal's own
+network name, `HealthyPi-XXXX`: the network a phone or laptop must join to reach
+it. ESP32-C6 firmware older than the `wifi_set` change below reports it empty.
+
 #### `0x0071` wifi_scan — read
 
-**Not implemented in 1.0.0** — always returns `ENOTSUP`. Network selection
-happens through the provisioning portal (`0x0074`). Handle the `ENOTSUP` as an
-expected outcome.
+**Not implemented in 1.0.0** — always returns `ENOTSUP`. Choose the network
+yourself and send it with `0x0072`, or use the provisioning portal (`0x0074`),
+which lists nearby networks. Handle the `ENOTSUP` as an expected outcome.
 
 #### `0x0072` wifi_set — write · 🔒 lock
 
-`ssid` tstr, `pw` tstr → `ok` bool.
+`ssid` tstr, `pw` tstr → `ok` bool (always `true`; every failure is an error).
+
+Stores the credentials on the co-processor, replacing any it had, including
+ones entered through the portal. `ssid` is 1–32 bytes; `pw` is empty for an open
+network or 8–64 characters (a WPA2 passphrase, or a 64-digit hex PSK). If Wi-Fi
+is on (connecting, connected, or the portal is up), the co-processor leaves that
+network or portal and joins the new one within a second. If Wi-Fi is off, it
+only stores them, and the next `0x0075 conn_enable` with bit0 set uses them.
+The credentials survive power cycles.
+
+`ok` means **stored**, not *connected*: a wrong password is not detected here.
+Poll `0x0077` for `state = 2` and an address.
+
+The co-processor must be powered (`0x0075`, any `radios` value) and answering.
+
+| Error | Meaning |
+|---|---|
+| `EINVAL` (3) | `ssid` or `pw` length out of range |
+| 256 `NOT_READY` | the co-processor is powered down or still starting; power it and retry |
+| 261 `VERSION_MISMATCH` | the co-processor firmware predates this command; update it, or use the portal |
+| 272 `ESP_NO_REPLY` | no answer from the co-processor |
+| 274 `ESP_UPDATE_ACTIVE` | a co-processor update is in progress |
+| 257 `HW_FAULT` | the co-processor could not store them |
 
 #### `0x0073` wifi_forget — write · 🔒 lock
 
-`{}` → `ok` bool.
+`{}` → `ok` bool (always `true`). Erases the stored credentials and turns Wi-Fi
+off; the co-processor stays powered. Afterwards nothing connects until
+`0x0072` or the portal provides a network. Errors as for `0x0072` (no `EINVAL`).
 
 #### `0x0074` wifi_softap — write
 

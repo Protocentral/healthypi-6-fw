@@ -572,7 +572,8 @@ def cmd_wifi_stream_monitor(args) -> int:
         f"{s['packets']} packets in {s['seconds']}s  ({s['rate_hz']} Hz)\n"
         f"  expected {s['expected']}, lost {s['lost']} in {s['gaps']} gap(s) "
         f"= {s['loss_pct']}%\n"
-        f"  {s['bad_packets']} undecodable, {s['resync_bytes']} bytes resynced",
+        f"  {s['other_frames']} HRV/EEG frames skipped, "
+        f"{s['bad_packets']} undecodable, {s['resync_bytes']} bytes resynced",
     )
     return 0 if stats.packets else 1
 
