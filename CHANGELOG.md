@@ -172,6 +172,10 @@ Versions here are the **firmware** version reported by the device
   cannot run. SKIPs are listed and allowed, and the report is kept as
   `build/release/hw-gate.json`. Without a port it refuses unless `--no-hw-gate`
   is given, which prints a warning that the bundle was not hardware-gated.
+- **`healthypi catalog --json --full` exports the ESP32-C6 update tables.** A
+  new `espfw` section carries `espfw_status`'s state, error and C6-error names
+  and the chunk and timeout limits, so hosts that generate from the catalog
+  (HealthyPi Studio) need not copy them by hand.
 - `CONFIG_HPI_RESP_MIN_AMP_UV` (default 100, unchanged): the respiration-rate
   detector's amplitude floor, now configurable. With `resp_debug.conf` the
   detector logs the filtered amplitude it sees and the rate it produced every
