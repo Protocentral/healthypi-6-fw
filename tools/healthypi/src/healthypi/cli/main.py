@@ -35,6 +35,25 @@ def _emit(args, payload: dict[str, Any], text: str | None = None) -> None:
             print(f"{k:<{width}}  {v}")
 
 
+def _key_file(path: str):
+    """argparse type for --pubkey: an existing, readable file.
+
+    Checked when the arguments are parsed, so a mistyped path is a one-line
+    usage error (exit 2) instead of a FileNotFoundError traceback from deep in
+    the bundle code -- which, for `fw update`, came after the port was opened.
+    """
+    from pathlib import Path
+
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise argparse.ArgumentTypeError(f"no such key file: {path}")
+    try:
+        p.read_bytes()
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(f"cannot read key file {path}: {exc.strerror}")
+    return p
+
+
 def _fail(msg: str, code: int = 1) -> int:
     print(f"error: {msg}", file=sys.stderr)
     return code
@@ -1641,7 +1660,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = fws.add_parser("info", help="describe a bundle (no device needed)")
     p.add_argument("--bundle", required=True,
                    help="the release .zip, or the folder it was extracted to")
-    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+    p.add_argument("--pubkey", type=_key_file, help="PEM key to verify the manifest signature against "
                    "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_fw_info)
@@ -1650,7 +1669,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_device_opts(p)
     p.add_argument("--bundle", required=True,
                    help="the release .zip, or the folder it was extracted to")
-    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+    p.add_argument("--pubkey", type=_key_file, help="PEM key to verify the manifest signature against "
                    "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.add_argument("--only", choices=("m4", "m7", "esp32c6"),
                    help="restrict to one processor")
@@ -1675,7 +1694,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_device_opts(p)
     p.add_argument("--bundle", required=True,
                    help="the release .zip, or the folder it was extracted to")
-    p.add_argument("--pubkey", help="PEM key to verify the manifest signature against "
+    p.add_argument("--pubkey", type=_key_file, help="PEM key to verify the manifest signature against "
                    "(default: the HealthyPi 6 release key(s) shipped with this tool)")
     p.set_defaults(func=cmd_fw_recover)
 
@@ -1863,7 +1882,26 @@ def _module_power(args) -> int:
     )
 
 
+def _quiet_smpclient() -> None:
+    """Keep smpclient's own error logging off the terminal.
+
+    With no logging configured, Python prints WARNING and above to stderr, and
+    smpclient logs every timeout -- with a full traceback -- before raising it.
+    This tool already turns each of those into one error line and an exit code,
+    so a silent port printed sixty lines of traceback above the real message.
+    Set HEALTHYPI_LOG=debug (or info, warning, ...) to see them again.
+    """
+    import logging
+    import os
+
+    level = os.environ.get("HEALTHYPI_LOG", "").upper()
+    logging.getLogger("smpclient").setLevel(
+        getattr(logging, level, logging.CRITICAL) if level else logging.CRITICAL
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    _quiet_smpclient()
     ap = build_parser()
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):

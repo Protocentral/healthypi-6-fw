@@ -224,11 +224,47 @@ async def probe(conn, g, is_error) -> Capabilities:
     return caps
 
 
+class NoAnswerError(TimeoutError):
+    """The port opened but nothing on it speaks SMP.
+
+    A ``TimeoutError`` on purpose: the CLI maps that to exit 3 ("the suite never
+    ran"), which is what ``release.sh`` reads as "check the port", not "the unit
+    failed".
+    """
+
+
+async def preflight(conn) -> None:
+    """Fail fast, and distinctly, when the port has no SMP server behind it.
+
+    CDC 0 (the stream port), a USB-serial adapter, or a unit in a state where
+    MCUmgr is not running all accept the open and then never answer. Without
+    this every case timed out on its own and the run ended 16 FAIL / exit 1 --
+    indistinguishable from a unit that answered and failed (bench 2026-11-21,
+    S1-18 (b)).
+    """
+    import asyncio
+
+    from smpclient.requests.os_management import EchoWrite
+
+    try:
+        await conn.request(EchoWrite(d="healthypi"))
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        raise NoAnswerError(
+            f"{conn.port} opened but did not answer an SMP echo: no MCUmgr server "
+            "on this port (CDC 0 is the stream port; the control port is CDC 1)"
+        ) from exc
+
+
 async def run(conn, *, group: str | None = None, include_destructive: bool = False,
               on_result: Callable[[Result], None] | None = None) -> Report:
-    """Run the suite against an open connection."""
+    """Run the suite against an open connection.
+
+    Raises :class:`NoAnswerError` before any case runs when the port does not
+    answer SMP at all.
+    """
     from ..smp.group64 import fmt_error, g, is_error
 
+    await preflight(conn)
     report = Report()
     caps = await probe(conn, g, is_error)
 

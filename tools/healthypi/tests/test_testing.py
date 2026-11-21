@@ -380,6 +380,79 @@ def test_cli_run_unreachable_port_is_not_a_fail(monkeypatch, capsys, exc):
     assert "/dev/nope" in cap.err
 
 
+def test_preflight_turns_a_silent_port_into_no_answer():
+    """CDC 0 accepts the open and never answers. That must stop the run before
+    any case, as NoAnswerError (a TimeoutError, so the CLI exits 3), instead of
+    sixteen per-case timeouts reported as FAIL (bench 2026-11-21, S1-18 (b))."""
+    from healthypi.testing import suite as S
+
+    class Silent:
+        port = "/dev/cdc0"
+
+        async def request(self, req, timeout_s=None):
+            raise TimeoutError("no reply")
+
+    with pytest.raises(S.NoAnswerError) as ei:
+        asyncio.run(S.run(Silent()))
+    assert isinstance(ei.value, TimeoutError)
+    assert "/dev/cdc0" in str(ei.value)
+
+
+def test_cli_run_silent_port_exits_3(monkeypatch, capsys):
+    from healthypi.cli.main import main
+    from healthypi.testing import suite as S
+    from healthypi.transport import serial_smp
+
+    async def silent_run(conn, **kw):
+        raise S.NoAnswerError("/dev/cdc0 opened but did not answer an SMP echo")
+
+    monkeypatch.setattr(serial_smp, "session", _FakeSession)
+    monkeypatch.setattr(testing, "run", silent_run)
+    assert main(["test", "run", "--port", "/dev/cdc0", "--json"]) == 3
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    assert "did not answer" in cap.err
+
+
+def _selftest_reply(**over):
+    vals = {"suite_ver": 1, "sd": True, "batt": True, "ecg": True, "ppg": True,
+            "m4": True, "qspi": True, "pass": 6, "fail": 0}
+    vals.update(over)
+
+    class R:
+        pass
+
+    r = R()
+    for k, v in vals.items():
+        setattr(r, k, v)
+    return r
+
+
+def _run_selftest_case(reply):
+    from healthypi.smp.group64 import fmt_error, g, is_error
+    from healthypi.testing import cases as C
+
+    class Conn:
+        async def request(self, req, timeout_s=None):
+            return reply
+
+    return asyncio.run(C.diag_selftest(Conn(), g, is_error, fmt_error))
+
+
+def test_selftest_case_passes_only_when_every_subsystem_passes():
+    assert _run_selftest_case(_selftest_reply()).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize("over", [{"sd": False, "pass": 5, "fail": 1},
+                                  {"m4": False},
+                                  {"fail": 1}])
+def test_selftest_case_fails_when_the_device_reports_a_failure(over):
+    """It used to PASS on any answer, so a unit reporting sd=FAIL passed the
+    release gate (bench 2026-11-20, readiness item 16)."""
+    res = _run_selftest_case(_selftest_reply(**over))
+    assert res.outcome is Outcome.FAIL
+
+
 # ------------------------------------------------------------- smpgroup ---
 
 
@@ -403,3 +476,18 @@ def test_smpgroup_submodule_access_does_not_recurse():
 
     with pytest.raises(AttributeError):
         smpgroup.does_not_exist
+
+
+@pytest.mark.parametrize("verb", [["fw", "info", "--bundle", "b.hpifw"],
+                                  ["fw", "update", "--bundle", "b.hpifw", "--port", "x"],
+                                  ["fw", "recover", "--bundle", "b.hpifw", "--port", "x"]])
+def test_missing_pubkey_file_is_a_usage_error_not_a_traceback(verb, capsys):
+    """`--pubkey <missing file>` died with a FileNotFoundError traceback
+    (bench 2026-11-20). It is now refused while the arguments are parsed."""
+    from healthypi.cli.main import main
+
+    with pytest.raises(SystemExit) as ei:
+        main(verb + ["--pubkey", "/definitely/not/here.pem"])
+    assert ei.value.code == 2
+    err = capsys.readouterr().err
+    assert "no such key file" in err and "Traceback" not in err

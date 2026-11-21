@@ -508,6 +508,12 @@ Request `{}` →
 | `health_overall` | uint | Aggregate subsystem health |
 | `health` | **map** | `{acq, m4, stream, rec, hl}`, each uint |
 
+`ecg` and `ppg` pass only when the front end is ready **and** has delivered a
+sample in the last second. Both sample continuously from boot, so a healthy
+unit always passes; a front end that initialises but never produces data
+fails. `batt` needs a fuel gauge that answers, `sd` a mounted card (it must be
+present at boot).
+
 `health` is a **nested map** — a flat parser will fail on it. Note that
 top-level `m4` (bool, the self-test result) and `health.m4` (uint, the subsystem
 state) are different things.

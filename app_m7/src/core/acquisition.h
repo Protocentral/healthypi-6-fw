@@ -33,6 +33,12 @@ int hpi_acquisition_init(void);
  * is not good news. Reads UINT32_MAX-ish until the first sample. */
 uint8_t hpi_acquisition_lead_off(uint32_t *age_ms);
 
+/* Milliseconds since the last PPG sample arrived from the AFE4400, or
+ * UINT32_MAX if none has since boot. AFE4400 init only writes registers and
+ * never reads one back, so "the device is ready" says nothing about whether
+ * the front end is alive; a recent sample does. Used by the self-test. */
+uint32_t hpi_acquisition_ppg_age_ms(void);
+
 #ifdef __cplusplus
 }
 #endif

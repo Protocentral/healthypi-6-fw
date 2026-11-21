@@ -31,6 +31,9 @@ LOG_MODULE_DECLARE(hpi_mgmt, LOG_LEVEL_INF);
 /* EOL suite version must be a deliberate, non-zero value (factory pins it). */
 BUILD_ASSERT(CONFIG_HPI_EOL_SUITE_VER > 0, "CONFIG_HPI_EOL_SUITE_VER must be > 0");
 
+/* A front end counts as sampling if its last sample is younger than this. */
+#define HPI_SELFTEST_SAMPLE_MAX_AGE_MS 1000U
+
 static bool node_ready(const struct device *d)
 {
     return d != NULL && device_is_ready(d);
@@ -45,8 +48,18 @@ int hpi_diag_run_selftest(struct smp_streamer *ctxt)
 
     bool sd   = platform_fs_is_ready();
     bool batt = p.valid;
-    bool ecg  = node_ready(DEVICE_DT_GET(DT_NODELABEL(ads129xx)));
-    bool ppg  = node_ready(DEVICE_DT_GET(DT_NODELABEL(afe4400)));
+    /* ECG and PPG must be READY and SAMPLING. Device readiness alone passed a
+     * unit whose AFE4400 never raised DRDY (0 PPG samples/s, bench
+     * 2026-11-12): its init only writes registers, so it "succeeds" with no
+     * chip answering. A sample in the last second is the real evidence. Both
+     * run continuously from boot (ECG 500 Hz, PPG 250 Hz), so a healthy unit
+     * is always well inside the window. */
+    uint32_t ecg_age;
+    (void)hpi_acquisition_lead_off(&ecg_age);
+    bool ecg  = node_ready(DEVICE_DT_GET(DT_NODELABEL(ads129xx))) &&
+                ecg_age < HPI_SELFTEST_SAMPLE_MAX_AGE_MS;
+    bool ppg  = node_ready(DEVICE_DT_GET(DT_NODELABEL(afe4400))) &&
+                hpi_acquisition_ppg_age_ms() < HPI_SELFTEST_SAMPLE_MAX_AGE_MS;
     bool m4   = hpi_ipc_ready();
     /* QSPI NOR readiness: the st,stm32-qspi-nor driver reads the JEDEC ID at
      * init and fails to become ready if the flash is absent/mis-IDed, so this
