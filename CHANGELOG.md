@@ -58,6 +58,24 @@ Versions here are the **firmware** version reported by the device
   from the host.
 
 ### Fixed
+- **The self-test's `ecg` and `ppg` require samples, not just a ready
+  device.** AFE4400 init only writes registers, so `ppg` passed on a unit whose
+  front end never produced a sample. Each now needs a sample in the last
+  second as well.
+- **`healthypi test run` fails `diag_selftest` when the device's self-test
+  fails.** It passed whenever the command answered, so a unit reporting
+  `sd=FAIL` passed the release gate and the end-of-line run.
+- **`healthypi test run` on a port with no SMP server exits 3, not 1.** CDC 0,
+  or anything else that opens and never answers, now stops the run with "did
+  not answer an SMP echo" before any case, instead of every case timing out as
+  a FAIL. `release.sh` reads 3 as "check the port".
+- **A refused `release.sh` keeps the previous bundle.** `build/release` was
+  wiped before the C6-image and hardware-gate checks, so a refusal deleted the
+  last good release. It is now replaced only once the build starts.
+- **State of charge is clamped to 100 %.** A MAX17048 whose model does not
+  match the cell reported 110 %, which reached the UI, telemetry and the C6.
+- **`--pubkey` with a missing file is a usage error** (exit 2), not a
+  traceback, on `fw info`, `fw update` and `fw recover`.
 - **Live waveforms redraw smoothly again, and no longer lose beats.** Every
   waveform point redrew its whole chart, and LVGL 9.5 (Zephyr 4.4) walks the
   entire object tree on every redraw request. The cost grew with the backlog,

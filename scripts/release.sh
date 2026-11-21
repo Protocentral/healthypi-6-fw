@@ -77,8 +77,10 @@ fi
 
 OUT="build/release"
 M7S="$OUT/m7s"
-rm -rf "$OUT"
-mkdir -p "$OUT"
+# $OUT is NOT wiped here. Every refusal before the build (arguments, the C6
+# image, the hardware gate) used to run after an `rm -rf`, so a refused run
+# deleted the previous, good bundle on its way out. The wipe now happens just
+# before the build (step 1); the gate's report waits in a temp file until then.
 
 version_of() {   # VERSION file -> "2.0.1-dev"
     local f="$1" maj min pat extra
@@ -205,6 +207,8 @@ PY
 }
 
 HW_REPORT="$OUT/hw-gate.json"
+HW_REPORT_TMP="$(mktemp -t hpi6-hw-gate.XXXXXX)"
+trap 'rm -f "$HW_REPORT_TMP"' EXIT
 if [ "$NO_HW_GATE" = 1 ]; then
     echo "################################################################"
     echo "##  ⚠️  --no-hw-gate: THIS BUNDLE WILL NOT BE HARDWARE-GATED.    ##"
@@ -215,13 +219,13 @@ if [ "$NO_HW_GATE" = 1 ]; then
 else
     echo "--- hardware gate: healthypi test run on $HW_PORT ---"
     HW_RC=0
-    healthypi test run --port "$HW_PORT" --json > "$HW_REPORT" || HW_RC=$?
+    healthypi test run --port "$HW_PORT" --json > "$HW_REPORT_TMP" || HW_RC=$?
     case "$HW_RC" in
         0|1)
-            if ! hw_gate_report "$HW_REPORT" "$M7_VER" || [ "$HW_RC" != 0 ]; then
+            if ! hw_gate_report "$HW_REPORT_TMP" "$M7_VER" || [ "$HW_RC" != 0 ]; then
                 echo ""
                 echo "❌ refusing to build a release bundle: the acceptance suite failed"
-                echo "   on $HW_PORT (report: $HW_REPORT)."
+                echo "   on $HW_PORT. Previous $OUT left as it was."
                 exit 1
             fi
             ;;
@@ -229,6 +233,7 @@ else
             echo ""
             echo "❌ refusing to build a release bundle: the acceptance suite could not"
             echo "   run on $HW_PORT (healthypi test run exited $HW_RC; message above)."
+            echo "   Previous $OUT left as it was."
             exit 1
             ;;
     esac
@@ -237,6 +242,12 @@ else
 fi
 
 # --- 1. build ---------------------------------------------------------------
+# Past every quick refusal: from here the old release tree is replaced.
+rm -rf "$OUT"
+mkdir -p "$OUT"
+if [ "$NO_HW_GATE" != 1 ]; then
+    mv "$HW_REPORT_TMP" "$HW_REPORT"
+fi
 FLAVOR=prod HPI_SIGNED_OUT="$M7S" "$HPI_ROOT/scripts/build.sh" signed prod
 "$HPI_ROOT/scripts/build.sh" m4
 

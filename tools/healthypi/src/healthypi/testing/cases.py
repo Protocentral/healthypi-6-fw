@@ -338,11 +338,13 @@ async def wifi_status(conn, g, is_error, fmt_error):
 
 @case("diag_selftest", group="system")
 async def diag_selftest(conn, g, is_error, fmt_error):
-    """Run the on-device self-test and report per-subsystem results.
+    """Run the on-device self-test; FAIL if any subsystem fails.
 
-    A failing subsystem is reported, not treated as a suite failure: a bench
-    unit with no SD card and no battery legitimately fails two of them. What
-    would be a real failure is the command not answering at all.
+    This used to PASS whenever the command answered, so a unit reporting
+    ``sd=FAIL`` passed the suite (bench 2026-11-20) -- and the suite is the
+    release gate and the end-of-line check. A unit missing a part (no SD card,
+    no cell) now fails here, which is the honest answer for a unit about to ship;
+    a bench run on a partial unit reads the detail for which part.
     """
     resp = await conn.request(g.diag_run_selftest())
     if is_error(resp):
@@ -361,6 +363,8 @@ async def diag_selftest(conn, g, is_error, fmt_error):
     detail += " ".join(f"{k}={'ok' if v else 'FAIL'}" for k, v in subs.items())
     if bad:
         detail += f"  (down: {', '.join(bad)})"
+    if bad or (nfail or 0) > 0:
+        return fail("diag_selftest", detail)
     return ok("diag_selftest", detail)
 
 
