@@ -8,8 +8,8 @@
  *
  *   0x0070 wifi_status  (read)  -> { state, rssi, ssid, ip }
  *   0x0071 wifi_scan    (read)  -> ENOTSUP; provisioning is the SoftAP portal
- *   0x0072 wifi_set     (write) <- { ssid, pw } -> { ok }
- *   0x0073 wifi_forget  (write) -> { ok }
+ *   0x0072 wifi_set     (write) <- { ssid, pw } -> { ok }   store creds on the C6
+ *   0x0073 wifi_forget  (write) -> { ok }   erase them, Wi-Fi off
  *   0x0074 wifi_softap  (write) -> { ok }  -- open the provisioning captive portal
  *   0x0075 conn_enable  (write) <- { radios } -> { ok }
  *   0x0076 conn_disable (write) -> { ok }
@@ -77,6 +77,49 @@ int hpi_wifi_scan_read(struct smp_streamer *ctxt)
 	return MGMT_ERR_ENOTSUP;
 }
 
+/*
+ * Reply for a credential command. Every failure is a named group-64 error, so
+ * the host can say what to do about it -- the old reply was a bare ok:false
+ * for all of them, including "this command does not exist".
+ *
+ *   -EHOSTDOWN / -EAGAIN  NOT_READY        power the C6 (conn_enable), retry
+ *   -ENOTSUP              VERSION_MISMATCH C6 image predates the command
+ *   -EBUSY                ESP_UPDATE_ACTIVE a C6 update holds the link
+ *   -ETIMEDOUT            ESP_NO_REPLY     the C6 did not answer
+ *   anything else         HW_FAULT
+ */
+static int wifi_cred_reply(zcbor_state_t *zse, int rc)
+{
+	uint16_t code;
+
+	switch (rc) {
+	case 0: {
+		bool ok = zcbor_tstr_put_lit(zse, "ok") && zcbor_bool_put(zse, true);
+		return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+	}
+	case -EINVAL:
+		return MGMT_ERR_EINVAL;
+	case -EHOSTDOWN:
+	case -EAGAIN:
+		code = HPI_MGMT_ERR_NOT_READY;
+		break;
+	case -ENOTSUP:
+		code = HPI_MGMT_ERR_VERSION_MISMATCH;
+		break;
+	case -EBUSY:
+		code = HPI_MGMT_ERR_ESP_UPDATE_ACTIVE;
+		break;
+	case -ETIMEDOUT:
+		code = HPI_MGMT_ERR_ESP_NO_REPLY;
+		break;
+	default:
+		code = HPI_MGMT_ERR_HW_FAULT;
+		break;
+	}
+	bool e = smp_add_cmd_err(zse, HPI_MGMT_GROUP_ID, code);
+	return e ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+}
+
 int hpi_wifi_set_write(struct smp_streamer *ctxt)
 {
 	zcbor_state_t *zsd = ctxt->reader->zs;
@@ -98,11 +141,12 @@ int hpi_wifi_set_write(struct smp_streamer *ctxt)
 
 	/* Both fields are length-checked up front and rejected -- never quietly
 	 * clamped: a truncated passphrase fails to associate with no useful
-	 * error. WPA2 allows 63 characters (or a 64-hex-digit PSK), so
-	 * sizeof(pw_z) - 1 is the real protocol limit, not a buffer artefact. */
+	 * error. WPA2 allows 8..63 characters (or a 64-hex-digit PSK), so
+	 * sizeof(pw_z) - 1 is the real protocol limit, not a buffer artefact; an
+	 * empty pw is an open network. */
 	if (zcbor_map_decode_bulk(zsd, decoders, ARRAY_SIZE(decoders), &decoded) != 0 ||
 	    ssid.len == 0 || ssid.len > sizeof(ssid_z) - 1 ||
-	    pw.len > sizeof(pw_z) - 1) {
+	    pw.len > sizeof(pw_z) - 1 || (pw.len > 0 && pw.len < 8)) {
 		return MGMT_ERR_EINVAL;
 	}
 
@@ -112,8 +156,9 @@ int hpi_wifi_set_write(struct smp_streamer *ctxt)
 	pw_z[pw.len] = '\0';
 
 	int rc = hpi_connectivity_wifi_connect(ssid_z, (pw.len ? pw_z : NULL));
-	bool ok = zcbor_tstr_put_lit(zse, "ok") && zcbor_bool_put(zse, rc == 0);
-	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+
+	memset(pw_z, 0, sizeof(pw_z));
+	return wifi_cred_reply(zse, rc);
 }
 
 int hpi_wifi_forget_write(struct smp_streamer *ctxt)
@@ -124,9 +169,7 @@ int hpi_wifi_forget_write(struct smp_streamer *ctxt)
 	if (gate != MGMT_ERR_EOK) {
 		return gate;
 	}
-	int rc = hpi_connectivity_wifi_disconnect();
-	bool ok = zcbor_tstr_put_lit(zse, "ok") && zcbor_bool_put(zse, rc == 0);
-	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+	return wifi_cred_reply(zse, hpi_connectivity_wifi_forget());
 }
 
 /*

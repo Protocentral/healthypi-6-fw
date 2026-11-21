@@ -17,7 +17,14 @@ import socket
 import time
 from dataclasses import dataclass, field
 
-from .protocol import PACKET_LEN, OpenViewError, Packet, find_sync, unpack
+from .protocol import (
+    PACKET_LEN,
+    OpenViewError,
+    Packet,
+    find_sync,
+    skippable_length,
+    unpack,
+)
 
 TCP_PORT = 5000
 UDP_PORT = 5001
@@ -30,6 +37,10 @@ class Stats:
     bytes_received: int = 0
     resync_bytes: int = 0
     bad_packets: int = 0
+    #: well-formed frames this monitor does not decode (HRV 0x03, EEG 0x04).
+    #: Counted apart from bad_packets, which then means real corruption: the
+    #: C6 sends an HRV frame with every vitals update, about 1.5 a second.
+    other_frames: int = 0
     gaps: int = 0
     lost: int = 0
     first_seq: int | None = None
@@ -76,6 +87,7 @@ class Stats:
             "gaps": self.gaps,
             "loss_pct": round(self.loss_pct, 3),
             "bad_packets": self.bad_packets,
+            "other_frames": self.other_frames,
             "resync_bytes": self.resync_bytes,
         }
 
@@ -100,6 +112,19 @@ class _Decoder:
             if idx:
                 self.stats.resync_bytes += idx
                 del self.buf[:idx]
+            other = skippable_length(self.buf)
+            if other is None:
+                return  # header not complete yet
+            if other:
+                if len(self.buf) < other:
+                    return
+                if skippable_length(self.buf, complete=True):
+                    self.stats.other_frames += 1
+                    del self.buf[:other]
+                    continue
+                self.stats.bad_packets += 1
+                del self.buf[:1]
+                continue
             if len(self.buf) < PACKET_LEN:
                 return
             try:

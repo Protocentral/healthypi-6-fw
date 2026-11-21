@@ -407,6 +407,9 @@ COMMANDS: tuple[Command, ...] = (
             Field("ip", T.TSTR),
         ),
         errors=(257,),
+        doc="state: 0 disconnected 1 connecting 2 connected 3 portal (SoftAP) up. "
+        "In state 3 `ssid` is the portal's own network name (HealthyPi-XXXX), "
+        "on C6 firmware that has WIFI_SET_CREDS; older images report it empty",
     ),
     Command(
         0x0071,
@@ -415,6 +418,9 @@ COMMANDS: tuple[Command, ...] = (
         status=Status.STUB,
         doc="always ENOTSUP: provisioning goes through the SoftAP portal",
     ),
+    # wifi_set / wifi_forget: until the C6 grew WIFI_SET_CREDS (0x23) and
+    # WIFI_FORGET (0x24) these replied a bare ok:false (set) or only dropped the
+    # radio (forget). Every failure is now a named error; ok is always true.
     Command(
         0x0072,
         "wifi_set",
@@ -422,8 +428,23 @@ COMMANDS: tuple[Command, ...] = (
         meta={"unlock": True},
         request=(Field("ssid", T.TSTR), Field("pw", T.TSTR)),
         response=(Field("ok", T.BOOL),),
+        errors=(256, 257, 261, 272, 274),
+        doc="stores the credentials on the C6 (pw '' = open network, else 8-64 "
+        "chars); the C6 joins at once if Wi-Fi is on, otherwise on the next "
+        "conn_enable with Wi-Fi. 'ok' means stored, not connected: poll "
+        "conn_status. NOT_READY = C6 in reset or still starting (power it "
+        "first); VERSION_MISMATCH = C6 image predates the command (use the "
+        "SoftAP portal)",
     ),
-    Command(0x0073, "wifi_forget", (W,), meta={"unlock": True}, response=(Field("ok", T.BOOL),)),
+    Command(
+        0x0073,
+        "wifi_forget",
+        (W,),
+        meta={"unlock": True},
+        response=(Field("ok", T.BOOL),),
+        errors=(256, 257, 261, 272, 274),
+        doc="erases the C6's stored credentials and turns Wi-Fi off; errors as wifi_set",
+    ),
     Command(
         0x0074,
         "wifi_softap",

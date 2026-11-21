@@ -836,14 +836,54 @@ int hpi_connectivity_wifi_status(struct hpi_wifi_info *out)
 	return 0;
 }
 
-int hpi_connectivity_wifi_connect(const char *ssid, const char *password)
+/*
+ * The link must be answering to carry a credential command: -EHOSTDOWN when
+ * the C6 is in reset (asked for -- power it first), -EAGAIN while it is still
+ * coming up or has stopped answering, -EBUSY while a C6 update holds the link.
+ */
+static int wifi_cred_cmd_gate(void)
 {
-	if (!device_is_ready(hb)) {
+	if (!g_started || !device_is_ready(hb)) {
 		return -ENODEV;
 	}
-	/* Still -ENOTSUP at the transport: there is no command that carries
-	 * credentials. Provisioning is the SoftAP portal, by design. */
+	if (hpi_connectivity_update_held()) {
+		return -EBUSY;
+	}
+	if (g_link_state == HPI_CONN_LINK_OFF) {
+		return -EHOSTDOWN;
+	}
+	if (g_link_state != HPI_CONN_LINK_UP) {
+		return -EAGAIN;
+	}
+	return 0;
+}
+
+int hpi_connectivity_wifi_connect(const char *ssid, const char *password)
+{
+	int rc = wifi_cred_cmd_gate();
+
+	if (rc != 0) {
+		return rc;
+	}
+	/* Stored on the C6, which reconnects with them only if Wi-Fi is already
+	 * in use: the radio bitmask stays this service's to decide. */
 	return healthybridge_wifi_connect(hb, ssid, password);
+}
+
+int hpi_connectivity_wifi_forget(void)
+{
+	int rc = wifi_cred_cmd_gate();
+
+	if (rc != 0) {
+		return rc;
+	}
+	rc = healthybridge_wifi_forget(hb);
+	if (rc != 0) {
+		return rc;
+	}
+	/* The C6 has already taken Wi-Fi down; drop the request bit too, so the
+	 * next status poll does not try to bring it back. */
+	return hpi_connectivity_enable(g_req_radios & ~HPI_CONN_RADIO_WIFI);
 }
 
 int hpi_connectivity_wifi_disconnect(void)
@@ -936,6 +976,7 @@ int hpi_connectivity_wifi_connect(const char *ssid, const char *password)
 	ARG_UNUSED(ssid); ARG_UNUSED(password); return -ENOTSUP;
 }
 int hpi_connectivity_wifi_disconnect(void) { return -ENOTSUP; }
+int hpi_connectivity_wifi_forget(void) { return -ENOTSUP; }
 int hpi_connectivity_wifi_enable(bool on) { ARG_UNUSED(on); return -ENOTSUP; }
 int hpi_connectivity_ble_enable(bool on) { ARG_UNUSED(on); return -ENOTSUP; }
 int hpi_connectivity_wifi_softap(void) { return -ENOTSUP; }

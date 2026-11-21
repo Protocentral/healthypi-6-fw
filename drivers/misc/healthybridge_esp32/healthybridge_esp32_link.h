@@ -102,11 +102,18 @@ struct healthybridge_link_api {
 	int (*ble_adv)(const struct device *dev, bool on);
 	/** Set the advertised BLE device name (HB 0x12). */
 	int (*ble_set_name)(const struct device *dev, const char *name);
+	/** Store Wi-Fi credentials on the co-processor (HB 0x23); it reconnects
+	 *  with them if Wi-Fi is in use. password NULL or "" = open network.
+	 *  0 = stored (not "connected": poll wifi_status); -EINVAL = rejected;
+	 *  -ENOTSUP = the co-processor image predates the command; -ENOSPC = its
+	 *  NVS write failed; -EHOSTDOWN / -ETIMEDOUT as for every command. */
 	int (*wifi_connect)(const struct device *dev, const char *ssid,
 			    const char *password);
 	int (*wifi_disconnect)(const struct device *dev);
-	/** Open the SoftAP captive portal (the documented provisioning path --
-	 *  credentials are never pushed over this link). */
+	/** Erase the stored credentials and take Wi-Fi down (HB 0x24). Errors as
+	 *  for wifi_connect. */
+	int (*wifi_forget)(const struct device *dev);
+	/** Open the SoftAP captive portal, the other provisioning path. */
 	int (*wifi_softap)(const struct device *dev);
 
 	/** Receive-side counters, for diagnostics. -ENOSYS if the transport has
@@ -237,6 +244,11 @@ static inline int healthybridge_wifi_connect(const struct device *dev,
 static inline int healthybridge_wifi_disconnect(const struct device *dev)
 {
 	return HB_LINK_CALL(dev, wifi_disconnect);
+}
+
+static inline int healthybridge_wifi_forget(const struct device *dev)
+{
+	return HB_LINK_CALL(dev, wifi_forget);
 }
 
 static inline int healthybridge_wifi_softap(const struct device *dev)

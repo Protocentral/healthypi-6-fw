@@ -180,12 +180,49 @@ def pack(p: Packet) -> bytes:
     return head + body + bytes((FOOTER0, FOOTER1))
 
 
+def skippable_length(buf, off: int = 0, complete: bool = False) -> int | None:
+    """Length of a well-formed v2 frame at ``off`` that is not a data packet.
+
+    The C6 interleaves HRV (``0x03``) and EEG (``0x04``) frames with the data
+    packets. A reader that only decodes data must step over them whole; treated
+    as corrupt, each one costs a "bad packet" and a byte-by-byte resync, which
+    is what made a clean stream look damaged.
+
+    Returns ``None`` when fewer than 5 header bytes are available, 0 when the
+    header is not a skippable frame (data, v1, or not a header at all), else the
+    frame length. With ``complete=True`` the whole frame must be present and its
+    footer intact, or 0 is returned.
+    """
+    if len(buf) - off < 5:
+        return None
+    try:
+        _length, version, ftype = peek(buf, off)
+    except OpenViewError:
+        return 0
+    if version != VERSION_V2 or ftype not in (TYPE_HRV, TYPE_EEG):
+        return 0
+    n = packet_length(version, ftype)
+    if complete:
+        if len(buf) - off < n:
+            return 0
+        if buf[off + n - 2] != FOOTER0 or buf[off + n - 1] != FOOTER1:
+            return 0
+    return n
+
+
 def iter_packets(buf: bytes):
-    """Yield decoded packets, resyncing past anything unparseable."""
+    """Yield decoded data packets, stepping over HRV/EEG frames and resyncing
+    past anything unparseable."""
     pos = 0
     while pos < len(buf):
         idx = find_sync(buf, pos)
-        if idx < 0 or len(buf) - idx < PACKET_LEN:
+        if idx < 0:
+            return
+        other = skippable_length(buf, idx, complete=True)
+        if other:
+            pos = idx + other
+            continue
+        if len(buf) - idx < PACKET_LEN:
             return
         try:
             yield unpack(buf, idx)

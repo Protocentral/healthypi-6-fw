@@ -516,7 +516,9 @@ static int hb_uart_command(const struct device *dev, uint8_t cmd_id,
 			   uint8_t *out, uint16_t out_cap, uint16_t *out_len)
 {
 	struct healthybridge_uart_data *data = dev->data;
-	uint8_t buf[sizeof(struct hpi_hb_control_cmd) + 96];
+	/* Sized for the largest parameter block any command carries. */
+	uint8_t buf[sizeof(struct hpi_hb_control_cmd) +
+		    MAX(96, sizeof(struct hpi_hb_wifi_connect_params))];
 	struct hpi_hb_control_cmd *c = (struct hpi_hb_control_cmd *)buf;
 	int ret;
 
@@ -551,11 +553,20 @@ static int hb_uart_command(const struct device *dev, uint8_t cmd_id,
 
 	ret = hb_uart_send_frame(dev, HPI_HB_MSG_TYPE_CONTROL_CMD, buf,
 				 (uint16_t)(sizeof(*c) + param_len));
+	/* Parameters can be a Wi-Fi passphrase; do not leave it on the stack. */
+	memset(c->params, 0, param_len);
 	if (ret == 0) {
 		if (k_sem_take(&data->pending.done, K_MSEC(HB_UART_CMD_TIMEOUT_MS)) != 0) {
 			ret = -ETIMEDOUT;
 		} else if (data->pending.status != HPI_HB_RESP_OK) {
-			ret = -EIO;
+			/* Distinct errnos only for the statuses that mean
+			 * something specific; every other refusal stays -EIO,
+			 * which callers read as "this image lacks the command". */
+			switch (data->pending.status) {
+			case HPI_HB_RESP_BAD_PARAMS: ret = -EINVAL; break;
+			case HPI_HB_RESP_STORE_FAIL: ret = -ENOSPC; break;
+			default:                     ret = -EIO;    break;
+			}
 		} else if (data->pending.data_len == 0) {
 			/* Acked, but no payload: the link and the command are
 			 * fine, the reply body is not implemented on the ESP
@@ -762,19 +773,53 @@ static int hb_uart_api_wifi_softap(const struct device *dev)
 	return (rc == -ENODATA) ? 0 : rc;
 }
 
+/*
+ * A bare ack is success; an error ack from a command added after HealthyBridge
+ * 1.1.0 means the image does not have it (its `default:` answers ERROR), which
+ * is -ENOTSUP to the caller -- the same reading get_version makes of -EIO.
+ */
+static int hb_uart_new_cmd_result(int rc)
+{
+	if (rc == -ENODATA) {
+		return 0;
+	}
+	return (rc == -EIO) ? -ENOTSUP : rc;
+}
+
 static int hb_uart_api_wifi_connect(const struct device *dev, const char *ssid,
 				    const char *password)
 {
-	ARG_UNUSED(dev);
-	ARG_UNUSED(ssid);
-	ARG_UNUSED(password);
-	/*
-	 * Deliberately not supported: credentials are provisioned through the
-	 * ESP32's SoftAP captive portal, not pushed over the link. There is no
-	 * HB_CMD to carry them, and inventing one would hit the far end's
-	 * `default:` and be silently ignored.
-	 */
-	return -ENOTSUP;
+	struct hpi_hb_wifi_connect_params p = {0};
+	size_t sl, pl;
+	int rc;
+
+	if (ssid == NULL) {
+		return -EINVAL;
+	}
+	sl = strlen(ssid);
+	pl = (password != NULL) ? strlen(password) : 0;
+	/* The C6 applies the same bounds; checking here gives the caller -EINVAL
+	 * without a round trip, and keeps a truncated secret off the wire. */
+	if (sl == 0 || sl > sizeof(p.ssid) || pl > sizeof(p.password) ||
+	    (pl > 0 && pl < 8)) {
+		return -EINVAL;
+	}
+	p.ssid_len = (uint8_t)sl;
+	p.password_len = (uint8_t)pl;
+	memcpy(p.ssid, ssid, sl);
+	if (pl > 0) {
+		memcpy(p.password, password, pl);
+	}
+
+	rc = hb_uart_command(dev, HPI_HB_CMD_WIFI_SET_CREDS, &p, sizeof(p), NULL, 0, NULL);
+	memset(&p, 0, sizeof(p));   /* the passphrase does not outlive the call */
+	return hb_uart_new_cmd_result(rc);
+}
+
+static int hb_uart_api_wifi_forget(const struct device *dev)
+{
+	return hb_uart_new_cmd_result(
+		hb_uart_command(dev, HPI_HB_CMD_WIFI_FORGET, NULL, 0, NULL, 0, NULL));
 }
 
 static int hb_uart_api_rx_stats(const struct device *dev,
@@ -894,6 +939,7 @@ static const struct healthybridge_link_api hb_uart_api = {
 	.wifi_enable = hb_uart_api_wifi_enable,
 	.wifi_connect = hb_uart_api_wifi_connect,
 	.wifi_disconnect = hb_uart_api_wifi_disconnect,
+	.wifi_forget = hb_uart_api_wifi_forget,
 	.wifi_softap = hb_uart_api_wifi_softap,
 	.get_rx_stats = hb_uart_api_rx_stats,
 	.ota_request = hb_uart_api_ota_request,
