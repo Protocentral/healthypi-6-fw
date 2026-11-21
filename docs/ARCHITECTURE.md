@@ -564,7 +564,7 @@ healthypi fw info --bundle build/release/hpi6-firmware-1.0.0.zip
 
 An official release is made by `.github/workflows/release.yml` on a `vX.Y.Z`
 tag. It runs the same build, with the C6 taken from the
-healthybridge-esp32 tag in `tools/ci/healthybridge-release.ref`, and produces
+healthybridge-esp32 `hp6-v*` tag in `tools/ci/healthybridge-release.ref`, and produces
 a **draft** release: the bundle plus the factory images (`mcuboot.hex`,
 `app_m7.signed.hex`, `m4.hex`). `release.sh` stays the local path for bench
 and own-key builds. The hardware gate it runs is done by hand on the draft
