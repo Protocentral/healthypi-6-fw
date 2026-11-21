@@ -55,9 +55,18 @@ welcome if you can show the reasoning is wrong, but they are not news:
 
 ## Firmware signing, and running your own firmware
 
-Official firmware is signed with Protocentral's ECDSA-P256 **release key**. The
-private half never leaves an offline machine. The public half is published, and
-appears in three places:
+Official firmware is signed with Protocentral's ECDSA-P256 **release key**.
+Releases are built and signed by this repository's release workflow
+(`.github/workflows/release.yml`):
+- **The build job** has no secrets and embeds only the public key.
+- **A separate signing job** is the only place the private key is available.
+  It reaches the key through a GitHub Actions *environment* that needs the
+  release owner's approval and runs only for protected `v*` tags.
+- **Every release** is published as a draft first, and made public only after
+  it has been tested on hardware.
+- **The master copies** of the key are kept offline.
+
+The public half is published, and appears in three places:
 
 - **compiled into MCUboot,** which refuses an M7 image signed by any other key;
 - **compiled into the M7 application,** which refuses any other M4 image;

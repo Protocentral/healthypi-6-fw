@@ -1,0 +1,291 @@
+# Copyright (c) 2026 ProtoCentral Electronics
+# SPDX-License-Identifier: MIT
+#
+# Firmware release: build, sign, draft a GitHub release.
+#
+#   push a tag vX.Y.Z        -> build, sign with the RELEASE key, draft release
+#   Run workflow (manual)    -> dry run: build, sign with a throwaway key,
+#                               no release. Exercises every step without the key.
+#
+# The release key is reachable from exactly one job, `sign`, through the
+# `firmware-release` ENVIRONMENT (never a repository secret). Set that
+# environment up once (Settings -> Environments):
+#   - secret HP6_RELEASE_KEY: the PEM private key (the full text)
+#   - required reviewer: the release owner
+#   - deployment branches and tags: tags matching v*
+# and protect v* tags with a tag ruleset, so only the release owner can create
+# one. Background and the reasoning: keys/README.md, .github/SECURITY.md.
+#
+# Separation of duties, on purpose:
+#   build   no secrets. Zephyr SDK, west, ESP-IDF, every third-party tool.
+#           Embeds only the release PUBLIC key; the M7 image comes out unsigned.
+#   sign    the key, and nothing else: GitHub's own actions pinned by commit,
+#           imgtool and its dependencies pinned by hash, this repo's scripts.
+#           Never builds. Refuses unless the key matches what the build embedded
+#           and the files match the checksums the build wrote.
+#   release a DRAFT. Publishing it is a person's decision, after the hardware
+#           gate (`healthypi test run` on a unit running the candidate) and the
+#           release rehearsal.
+name: Firmware release
+
+on:
+  push:
+    tags: ['v[0-9]*.[0-9]*.[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+  RELEASE_PUBKEY: tools/healthypi/src/healthypi/fw/release_keys/hp6_release_ec256.pub.pem
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ZEPHYR_SDK_VERSION: "1.0.0"
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: healthypi-6-fw
+
+      - name: Version and tag agree
+        id: ver
+        working-directory: healthypi-6-fw
+        run: |
+          v() { printf '%s.%s.%s' "$(sed -n 's/^VERSION_MAJOR *= *//p' "$1")" \
+                  "$(sed -n 's/^VERSION_MINOR *= *//p' "$1")" "$(sed -n 's/^PATCHLEVEL *= *//p' "$1")"; }
+          m7="$(v app_m7/VERSION)"
+          echo "version=$m7" >> "$GITHUB_OUTPUT"
+          echo "M7 $m7, M4 $(v app_m4/VERSION)"
+          if [ "$DRY_RUN" != true ] && [ "${GITHUB_REF_NAME}" != "v$m7" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} but app_m7/VERSION says $m7"
+            exit 1
+          fi
+
+      - name: Choose the public key to embed
+        working-directory: healthypi-6-fw
+        run: |
+          mkdir -p "$RUNNER_TEMP/k"
+          if [ "$DRY_RUN" = true ]; then
+            # A throwaway keypair: the private half goes to the dry-run signer as
+            # an artifact. Worthless outside this run, by construction.
+            openssl ecparam -name prime256v1 -genkey -noout \
+              | openssl pkcs8 -topk8 -nocrypt -out "$RUNNER_TEMP/k/dry-run.pem"
+            openssl ec -in "$RUNNER_TEMP/k/dry-run.pem" -pubout -out "$RUNNER_TEMP/k/embed.pub.pem"
+          else
+            if [ ! -f "$RELEASE_PUBKEY" ]; then
+              echo "::error::$RELEASE_PUBKEY is not committed. Add the release public key first (keys/README.md)."
+              exit 1
+            fi
+            cp "$RELEASE_PUBKEY" "$RUNNER_TEMP/k/embed.pub.pem"
+          fi
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gperf ccache dfu-util device-tree-compiler \
+            wget xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
+          pip install west
+
+      - name: Initialize the west workspace
+        working-directory: healthypi-6-fw
+        run: |
+          west init -l .
+          west update --narrow -o=--depth=1
+          west zephyr-export
+          pip install -r ../zephyr/scripts/requirements-base.txt
+          pip install imgtool
+
+      - name: Install the Zephyr SDK (arm-zephyr-eabi only)
+        run: |
+          cd "$HOME"
+          base="https://github.com/zephyrproject-rtos/sdk-ng/releases/download"
+          wget -q "${base}/v${ZEPHYR_SDK_VERSION}/zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-x86_64_minimal.tar.xz"
+          tar xf "zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-x86_64_minimal.tar.xz"
+          rm "zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-x86_64_minimal.tar.xz"
+          "zephyr-sdk-${ZEPHYR_SDK_VERSION}/setup.sh" -t arm-zephyr-eabi -c
+          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-${ZEPHYR_SDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build M7 (MCUboot + app, public key only) and M4
+        working-directory: healthypi-6-fw
+        run: |
+          HP6_SIGNING_KEY="$RUNNER_TEMP/k/embed.pub.pem" scripts/build.sh signed prod
+          scripts/build.sh m4
+
+      - name: Shippability check
+        working-directory: healthypi-6-fw
+        run: bash tools/ci/check_prod_surface.sh --release build/m7s
+
+      - name: Which C6 release
+        id: c6
+        working-directory: healthypi-6-fw
+        run: echo "ref=$(grep -v '^#' tools/ci/healthybridge-release.ref | head -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Protocentral/healthybridge-esp32
+          ref: ${{ steps.c6.outputs.ref }}
+          path: healthybridge-esp32
+
+      - name: C6 version and tag agree
+        run: |
+          want="${{ steps.c6.outputs.ref }}"
+          have="v$(cat healthybridge-esp32/version.txt)"
+          [ "$want" = "$have" ] || { echo "::error::C6 $want has version.txt $have"; exit 1; }
+
+      - name: Build the C6 (ESP-IDF 6.1.1, the version it ships with)
+        uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d # v1
+        with:
+          esp_idf_version: v6.1.1
+          target: esp32c6
+          path: healthybridge-esp32
+          command: bash hp6.sh build
+
+      - name: Stage the unsigned release
+        working-directory: healthypi-6-fw
+        run: |
+          sudo chown -R "$(id -u)" ../healthybridge-esp32
+          tools/ci/release_stage.sh "$RUNNER_TEMP/unsigned" ../healthybridge-esp32
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-release
+          path: ${{ runner.temp }}/unsigned
+          if-no-files-found: error
+
+      - name: Hand the dry-run key to the dry-run signer
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dry-run-key
+          path: ${{ runner.temp }}/k/dry-run.pem
+          retention-days: 1
+
+  # The only job that ever sees the release key.
+  sign:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: firmware-release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-release
+          path: ${{ runner.temp }}/unsigned
+      - name: Install the signer (hash-pinned)
+        run: |
+          python -m pip install --require-hashes -r tools/ci/release-sign-requirements.txt
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec python3 -m healthypi.cli.main "$@"\n' > "$RUNNER_TEMP/bin/healthypi"
+          chmod +x "$RUNNER_TEMP/bin/healthypi"
+      - name: Sign
+        env:
+          HP6_RELEASE_KEY: ${{ secrets.HP6_RELEASE_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/release.pem"
+          trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
+          printf '%s\n' "$HP6_RELEASE_KEY" > "$key"
+          unset HP6_RELEASE_KEY
+          PATH="$RUNNER_TEMP/bin:$PATH" \
+          PYTHONPATH="$PWD/tools/healthypi/src:$PWD/tools/smpgroup/src" \
+            tools/ci/release_sign.sh "$RUNNER_TEMP/unsigned" "$key" "$RUNNER_TEMP/signed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release
+          path: ${{ runner.temp }}/signed
+          if-no-files-found: error
+
+  # Same steps with the throwaway key: proves the pipeline end to end without
+  # touching the release key or its environment.
+  sign-dry-run:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-release
+          path: ${{ runner.temp }}/unsigned
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dry-run-key
+          path: ${{ runner.temp }}/k
+      - name: Install the signer (hash-pinned)
+        run: |
+          python -m pip install --require-hashes -r tools/ci/release-sign-requirements.txt
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec python3 -m healthypi.cli.main "$@"\n' > "$RUNNER_TEMP/bin/healthypi"
+          chmod +x "$RUNNER_TEMP/bin/healthypi"
+      - name: Sign (throwaway key, --own-key)
+        run: |
+          PATH="$RUNNER_TEMP/bin:$PATH" \
+          PYTHONPATH="$PWD/tools/healthypi/src:$PWD/tools/smpgroup/src" \
+            tools/ci/release_sign.sh "$RUNNER_TEMP/unsigned" "$RUNNER_TEMP/k/dry-run.pem" \
+              "$RUNNER_TEMP/signed" --own-key
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-DRY-RUN-not-for-units
+          path: ${{ runner.temp }}/signed
+          retention-days: 7
+
+  release:
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release
+          path: signed
+      - name: Draft the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          . signed/release.env
+          cat > notes.md <<EOF
+          HealthyPi 6 firmware ${VERSION}
+
+          - M7 ${M7_VERSION}, M4 ${M4_VERSION}, ESP32-C6 (HealthyBridge) ${C6_VERSION}
+          - firmware ${FW_DESCRIBE}, healthybridge-esp32 ${C6_DESCRIBE}
+
+          Update: \`healthypi fw update --port <CDC1> --bundle hpi6-firmware-${VERSION}.zip\`
+
+          **Draft.** Not yet hardware-gated: run \`healthypi test run\` on a unit
+          running this build and the release rehearsal before publishing.
+          EOF
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --draft --verify-tag --title "HealthyPi 6 firmware ${VERSION}" \
+            --notes-file notes.md signed/*
