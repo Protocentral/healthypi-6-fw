@@ -59,23 +59,47 @@ whatever its name.
 
 ### The private half is not
 
-**Air-gapped.** It never lives on a developer machine, in this directory, in CI,
-or in a cloud drive. Release builds pass it explicitly, as an absolute path:
+It is never on a developer machine, in this directory, in a repository
+secret, or in a cloud drive. It exists in two kinds of place, and nowhere
+else:
+
+- **The release workflow's signing job.** `.github/workflows/release.yml`
+  splits a release into three jobs:
+  - **`build`**: no secrets. It embeds only the public key, so the M7 comes
+    out unsigned (`HP6_SIGNING_KEY=<.pub.pem> scripts/build.sh signed`).
+  - **`sign`**: reads the key from the `HP6_RELEASE_KEY` secret of the
+    `firmware-release` **environment**. That environment requires the release
+    owner's approval and accepts only `v*` tags, which a tag ruleset protects.
+    The job installs only hash-pinned tools
+    (`tools/ci/release-sign-requirements.txt`) and never builds. It refuses
+    unless the key matches the public key the build embedded
+    (`tools/ci/release_sign.sh`).
+  - **`release`**: creates a **draft** GitHub release, which is published by
+    hand after the hardware gate.
+- **The master copies**, offline on encrypted removable media. GitHub cannot
+  give a secret back, so these copies are the key; the environment holds a
+  copy of it.
+
+The same scripts sign by hand from an offline copy, if the workflow is
+unavailable:
 
 ```bash
-HP6_SIGNING_KEY=/secure/media/hp6_release_ec256.pem scripts/release.sh
+HP6_SIGNING_KEY=<release .pub.pem> scripts/build.sh signed prod && scripts/build.sh m4
+tools/ci/release_stage.sh /tmp/unsigned ../healthybridge-esp32
+tools/ci/release_sign.sh  /tmp/unsigned /secure/media/hp6_release_ec256.pem /tmp/signed
 ```
 
-A relative path is a known trap — Kconfig key paths resolve against the west
-topdir, not this repo, so a relative path silently signs with something else or
-fails obscurely.
+Key paths must be absolute. Kconfig resolves a relative key path against the
+west topdir, not this repo, so a relative path silently signs with something
+else or fails obscurely.
 
 ### Custody
 
 1. Generated once, on an offline machine, with `imgtool keygen -t ecdsa-p256`.
 2. Stored on encrypted removable media, with **two** copies in separate physical
    locations. There is no recovery from losing it (see below).
-3. Present only for the duration of a release build, then removed.
+3. Copied into the `firmware-release` environment secret only, never into a
+   repository or organisation secret, which every workflow can read.
 4. Never emailed, committed, or pasted into a chat or issue.
 
 ### What losing it means

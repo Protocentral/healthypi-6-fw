@@ -116,36 +116,7 @@ fi
 # .bin name is per-target, and a guessed "healthybridge.bin" once left the image
 # silently out of every bundle.
 c6_image() {   # <healthybridge dir> -> path of the HP6 (esp32c6) app image
-    python3 - "$1" <<'PY'
-import json, pathlib, sys
-repo = pathlib.Path(sys.argv[1])
-fix = f"Build it there:  (cd {repo} && ./hp6.sh build)"
-desc = repo / "build.hp6" / "project_description.json"
-if not desc.is_file():
-    sys.exit(f"no HealthyPi 6 build of the C6 firmware in {repo}/build.hp6. {fix}")
-d = json.loads(desc.read_text())
-if d.get("target") != "esp32c6":
-    sys.exit(f"{repo}/build.hp6 was built for {d.get('target')!r}, not esp32c6 -- "
-             f"wrong target. Rebuild:  (cd {repo} && ./hp6.sh clean && ./hp6.sh build)")
-cfg = pathlib.Path(d["build_dir"]) / "config" / "sdkconfig.json"
-k = json.loads(cfg.read_text()) if cfg.is_file() else {}
-if not k.get("HB_PROFILE_HP6"):
-    sys.exit(f"{repo}/build.hp6 is not the HealthyPi 6 profile (CONFIG_HB_PROFILE_HP6 "
-             f"unset in {cfg}) -- wrong profile. Rebuild:  (cd {repo} && ./hp6.sh "
-             "clean && ./hp6.sh build)")
-if not k.get("HB_OTA_RECEIVER"):
-    sys.exit(f"{repo}/build.hp6 has no firmware-update receiver (CONFIG_HB_OTA_RECEIVER "
-             "unset): a unit given this image could never be updated over USB again. "
-             "Use a healthybridge-esp32 with the HP6 OTA receiver.")
-img = pathlib.Path(d["build_dir"]) / d["app_bin"]
-if not img.is_file():
-    sys.exit(f"{img} is missing. {fix}")
-want = (repo / "version.txt").read_text().strip() if (repo / "version.txt").is_file() else ""
-built = d.get("project_version", "")
-if want and built != want:
-    sys.exit(f"{img} is stale: built as {built}, but {repo}/version.txt says {want}. {fix}")
-print(img)
-PY
+    python3 "$HPI_ROOT/tools/ci/c6_image.py" "$1"
 }
 ESP_BIN=""
 if [ "$SKIP_ESP32" = 1 ]; then

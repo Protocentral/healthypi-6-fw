@@ -11,6 +11,19 @@ Versions here are the **firmware** version reported by the device
 ## [Unreleased]
 
 ### Added
+- **Release workflow** (`.github/workflows/release.yml`). Pushing a `vX.Y.Z`
+  tag builds, signs and drafts a GitHub release. Running it manually is a dry
+  run with a throwaway key.
+  - The **build** job has no secrets: `scripts/build.sh signed`, given a
+    public key, embeds it and leaves the M7 unsigned (`app_m7/sysbuild.cmake`).
+  - The **sign** job is the only one with the release key, from the
+    `firmware-release` environment. It installs only hash-pinned tools and
+    uses `tools/ci/release_sign.sh`, which refuses a key that does not match
+    the one the build embedded, or files that do not match the build's
+    checksums.
+  - The C6 comes from the healthybridge-esp32 tag in
+    `tools/ci/healthybridge-release.ref`, built with ESP-IDF 6.1.1.
+  - The draft release carries the bundle plus the factory images.
 - **The ESP32-C6 firmware version is reported.** `device_info` and
   `fw_versions` now fill `espfw` (it was always empty). The connectivity
   service asks the C6 over HealthyBridge (new control command `0x31`
