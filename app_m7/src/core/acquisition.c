@@ -233,8 +233,23 @@ static struct hp6_ppg_sample ppg_batch[PPG_BATCH];
 static uint8_t  ppg_n;
 static uint64_t ppg_t0_us;
 
+/* Uptime of the last PPG sample, 32-bit for the same reason as lead_off_at;
+ * ppg_seen tells "never sampled" from a stale timestamp of 0. */
+static uint32_t ppg_last_at;
+static bool     ppg_seen;
+
+uint32_t hpi_acquisition_ppg_age_ms(void)
+{
+    if (!ppg_seen) {
+        return UINT32_MAX;
+    }
+    return (uint32_t)k_uptime_get() - ppg_last_at;
+}
+
 static void ppg_publish(const struct afe4400_encoded_data *d)
 {
+    ppg_last_at = (uint32_t)k_uptime_get();
+    ppg_seen = true;
     if (ppg_n == 0) {
         ppg_t0_us = (uint64_t)k_uptime_get() * 1000ULL;
     }

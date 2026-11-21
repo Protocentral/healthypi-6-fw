@@ -65,7 +65,12 @@ static int read_gauge(uint32_t *vbat_mv, uint32_t *soc)
     if (v > 100000U) { v /= 1000U; }
     *vbat_mv = v;
 
-    *soc = vals[1].relative_state_of_charge;
+    /* The MAX17048 reports above 100 % when its model does not match the cell
+     * (110 % seen on a v5 unit on USB, 2026-11-20). A percentage over 100 is
+     * meaningless to every consumer -- the UI, telemetry, the C6 -- so clamp
+     * here, once. The gauge model is the real fix (CHARGE_SOC_STOPS_AT_91). */
+    uint32_t pct = vals[1].relative_state_of_charge;
+    *soc = MIN(pct, 100U);
     return 0;
 }
 
