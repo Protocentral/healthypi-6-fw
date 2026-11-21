@@ -22,7 +22,7 @@ enum hpi_ipc_msg_type {
 	HPI_IPC_MSG_TYPE_DATA = 0x02,      // Generic data (deprecated for new designs)
 	HPI_IPC_MSG_TYPE_CMD  = 0x03,
 	HPI_IPC_MSG_TYPE_STATUS = 0x04,
-	HPI_IPC_MSG_TYPE_VERSION = 0x05,   // M4→M7: firmware version (sent at bind)
+	HPI_IPC_MSG_TYPE_VERSION = 0x05,   // M4→M7: firmware version (at bind, then every 2 s as the heartbeat)
 	
 	/* PPG/SpO2 Algorithm Message Types */
 	HPI_IPC_MSG_TYPE_PPG_RAW = 0x10,    // M7→M4: Raw PPG samples (Red+IR)

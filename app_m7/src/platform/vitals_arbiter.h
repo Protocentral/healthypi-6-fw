@@ -32,6 +32,11 @@ extern "C" {
 /* hpi_vit_next_expiry(): nothing is fresh, so nothing will age out. */
 #define HPI_VIT_NO_EXPIRY INT64_MAX
 
+/* The vitals sample is published at least this often, M4 or not. Temperature
+ * and respiration rate are M7 measurements and must not wait for an M4
+ * message: with no ECG beats and no finger on the PPG the M4 sends nothing. */
+#define HPI_VIT_PERIOD_MS 1000
+
 /* The latest value of each M4 input and when it arrived (M7 uptime, ms).
  * A zero value means "not available", as in hp6_vitals. */
 struct hpi_vit_inputs {
@@ -62,6 +67,15 @@ int64_t hpi_vit_next_expiry(const struct hpi_vit_inputs *in, int64_t now);
 /* True if a and b differ in anything hpi_vit_arbitrate() sets. */
 bool hpi_vit_arbitrated_differ(const struct hp6_vitals *a,
                                const struct hp6_vitals *b);
+
+/* True once HPI_VIT_PERIOD_MS has passed since the last publish at
+ * `last_pub_at` (a negative value means "never published"). */
+bool hpi_vit_period_due(int64_t now, int64_t last_pub_at);
+
+/* When the vitals work must next run: the next input expiry or the periodic
+ * publish, whichever comes first. Always > now. */
+int64_t hpi_vit_next_run(const struct hpi_vit_inputs *in, int64_t now,
+                         int64_t last_pub_at);
 
 #ifdef __cplusplus
 }

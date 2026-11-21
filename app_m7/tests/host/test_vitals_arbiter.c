@@ -8,8 +8,10 @@
  * The rules are pure logic over timestamps, so they run without Zephyr. The
  * `sim_*` harness below plays the part of platform/ipc.c's vitals_work: run on
  * every message (always publish), and on the timer hpi_vit_next_expiry() asks
- * for (publish only if hpi_vit_arbitrated_differ()). That is how the
- * "publish once per transition, never periodically" property is checked.
+ * for (publish only if hpi_vit_arbitrated_differ()). That isolates the expiry
+ * rules: "publish once per transition". With `sim.periodic` set it is the
+ * whole of vitals_work, which also runs and publishes at least every
+ * HPI_VIT_PERIOD_MS (hpi_vit_next_run(), hpi_vit_period_due()).
  *
  * From the repo root:
  *
@@ -44,12 +46,15 @@ static struct {
 	struct hp6_vitals pub;   /* last published sample */
 	int publishes;
 	int64_t timer;           /* HPI_VIT_NO_EXPIRY = not armed */
+	bool periodic;           /* model the 1 Hz publish too */
+	int64_t last_pub_at;     /* -1 = never */
 } sim;
 
 static void sim_reset(void)
 {
 	memset(&sim, 0, sizeof(sim));
 	sim.timer = HPI_VIT_NO_EXPIRY;
+	sim.last_pub_at = -1;
 }
 
 static void sim_run(int64_t now, bool arrived)
@@ -57,11 +62,14 @@ static void sim_run(int64_t now, bool arrived)
 	struct hp6_vitals v = sim.pub;
 
 	hpi_vit_arbitrate(&sim.in, now, sim.leads_off, &v);
-	if (arrived || hpi_vit_arbitrated_differ(&v, &sim.pub)) {
+	if (arrived || hpi_vit_arbitrated_differ(&v, &sim.pub) ||
+	    (sim.periodic && hpi_vit_period_due(now, sim.last_pub_at))) {
 		sim.pub = v;
 		sim.publishes++;
+		sim.last_pub_at = now;
 	}
-	sim.timer = hpi_vit_next_expiry(&sim.in, now);
+	sim.timer = sim.periodic ? hpi_vit_next_run(&sim.in, now, sim.last_pub_at)
+				 : hpi_vit_next_expiry(&sim.in, now);
 	if (sim.timer != HPI_VIT_NO_EXPIRY && sim.timer <= now) {
 		printf("FAIL next_expiry %lld not after now %lld\n",
 		       (long long)sim.timer, (long long)now);
@@ -268,6 +276,61 @@ static void test_next_expiry_picks_earliest(void)
 	       hpi_vit_next_expiry(&in, 8001) == HPI_VIT_NO_EXPIRY);
 }
 
+static void test_period_helpers(void)
+{
+	struct hpi_vit_inputs none = {0};
+	struct hpi_vit_inputs ecg = { .ecg_hr = 70, .ecg_at = 10000 };
+
+	expect("period: due when never published", hpi_vit_period_due(5, -1));
+	expect("period: not due inside the period",
+	       !hpi_vit_period_due(10999, 10000));
+	expect("period: due at the period", hpi_vit_period_due(11000, 10000));
+	expect("next_run: the tick with nothing fresh",
+	       hpi_vit_next_run(&none, 10500, 10000) == 10000 + HPI_VIT_PERIOD_MS);
+	expect("next_run: soon after boot when never published",
+	       hpi_vit_next_run(&none, 0, -1) == 1);
+	expect("next_run: never in the past",
+	       hpi_vit_next_run(&none, 20000, 10000) == 20001);
+	expect("next_run: an expiry before the tick wins",
+	       hpi_vit_next_run(&ecg, 14900, 14500) ==
+	       10000 + HPI_VIT_STALE_MS + 1);
+	expect("next_run: the tick before an expiry wins",
+	       hpi_vit_next_run(&ecg, 10200, 10000) == 10000 + HPI_VIT_PERIOD_MS);
+}
+
+/* The bug this fixes: with the M4 silent nothing ran, so temperature and
+ * respiration rate (filled in by vitals_work) were never published. */
+static void test_periodic_without_m4(void)
+{
+	sim_reset();
+	sim.periodic = true;
+	sim_run(1000, false);              /* the first run, scheduled at init */
+	sim_advance(61000);
+	expect("periodic: ~1 Hz with no M4 at all",
+	       sim.publishes >= 60 && sim.publishes <= 61);
+	expect("periodic: timer always armed", sim.timer != HPI_VIT_NO_EXPIRY);
+	expect("periodic: M4 fields read absent", sim.pub.hr_bpm == 0 &&
+	       sim.pub.spo2_x10 == 0);
+}
+
+static void test_periodic_keeps_expiry_exact(void)
+{
+	sim_reset();
+	sim.periodic = true;
+	sim_run(1000, false);
+	sim_ecg(10000, 72, 40);
+	sim_advance(10000 + HPI_VIT_STALE_MS);
+	expect("periodic: ECG rate held while fresh", sim.pub.hr_bpm == 72);
+	sim_advance(10000 + HPI_VIT_STALE_MS + 1);
+	expect("periodic: ECG rate cleared at the exact expiry",
+	       sim.pub.hr_bpm == 0 && sim.pub.hrv_sdnn_ms == 0);
+	int before = sim.publishes;
+
+	sim_advance(10000 + HPI_VIT_STALE_MS + 5000);
+	expect("periodic: still publishing after the M4 goes quiet",
+	       sim.publishes >= before + 4);
+}
+
 int main(void)
 {
 	test_nothing_ever_arrives();
@@ -277,6 +340,9 @@ int main(void)
 	test_lead_off();
 	test_late_message_restores();
 	test_next_expiry_picks_earliest();
+	test_period_helpers();
+	test_periodic_without_m4();
+	test_periodic_keeps_expiry_exact();
 
 	if (fails) {
 		printf("\n%d FAILED\n", fails);

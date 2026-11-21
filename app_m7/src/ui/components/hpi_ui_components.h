@@ -133,6 +133,7 @@ struct hpi_ui_waveform {
 	bool               primed;
 	int64_t            bl_q;       /* baseline EMA in Q8 (baseline = bl_q>>8) */
 	int32_t            target;     /* display units the peak is scaled to    */
+	bool               dirty;      /* points written since the last flush    */
 };
 
 /* Display zoom applied ON TOP of the automatic scaling, Q8 (256 = x1).
@@ -165,6 +166,11 @@ void hpi_ui_waveform_create(struct hpi_ui_waveform *w, lv_obj_t *parent,
 			    uint8_t bl_shift);
 /* Push one sample (call from the UI thread only). DC-blocks and auto-scales. */
 void hpi_ui_waveform_push(struct hpi_ui_waveform *w, int32_t v);
+
+/* Redraw every waveform that received points since the last call. The UI loop
+ * calls this once per pass, after draining the bus: a push only writes the
+ * point, so the chart is invalidated once per pass, not once per point. */
+void hpi_ui_waveform_flush_all(void);
 
 /* Metric tile (HR/SpO2/RR/Temp): caption + big value + unit. */
 struct hpi_ui_vitals_tile {

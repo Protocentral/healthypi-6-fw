@@ -93,6 +93,24 @@ int64_t hpi_vit_next_expiry(const struct hpi_vit_inputs *in, int64_t now)
     return next;
 }
 
+bool hpi_vit_period_due(int64_t now, int64_t last_pub_at)
+{
+    return last_pub_at < 0 || (now - last_pub_at) >= HPI_VIT_PERIOD_MS;
+}
+
+int64_t hpi_vit_next_run(const struct hpi_vit_inputs *in, int64_t now,
+                         int64_t last_pub_at)
+{
+    int64_t tick = (last_pub_at < 0) ? now + 1 : last_pub_at + HPI_VIT_PERIOD_MS;
+
+    if (tick <= now) {
+        tick = now + 1;
+    }
+    int64_t expiry = hpi_vit_next_expiry(in, now);
+
+    return expiry < tick ? expiry : tick;
+}
+
 bool hpi_vit_arbitrated_differ(const struct hp6_vitals *a,
                                const struct hp6_vitals *b)
 {
