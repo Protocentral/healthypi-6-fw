@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions here are the **firmware** version reported by the device
 (`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
 
-## [1.0.0] — unreleased
+## [1.0.0] — 2026-11-22
 
 The first public release. Nothing had shipped before it, so both cores start at
 1.0.0 regardless of the internal numbering used during development.
