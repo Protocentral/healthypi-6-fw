@@ -18,6 +18,8 @@
 #   m7/app.bin      m7/app.hex            M7 application, UNSIGNED
 #   m7/imgtool_sign.args                  how MCUboot expects it to be signed
 #   m7/signing_pubkey.pem                 the public key the build embedded
+#   m7/backup_pubkey.pem                  the backup release key it embedded,
+#                                         when it has one (keys/README.md)
 #   m4/m4.bin       m4/m4.hex             M4 image (signed in the bundle)
 #   esp32c6/healthybridge_esp32c6.bin     C6 app image (signed in the bundle)
 #   release.env                           versions and source revisions
@@ -43,6 +45,15 @@ z="$M7S/app_m7/zephyr"
 key="$(sed -n 's/^CONFIG_BOOT_SIGNATURE_KEY_FILE="\(.*\)"$/\1/p' "$M7S/mcuboot/zephyr/.config")"
 [ -f "$key" ] || die "cannot find the key MCUboot was built with ($key)"
 grep -q -- '-----BEGIN PUBLIC KEY-----' "$key" || die "MCUboot was built with $key, which is not a public key"
+# The backup release key, if the build has one: MCUboot and the M7's M4/C6
+# verifier must hold the same one, and only its public half may be here.
+backup="$(sed -n 's/^CONFIG_HPI_BACKUP_SIGNING_KEY="\(.*\)"$/\1/p' "$M7S/mcuboot/zephyr/.config")"
+app_backup="$(sed -n 's/^CONFIG_HPI_BACKUP_SIGNING_KEY="\(.*\)"$/\1/p' "$z/.config")"
+[ "$backup" = "$app_backup" ] || die "MCUboot and the M7 were built with different backup keys ('$backup' vs '$app_backup')"
+if [ -n "$backup" ]; then
+    [ -f "$backup" ] || die "cannot find the backup key MCUboot was built with ($backup)"
+    grep -q -- '-----BEGIN PUBLIC KEY-----' "$backup" || die "MCUboot was built with backup key $backup, which is not a public key"
+fi
 [ -f "$M4/zephyr/zephyr.bin" ] || die "no M4 build in $M4 (scripts/build.sh m4)"
 C6="$(python3 "$ROOT/tools/ci/c6_image.py" "$HB" "$HB_BUILD")" || die "no usable C6 image (above)"
 
@@ -62,6 +73,7 @@ cp "$z/zephyr.bin"                  "$OUT/m7/app.bin"
 cp "$z/zephyr.hex"                  "$OUT/m7/app.hex"
 cp "$z/imgtool_sign.args"           "$OUT/m7/imgtool_sign.args"
 cp "$key"                           "$OUT/m7/signing_pubkey.pem"
+[ -z "$backup" ] || cp "$backup"     "$OUT/m7/backup_pubkey.pem"
 cp "$M4/zephyr/zephyr.bin"          "$OUT/m4/m4.bin"
 cp "$M4/zephyr/zephyr.hex"          "$OUT/m4/m4.hex"
 cp "$C6"                            "$OUT/esp32c6/$(basename "$C6")"

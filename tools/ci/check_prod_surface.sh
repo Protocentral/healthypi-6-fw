@@ -24,11 +24,13 @@
 set -euo pipefail
 
 REQUIRE_RELEASE=0
+ONE_KEY_OK=0
 BUILD=""
 
 for arg in "$@"; do
   case "$arg" in
     --release) REQUIRE_RELEASE=1 ;;
+    --one-key-ok) ONE_KEY_OK=1 ;;   # a re-keyed unit (release.sh --own-key): no backup key required
     -h|--help)
       sed -n '3,20p' "$0"
       exit 0
@@ -137,6 +139,24 @@ if [ "$REQUIRE_RELEASE" = 1 ] || [ -n "$BOOT_CFG" ]; then
     # BOOT_MAX_IMG_SECTORS_AUTO derived 8 on this board and bricked boot
     # Pin it or do not ship it.
     is_y CONFIG_BOOT_MAX_IMG_SECTORS_AUTO "$BOOT_CFG" && fail "MCUboot: BOOT_MAX_IMG_SECTORS_AUTO=y — it derives 8 on this board and produces an unbootable device"
+
+    # The backup release key (keys/README.md, "Backup key"; owner decision K1).
+    # The bootloader cannot be changed in the field, so a release bootloader
+    # without it can never gain one: losing the primary would mean a recall.
+    # MCUboot and the M7's M4/C6 verifier must hold the same backup.
+    boot_backup="$(val_of CONFIG_HPI_BACKUP_SIGNING_KEY "$BOOT_CFG" | tr -d '"')"
+    app_backup="$(val_of CONFIG_HPI_BACKUP_SIGNING_KEY "$APP_CFG" | tr -d '"')"
+    if [ -z "$boot_backup" ]; then
+      if [ "$REQUIRE_RELEASE" = 1 ] && [ "$ONE_KEY_OK" = 0 ]; then
+        fail "MCUboot has no backup release key (CONFIG_HPI_BACKUP_SIGNING_KEY) — set HP6_BACKUP_KEY"
+      else
+        note "keys: MCUboot trusts one key (no backup)"
+      fi
+    elif [ "$boot_backup" != "$app_backup" ]; then
+      fail "backup key differs: MCUboot '$boot_backup', M7 app '${app_backup:-<none>}'"
+    else
+      note "keys: primary + backup ($(basename "$boot_backup"))"
+    fi
   fi
 
   # USB identity. Assert the product VID rather than merely rejecting the

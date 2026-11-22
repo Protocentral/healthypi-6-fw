@@ -106,6 +106,18 @@ Where an entry says what something "was", that earlier behaviour was never
 released.
 
 #### Added
+- **A backup release key.** MCUboot and the M7's M4/ESP32-C6 verifier trust
+  a second release key, held separately, so losing or revoking the primary
+  means switching keys with an ordinary update rather than recalling every
+  unit to reflash its bootloader. MCUboot's Zephyr port builds a one-key
+  table; this project carries a two-line MCUboot patch (`zephyr/patches.yml`,
+  applied by `scripts/build.sh`) and generates a two-key table. Without the
+  patch the bootloader fails to link instead of quietly trusting one key.
+  `HP6_BACKUP_KEY` names the key (a second dev key is generated for dev
+  builds). `check_prod_surface.sh --release` refuses a release bootloader
+  without one; `release.sh --own-key` does not require one. The release
+  workflow embeds `release_keys/hp6_release_backup_ec256.pub.pem`, and
+  `tools/ci/release_sign.sh` signs with either key.
 - **Release workflow** (`.github/workflows/release.yml`). Pushing a `vX.Y.Z`
   tag builds, signs and drafts a GitHub release. Running it manually is a dry
   run with a throwaway key.

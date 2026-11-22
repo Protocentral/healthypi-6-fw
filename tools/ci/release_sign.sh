@@ -12,9 +12,10 @@
 #
 # Refuses, before anything is signed, when:
 #   - the staged files do not match their SHA256SUMS (altered in transit);
-#   - the private key's public half is not the key the build embedded in
-#     MCUboot and the M7 -- an image signed with any other key would be refused
-#     by every unit built from this release;
+#   - the private key's public half is not one of the keys the build embedded
+#     in MCUboot and the M7 (the primary, or the backup when the build has one)
+#     -- an image signed with any other key would be refused by every unit
+#     built from this release;
 #   - (without --own-key) that key is not one of the release public keys the
 #     healthypi tools ship with, so users' `fw update` would refuse the bundle.
 #
@@ -59,8 +60,15 @@ PY
 }
 grep -q -- 'PRIVATE KEY-----' "$KEY" || die "$KEY is not a private key"
 mine="$(pub_of "$KEY")"
-[ "$mine" = "$(pub_of "$IN/m7/signing_pubkey.pem")" ] || die \
-    "this key is not the one the build embedded in MCUboot ($IN/m7/signing_pubkey.pem). Units built from this release would refuse everything it signs."
+# Which embedded key this is. Signing with the backup is the point of having
+# one: it is what a release does once the primary is lost or revoked.
+EMBEDDED=""
+for k in "$IN/m7/signing_pubkey.pem" "$IN/m7/backup_pubkey.pem"; do
+    [ -f "$k" ] && [ "$(pub_of "$k")" = "$mine" ] && EMBEDDED="$k"
+done
+[ -n "$EMBEDDED" ] || die \
+    "this key is not one the build embedded in MCUboot ($IN/m7/signing_pubkey.pem$([ -f "$IN/m7/backup_pubkey.pem" ] && echo ", $IN/m7/backup_pubkey.pem")). Units built from this release would refuse everything it signs."
+case "$EMBEDDED" in *backup_pubkey.pem) echo "signing with the BACKUP release key" ;; *) echo "signing with the primary release key" ;; esac
 if [ "$OWN_KEY" = 0 ]; then
     found=0
     for k in "$REL_KEYS"/*.pub.pem; do
@@ -77,7 +85,7 @@ ARGS=()   # one argument per line; no mapfile, so it also runs on macOS bash 3.2
 while IFS= read -r a; do [ -n "$a" ] && ARGS+=("$a"); done < "$IN/m7/imgtool_sign.args"
 imgtool sign "${ARGS[@]}" --key "$KEY" "$IN/m7/app.bin" "$OUT/app_m7.signed.bin"
 imgtool sign "${ARGS[@]}" --key "$KEY" "$IN/m7/app.hex" "$OUT/app_m7.signed.hex"
-imgtool verify --key "$IN/m7/signing_pubkey.pem" "$OUT/app_m7.signed.bin" \
+imgtool verify --key "$EMBEDDED" "$OUT/app_m7.signed.bin" \
     || die "the signed M7 does not verify against the embedded key"
 cp "$IN/m7/mcuboot.hex" "$OUT/mcuboot.hex"
 cp "$IN/m4/m4.hex"      "$OUT/m4.hex"
@@ -91,7 +99,7 @@ healthypi fw bundle create "$BUNDLE" \
     --esp32c6 "$C6_BIN" \
     --release "$M7_VERSION" --hw-rev v5 \
     --key "$KEY" --created "$CREATED"
-healthypi fw info --bundle "$BUNDLE" --pubkey "$IN/m7/signing_pubkey.pem"
+healthypi fw info --bundle "$BUNDLE" --pubkey "$EMBEDDED"
 if [ "$OWN_KEY" = 0 ]; then
     # What every user's tool will do: verify against the shipped release keys.
     healthypi fw info --bundle "$BUNDLE" > /dev/null \

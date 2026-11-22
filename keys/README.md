@@ -4,19 +4,22 @@
 ignores everything except itself and this README, and CI fails the build if a
 `*.pem` is ever tracked.
 
-## One key, three uses
+## One key, three uses (plus a backup)
 
-A single ECDSA-P256 keypair covers the whole device:
+A single ECDSA-P256 keypair signs everything on the device:
 
 | What it signs | Who verifies it | How the public half gets there |
 |---|---|---|
 | the M7 image | **MCUboot**, before boot | embedded into the bootloader at build time |
-| the M4 image | **the M7 application**, at group-64 commit | `tools/build/gen_m4_pubkey.py` extracts it from the same PEM into `m4fw_pubkey.c` |
+| the M4 and ESP32-C6 images | **the M7 application**, at group-64 commit / `espfw_begin` | `tools/build/gen_m4_pubkey.py` extracts it from the same PEM into `m4fw_pubkey.c` |
 | the release manifest | host tools (`healthypi fw update/recover/info`) | **shipped in the package**, `tools/healthypi/src/healthypi/fw/release_keys/*.pub.pem`; `--pubkey` overrides it |
 
 Deliberately not one key per processor. One key to hold, one to rotate, one to
 lose — and no way for the M7 and M4 anchors to drift apart, because both are
 generated from the same file in the same build.
+
+Every place above also trusts a **backup key**, which signs nothing until the
+primary is lost or revoked ([below](#backup-key)).
 
 ## Dev key — `hp6_dev_ec256.pem`
 
@@ -26,6 +29,9 @@ hand:
 ```bash
 imgtool keygen -k keys/hp6_dev_ec256.pem -t ecdsa-p256
 ```
+
+Its backup, `hp6_dev_backup_ec256.pem`, is generated next to it the same way,
+so a dev bootloader is built exactly as a release one is: with two keys.
 
 **Key divergence is the trap.** MCUboot embeds the *public* half of whatever key
 it was built with. A board flashed with a bootloader built against dev key A will
@@ -42,14 +48,17 @@ key changes — that replaces the bootloader too, so the anchor moves with it.
 
 ### The public half is published
 
-Add it once, on the machine that holds the private key, and commit **only** the
-`.pub.pem`:
+Add both public halves once, on the machine that holds the private keys, and
+commit **only** the `.pub.pem` files:
 
 ```bash
-openssl ec -in /secure/hp6_release_ec256.pem -pubout \
-    -out tools/healthypi/src/healthypi/fw/release_keys/hp6_release_ec256.pub.pem
-healthypi fw keys      # prints its fingerprint -- publish it in SECURITY.md and release notes
+R=tools/healthypi/src/healthypi/fw/release_keys
+openssl ec -in /secure/hp6_release_ec256.pem        -pubout -out $R/hp6_release_ec256.pub.pem
+openssl ec -in /secure/hp6_release_backup_ec256.pem -pubout -out $R/hp6_release_backup_ec256.pub.pem
+healthypi fw keys      # prints the fingerprints -- publish them in SECURITY.md and release notes
 ```
+
+The release workflow embeds both, by those names.
 
 From then on the `healthypi` tools check every bundle against it without
 `--pubkey`, so a repackaged bundle is refused. `release.sh` checks that each
@@ -72,8 +81,8 @@ else:
     owner's approval and accepts only `v*` tags, which a tag ruleset protects.
     The job installs only hash-pinned tools
     (`tools/ci/release-sign-requirements.txt`) and never builds. It refuses
-    unless the key matches the public key the build embedded
-    (`tools/ci/release_sign.sh`).
+    unless the key matches a public key the build embedded, the primary or
+    the backup (`tools/ci/release_sign.sh`).
   - **`release`**: creates a **draft** GitHub release, which is published by
     hand after the hardware gate.
 - **The master copies**, offline on encrypted removable media. GitHub cannot
@@ -84,7 +93,8 @@ The same scripts sign by hand from an offline copy, if the workflow is
 unavailable:
 
 ```bash
-HP6_SIGNING_KEY=<release .pub.pem> scripts/build.sh signed prod && scripts/build.sh m4
+HP6_SIGNING_KEY=<release .pub.pem> HP6_BACKUP_KEY=<backup .pub.pem> \
+    scripts/build.sh signed prod && scripts/build.sh m4
 tools/ci/release_stage.sh /tmp/unsigned ../healthybridge-esp32
 tools/ci/release_sign.sh  /tmp/unsigned /secure/media/hp6_release_ec256.pem /tmp/signed
 ```
@@ -105,10 +115,12 @@ else or fails obscurely.
 ### What losing it means
 
 Every unit already in the field has that key's public half embedded in its
-bootloader. Losing the private half means **no shipped unit can ever receive a
-firmware update over any non-SWD path again** — recovery mode included, since the
-bootloader still verifies signatures there. The only remedy is recalling units
-and reflashing over SWD with a new bootloader.
+bootloader. Losing the private half of **both** the primary and the backup
+means **no shipped unit can ever receive a firmware update over any non-SWD
+path again** — recovery mode included, since the bootloader still verifies
+signatures there. The only remedy is recalling units and reflashing over SWD
+with a new bootloader. Losing one of the two is recoverable
+([backup key](#backup-key)).
 
 This is why the copies are physical and duplicated, and why the release procedure
 does not depend on any one person's laptop.
@@ -119,20 +131,38 @@ Rotating the release key requires shipping a new bootloader. MCUboot cannot be
 updated in the field on this board, so rotation is a full
 `scripts/flash.sh factory` cycle, not an OTA.
 
-That is why a **second (backup) public key** should be in the bootloader before
-the first unit ships. Its private half is held by a different person in a
-different place. If the primary is lost or leaks, releases switch to the backup
-with an ordinary update instead of a recall.
+That is why the bootloader holds a **second (backup) public key** from the first
+unit on. Its private half is held by a different person in a different place.
 
-- **MCUboot supports it.** Its verifier (`bootutil_find_key()`) searches a
-  table of keys.
-- **But the Zephyr port doesn't, yet.** `boot/zephyr/keys.c` in MCUboot v2.4.0
-  builds a **one-entry** table from `CONFIG_BOOT_SIGNATURE_KEY_FILE`, so adding
-  the backup key needs a small patch there.
-- **Status: not done.** It needs a decision and a hardware test.
-- **The M4 and manifest keys are easier.** They live in updatable code.
-  `m4fw_pubkey.c` (generated from one key today) can become a list, and the
-  `release_keys/` directory already accepts several keys.
+<a id="backup-key"></a>
+**How it works.**
+
+- **MCUboot.** Its verifier (`bootutil_find_key()`) searches a table of keys,
+  picking the one whose hash matches the image's KEYHASH TLV. MCUboot's Zephyr
+  port builds a one-entry table (`boot/zephyr/keys.c`), so this project
+  carries a two-line patch, in `zephyr/patches.yml`, that lets the build
+  supply the table. This repo's module `CMakeLists.txt` generates it from
+  `CONFIG_BOOT_SIGNATURE_KEY_FILE` and `CONFIG_HPI_BACKUP_SIGNING_KEY`.
+  `scripts/build.sh` applies the patch when `west update` has dropped it. If
+  it is ever missing anyway, the link fails (`bootutil_keys` defined twice);
+  a one-key bootloader is never built by accident.
+- **The M7 application.** `gen_m4_pubkey.py` emits both keys, and
+  `fw_release_sig.c` accepts a signature from either, for the M4 and the C6.
+- **Host tools.** `release_keys/` holds both `.pub.pem` files; any match
+  passes.
+- **Building.** `HP6_BACKUP_KEY` names the backup, an absolute path to a
+  private key or a `.pub.pem` (only the public half is embedded). It
+  defaults to the dev backup only when `HP6_SIGNING_KEY` is the dev key; any
+  other signing key requires it. `HP6_BACKUP_KEY=none` builds a one-key
+  bootloader, which `check_prod_surface.sh --release` refuses.
+- **Signing.** Releases are signed with the primary. `release_sign.sh`
+  accepts either key and says which it used.
+
+| Event | What happens |
+|---|---|
+| Primary **lost** | Sign from now on with the backup: put it in the `firmware-release` environment in place of the primary. No unit changes. Generate a new backup at the next factory batch. |
+| Primary **leaks** | Sign with the backup. Ship an M7 update that drops the leaked key from the M4/C6 list, remove it from `release_keys/`, and announce its fingerprint as revoked. MCUboot on units already shipped keeps trusting it; that cannot be fixed in the field. New units get a bootloader without it. |
+| Backup lost or leaks | The same, the other way round. |
 
 ### Owners may re-key their unit
 

@@ -1,0 +1,27 @@
+diff --git a/boot/zephyr/keys.c b/boot/zephyr/keys.c
+index ab403ddc..5e854c90 100644
+--- a/boot/zephyr/keys.c
++++ b/boot/zephyr/keys.c
+@@ -48,7 +48,12 @@ extern unsigned int ed25519_pub_key_len;
+  *       key file. If no key file was configured, the array and length must be
+  *       provided and added to the build manually.
+  */
+-#if defined(HAVE_KEYS)
++/*
++ * MCUBOOT_KEYS_EXTERNAL: the application's build supplies bootutil_keys[] and
++ * bootutil_key_cnt itself (for example, a table of several public keys --
++ * bootutil_find_key() already searches the whole table by key hash).
++ */
++#if defined(HAVE_KEYS) && !defined(MCUBOOT_KEYS_EXTERNAL)
+ const struct bootutil_key bootutil_keys[] = {
+     {
+ #if defined(MCUBOOT_SIGN_RSA)
+@@ -64,7 +69,7 @@ const struct bootutil_key bootutil_keys[] = {
+     },
+ };
+ const int bootutil_key_cnt = 1;
+-#endif /* HAVE_KEYS */
++#endif /* HAVE_KEYS && !MCUBOOT_KEYS_EXTERNAL */
+ #else
+ unsigned int pub_key_len;
+ struct bootutil_key bootutil_keys[1] = {

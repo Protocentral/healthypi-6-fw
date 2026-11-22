@@ -18,7 +18,8 @@
 #
 # Separation of duties, on purpose:
 #   build   no secrets. Zephyr SDK, west, ESP-IDF, every third-party tool.
-#           Embeds only the release PUBLIC key; the M7 image comes out unsigned.
+#           Embeds only the release PUBLIC keys (primary + backup); the M7
+#           image comes out unsigned.
 #   sign    the key, and nothing else: GitHub's own actions pinned by commit,
 #           imgtool and its dependencies pinned by hash, this repo's scripts.
 #           Never builds. Refuses unless the key matches what the build embedded
@@ -43,6 +44,9 @@ concurrency:
 env:
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
   RELEASE_PUBKEY: tools/healthypi/src/healthypi/fw/release_keys/hp6_release_ec256.pub.pem
+  # The backup release key (owner decision K1): MCUboot and the M7's M4/C6
+  # verifier trust both. Only the primary signs, until it is lost or revoked.
+  RELEASE_BACKUP_PUBKEY: tools/healthypi/src/healthypi/fw/release_keys/hp6_release_backup_ec256.pub.pem
 
 jobs:
   build:
@@ -85,12 +89,18 @@ jobs:
             openssl ecparam -name prime256v1 -genkey -noout \
               | openssl pkcs8 -topk8 -nocrypt -out "$RUNNER_TEMP/k/dry-run.pem"
             openssl ec -in "$RUNNER_TEMP/k/dry-run.pem" -pubout -out "$RUNNER_TEMP/k/embed.pub.pem"
+            # And a throwaway backup: only its public half is ever needed.
+            openssl ecparam -name prime256v1 -genkey -noout \
+              | openssl ec -pubout -out "$RUNNER_TEMP/k/embed-backup.pub.pem"
           else
-            if [ ! -f "$RELEASE_PUBKEY" ]; then
-              echo "::error::$RELEASE_PUBKEY is not committed. Add the release public key first (keys/README.md)."
-              exit 1
-            fi
+            for k in "$RELEASE_PUBKEY" "$RELEASE_BACKUP_PUBKEY"; do
+              if [ ! -f "$k" ]; then
+                echo "::error::$k is not committed. Add the release public keys first (keys/README.md)."
+                exit 1
+              fi
+            done
             cp "$RELEASE_PUBKEY" "$RUNNER_TEMP/k/embed.pub.pem"
+            cp "$RELEASE_BACKUP_PUBKEY" "$RUNNER_TEMP/k/embed-backup.pub.pem"
           fi
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -127,7 +137,9 @@ jobs:
       - name: Build M7 (MCUboot + app, public key only) and M4
         working-directory: healthypi-6-fw
         run: |
-          HP6_SIGNING_KEY="$RUNNER_TEMP/k/embed.pub.pem" scripts/build.sh signed prod
+          HP6_SIGNING_KEY="$RUNNER_TEMP/k/embed.pub.pem" \
+          HP6_BACKUP_KEY="$RUNNER_TEMP/k/embed-backup.pub.pem" \
+            scripts/build.sh signed prod
           scripts/build.sh m4
 
       - name: Shippability check

@@ -51,6 +51,66 @@ build_m4() {
     west build -p auto -b "$HPI_BOARD_M4" -d build/m4 app_m4
 }
 
+# Patches this project carries on modules (zephyr/patches.yml): today one, the
+# MCUboot key table that lets the bootloader trust a backup release key.
+# `west update` resets a module and drops them, so check and re-apply here
+# instead of relying on everyone remembering `west patch apply`.
+ensure_module_patches() {
+    local missing=0 applied=0 p mod dir
+    for p in "$HPI_ROOT"/zephyr/patches/*/*.patch; do
+        [ -f "$p" ] || continue
+        mod="$(basename "$(dirname "$p")")"
+        dir="$(west list -f '{abspath}' "$mod")"
+        if git -C "$dir" apply --reverse --check "$p" 2>/dev/null; then
+            applied=$((applied + 1))
+        else
+            missing=$((missing + 1))
+        fi
+    done
+    [ "$missing" = 0 ] && return 0
+    if [ "$applied" != 0 ]; then
+        echo "❌ some module patches are applied and some are not. Run:" >&2
+        echo "   west patch clean && west patch apply" >&2
+        exit 1
+    fi
+    echo "▶ applying the module patches in zephyr/patches.yml (west patch apply)"
+    west patch apply
+}
+
+# The backup release key (keys/README.md, "Backup key"). Prints its path, or
+# nothing for a one-key bootloader (HP6_BACKUP_KEY=none).
+#   - dev builds (HP6_SIGNING_KEY is the dev key): a second LOCAL dev key,
+#     generated on first use like the first, so every dev bootloader is built
+#     the way a release one is;
+#   - any other key: HP6_BACKUP_KEY must be given. Defaulting it there would
+#     put a dev key into a release bootloader.
+backup_key() {
+    local dev_key="$HPI_ROOT/keys/hp6_dev_ec256.pem"
+    local key="${HP6_BACKUP_KEY:-}"
+    if [ "$key" = "none" ]; then
+        return 0
+    fi
+    if [ -z "$key" ]; then
+        if [ "$HP6_SIGNING_KEY" != "$dev_key" ]; then
+            echo "❌ HP6_SIGNING_KEY is not the dev key, so HP6_BACKUP_KEY must name the" >&2
+            echo "   backup release key (absolute path, private or .pub.pem), or be" >&2
+            echo "   'none' for a bootloader that trusts one key. keys/README.md." >&2
+            exit 1
+        fi
+        key="$HPI_ROOT/keys/hp6_dev_backup_ec256.pem"
+        if [ ! -f "$key" ]; then
+            echo "No backup dev key at $key -- generating a LOCAL one (never committed)." >&2
+            imgtool keygen -k "$key" -t ecdsa-p256 >&2
+        fi
+    fi
+    case "$key" in
+        /*) ;;
+        *) echo "❌ HP6_BACKUP_KEY must be an absolute path: $key" >&2; exit 1 ;;
+    esac
+    [ -f "$key" ] || { echo "❌ HP6_BACKUP_KEY: no such file $key" >&2; exit 1; }
+    printf '%s\n' "$key"
+}
+
 build_signed() {
     local flavor="${1:-dev}"
     local out="${HPI_SIGNED_OUT:-build/m7s}"
@@ -74,8 +134,17 @@ build_signed() {
         imgtool keygen -k "$HP6_SIGNING_KEY" -t ecdsa-p256
     fi
 
+    ensure_module_patches
+    local backup; backup="$(backup_key)"
+    local backup_args=()
+    if [ -n "$backup" ]; then
+        backup_args=(-Dmcuboot_CONFIG_HPI_BACKUP_SIGNING_KEY=\""$backup"\"
+                     -Dapp_m7_CONFIG_HPI_BACKUP_SIGNING_KEY=\""$backup"\")
+    fi
+
     echo "▶ SIGNED M7 ($flavor): MCUboot + image 0 → $out"
     echo "  key: $HP6_SIGNING_KEY"
+    echo "  backup key: ${backup:-none (the bootloader trusts one key)}"
     local unsigned_args=()
     if [ "$external" = 1 ]; then
         echo "  PUBLIC key only: the M7 image is left UNSIGNED (sign it with"
@@ -97,6 +166,7 @@ build_signed() {
            -Dapp_m7_CONFIG_HPI_M4_SIGNING_KEY=\""$HP6_SIGNING_KEY"\" \
            -Dapp_m7_EXTRA_DTC_OVERLAY_FILE="$M7_OVERLAYS;$HPI_BOARD_DIR/healthypi6_v5_mcuboot_app.overlay" \
            -Dmcuboot_EXTRA_DTC_OVERLAY_FILE="$HPI_BOARD_DIR/healthypi6_v5_mcuboot_boot.overlay" \
+           ${backup_args[@]+"${backup_args[@]}"} \
            ${unsigned_args[@]+"${unsigned_args[@]}"}
 
     if [ "$external" = 1 ]; then
