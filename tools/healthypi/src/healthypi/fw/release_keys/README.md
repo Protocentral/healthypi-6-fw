@@ -8,10 +8,7 @@ is given. Two files mean primary + backup; a bundle signed by either verifies.
 repository -- CI fails the build if a tracked file contains one. The private
 release key is kept offline; see `keys/README.md`.
 
-To add the release key, on the machine that holds it:
-
-```bash
-openssl ec -in /secure/hp6_release_ec256.pem -pubout \
-    -out tools/healthypi/src/healthypi/fw/release_keys/hp6_release_ec256.pub.pem
-healthypi fw keys        # prints the fingerprint to publish
-```
+Holds the primary (`hp6_release_ec256.pub.pem`) and the backup
+(`hp6_release_backup_ec256.pub.pem`). Both names are required by
+`.github/workflows/release.yml`, which embeds them in MCUboot and the M7. Their
+fingerprints are in `.github/SECURITY.md`; `healthypi fw keys` prints them.

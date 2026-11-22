@@ -80,6 +80,19 @@ The public halves of both are published, and appear in three places:
   which check a release bundle's signature by default. `healthypi fw keys`
   prints the fingerprints, which should match the ones in the release notes.
 
+### Release key fingerprints
+
+SHA-256 of each key's DER SubjectPublicKeyInfo. `healthypi fw keys` prints the
+first 16 hex digits; check the full value without trusting our tools with
+`openssl pkey -pubin -in <key>.pub.pem -outform DER | shasum -a 256`.
+
+| Key | File | SHA-256 |
+|---|---|---|
+| Release (primary) | `hp6_release_ec256.pub.pem` | `d57c8c67387cc57e871b5ad7564d881721dabd3a106a4bc750dfc085295fe4e9` |
+| Release (backup) | `hp6_release_backup_ec256.pub.pem` | `00ceeec92c5d119b6db84db0e666617937186216be1f67afc2ef3469ab7d2d6a` |
+
+A key that is revoked is listed here as revoked, never silently removed.
+
 **Your device, your key.** The code is open and so is the hardware, but a unit
 programmed at the factory accepts only firmware signed with the release key over
 USB. To run your own builds, re-key the unit:
