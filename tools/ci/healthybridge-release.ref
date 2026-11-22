@@ -1,4 +1,5 @@
 # The healthybridge-esp32 (ESP32-C6) release a firmware release bundles.
-# A tag of Protocentral/healthybridge-esp32; the release workflow builds it
-# with ESP-IDF 6.1.1 and refuses if its version.txt does not match the tag.
-v1.2.0
+# A HealthyPi 6 tag of Protocentral/healthybridge-esp32: hp6-v<version>. (Its
+# plain v* tags are HealthyPi 5 ESP32-C3 releases.) The release workflow builds
+# it with ESP-IDF 6.1.1 and refuses if its version.txt does not match the tag.
+hp6-v1.2.0

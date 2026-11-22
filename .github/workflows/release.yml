@@ -148,7 +148,7 @@ jobs:
       - name: C6 version and tag agree
         run: |
           want="${{ steps.c6.outputs.ref }}"
-          have="v$(cat healthybridge-esp32/version.txt)"
+          have="hp6-v$(tr -d '[:space:]' < healthybridge-esp32/version.txt)"
           [ "$want" = "$have" ] || { echo "::error::C6 $want has version.txt $have"; exit 1; }
 
       - name: Build the C6 (ESP-IDF 6.1.1, the version it ships with)

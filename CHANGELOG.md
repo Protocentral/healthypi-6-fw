@@ -21,7 +21,7 @@ Versions here are the **firmware** version reported by the device
     uses `tools/ci/release_sign.sh`, which refuses a key that does not match
     the one the build embedded, or files that do not match the build's
     checksums.
-  - The C6 comes from the healthybridge-esp32 tag in
+  - The C6 comes from the healthybridge-esp32 `hp6-v*` tag in
     `tools/ci/healthybridge-release.ref`, built with ESP-IDF 6.1.1.
   - The draft release carries the bundle plus the factory images.
 - **The ESP32-C6 firmware version is reported.** `device_info` and
