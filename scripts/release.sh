@@ -4,9 +4,11 @@
 # HealthyPi 6 — build a shippable release: production images + a firmware bundle (zip).
 #
 #   scripts/release.sh --port <CDC1>          dev key, for rehearsing the flow
-#   HP6_SIGNING_KEY=/abs/release.pem scripts/release.sh --port <CDC1>
+#   HP6_SIGNING_KEY=/abs/release.pem HP6_BACKUP_KEY=/abs/backup.pub.pem \
+#       scripts/release.sh --port <CDC1>
 #   HP6_SIGNING_KEY=/abs/my_key.pem scripts/release.sh --port <CDC1> --own-key
-#                                             (a re-keyed unit)
+#                                             (a re-keyed unit; a backup key
+#                                             is optional there, keys/README.md)
 #   scripts/release.sh --no-hw-gate           no unit attached: NOT hardware-gated
 #   scripts/release.sh --port <CDC1> --no-esp32   a bundle that CANNOT update the C6
 #
@@ -97,6 +99,12 @@ M4_VER="$(version_of app_m4/VERSION)"
 echo "=== HealthyPi 6 release ==="
 echo "  M7 $M7_VER · M4 $M4_VER"
 echo "  key $HP6_SIGNING_KEY"
+# A re-keyed unit's owner may choose a bootloader that trusts only their key;
+# an official release may not (check_prod_surface.sh --release refuses it).
+if [ "$OWN_KEY" = 1 ]; then
+    export HP6_BACKUP_KEY="${HP6_BACKUP_KEY:-none}"
+fi
+echo "  backup key ${HP6_BACKUP_KEY:-(dev backup, or required for a non-dev key)}"
 if [ "$HP6_SIGNING_KEY" = "$HPI_ROOT/keys/hp6_dev_ec256.pem" ]; then
     echo "  ⚠️  DEV KEY. Units signed with it accept updates signed only with the"
     echo "     same key. A real release passes HP6_SIGNING_KEY=/abs/path."
@@ -226,6 +234,7 @@ FLAVOR=prod HPI_SIGNED_OUT="$M7S" "$HPI_ROOT/scripts/build.sh" signed prod
 echo ""
 echo "--- shippability check ---"
 CHECK_ARGS=(--release "$M7S")
+[ "$OWN_KEY" = 1 ] && CHECK_ARGS=(--release --one-key-ok "$M7S")
 # No escape hatch. --allow-test-vid existed to rehearse the pipeline before the
 # pid.codes allocation existed; it is allocated (1209/FF91), and the flag
 # bypassed *any* gate failure, not only the VID.

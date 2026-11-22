@@ -224,14 +224,27 @@ if(CONFIG_HPI_FW_RELEASE_SIG)
             "'${m4_key}' does not exist. scripts/build.sh signed generates the dev "
             "key on first run; release builds pass HP6_SIGNING_KEY.")
     endif()
+    # The backup release key, when the build has one (CONFIG_HPI_BACKUP_SIGNING_KEY,
+    # the same file MCUboot gets): the verifier then accepts either key.
+    set(m4_key_args --key "${m4_key}")
+    set(m4_key_files "${m4_key}")
+    if(NOT CONFIG_HPI_BACKUP_SIGNING_KEY STREQUAL "")
+        if(NOT EXISTS "${CONFIG_HPI_BACKUP_SIGNING_KEY}")
+            message(FATAL_ERROR
+                "CONFIG_HPI_BACKUP_SIGNING_KEY '${CONFIG_HPI_BACKUP_SIGNING_KEY}' "
+                "does not exist (absolute path required)")
+        endif()
+        list(APPEND m4_key_args --key "${CONFIG_HPI_BACKUP_SIGNING_KEY}")
+        list(APPEND m4_key_files "${CONFIG_HPI_BACKUP_SIGNING_KEY}")
+    endif()
     set(m4_pubkey_c "${CMAKE_CURRENT_BINARY_DIR}/m4fw_pubkey.c")
     add_custom_command(
         OUTPUT  ${m4_pubkey_c}
         COMMAND ${PYTHON_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/build/gen_m4_pubkey.py
-                --key "${m4_key}" --output ${m4_pubkey_c}
-        DEPENDS "${m4_key}" ${CMAKE_CURRENT_SOURCE_DIR}/../tools/build/gen_m4_pubkey.py
-        COMMENT "Generating M4-update verification key from ${m4_key}"
+                ${m4_key_args} --output ${m4_pubkey_c}
+        DEPENDS ${m4_key_files} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/build/gen_m4_pubkey.py
+        COMMENT "Generating the M4/C6 verification key list from ${m4_key_files}"
         VERBATIM
     )
     target_sources(app PRIVATE ${m4_pubkey_c})

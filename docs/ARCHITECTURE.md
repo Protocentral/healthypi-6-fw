@@ -772,6 +772,14 @@ processor: one key to hold, one to rotate, one to lose. The public half reaches
 the M7 application through `tools/build/gen_m4_pubkey.py`, which extracts it from
 the same PEM the MCUboot signing uses at build time — so the two cannot drift.
 
+Each verifier also trusts a **backup** release key, held separately, which signs
+nothing unless the primary is lost or revoked. MCUboot gets it through a key
+table this project generates (a small MCUboot patch, `zephyr/patches.yml`, lets
+the build supply the table), and the M7 application through the same generator,
+so the bootloader and the application trust the same pair. A release bootloader
+without the backup is refused by `check_prod_surface.sh --release`, because a
+bootloader cannot gain a key in the field. Details: `keys/README.md`.
+
 Note what the manifest signature is **not**: it is a host-side convenience, not a
 device-enforced control. A host that skips `--pubkey` still gets digest checking
 (cheap, catches the ordinary truncated-download failure), and the device still

@@ -66,14 +66,19 @@ Releases are built and signed by this repository's release workflow
   it has been tested on hardware.
 - **The master copies** of the key are kept offline.
 
-The public half is published, and appears in three places:
+A **backup release key**, held by a different person in a different place,
+is trusted alongside it. It signs nothing unless the release key is lost or
+has to be revoked, and then releases move to it with an ordinary update.
+
+The public halves of both are published, and appear in three places:
 
 - **compiled into MCUboot,** which refuses an M7 image signed by any other key;
-- **compiled into the M7 application,** which refuses any other M4 image;
+- **compiled into the M7 application,** which refuses any other M4 or ESP32-C6
+  image;
 - **shipped with the `healthypi` tools**
   ([`tools/healthypi/src/healthypi/fw/release_keys/`](../tools/healthypi/src/healthypi/fw/release_keys/)),
   which check a release bundle's signature by default. `healthypi fw keys`
-  prints the fingerprint, which should match the one in the release notes.
+  prints the fingerprints, which should match the ones in the release notes.
 
 **Your device, your key.** The code is open and so is the hardware, but a unit
 programmed at the factory accepts only firmware signed with the release key over
