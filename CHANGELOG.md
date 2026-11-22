@@ -8,9 +8,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions here are the **firmware** version reported by the device
 (`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
 
-## [Unreleased]
+## [1.0.0] — unreleased
 
-### Added
+The first public release. Nothing had shipped before it, so both cores start at
+1.0.0 regardless of the internal numbering used during development.
+
+> **Note on MCUboot downgrade prevention.** Development units running a 2.0.x
+> image cannot be updated *into* 1.0.0 over OTA — MCUboot refuses an image whose
+> version is lower than what is installed (`E: Insufficient version in secondary
+> slot`). Reflash those over SWD with `scripts/flash.sh factory`.
+
+### Acquisition
+- ECG and thoracic respiration on the TI ADS1294R, 24-bit at 500 Hz. Leads I, II
+  and V1 from a 5-electrode cable; other limb leads derived in software.
+- PPG on the TI AFE4400, 22-bit at 250 Hz. The rate has a single source of truth
+  in `CONFIG_AFE4400_PRF_HZ`, which programs the AFE *and* derives the rate
+  advertised on the wire, so hardware and metadata cannot drift apart.
+- ECG lead-off detection for RA, LA and LL: comparators configured, electrode
+  mask debounced and published, and an ECG-derived heart rate suppressed while
+  any electrode is off. V1 is wired into the mask but never asserts on v5 (see
+  Known limitations).
+- Temperature (ams AS6221), motion (BMI323), fuel gauge (MAX17048) and a
+  TI BQ24074 linear charger.
+
+### Architecture
+- Layered publish/subscribe application on the Cortex-M7: a sample bus with
+  per-consumer lock-free rings and drop-on-full, so a slow consumer can never
+  back-pressure acquisition.
+- Cortex-M4 as a calculations-only core over OpenAMP/RPMSG. QRS detection and
+  ECG heart rate are live. SpO₂ and a PPG pulse rate are computed and published,
+  but the R→SpO₂ curve is inherited and uncalibrated on this hardware. HRV
+  (SDNN/RMSSD, LF/HF) is computed by default but not yet validated against a
+  reference. EEG band power is a stub: EEG batches are received and counted,
+  not analysed.
+- HealthyLink expansion framework: provider registry, interface arbiter and a
+  supervisor that quarantines a faulting module without disturbing acquisition.
+
+### Host interface
+- USB composite device: CDC 0 carries the live `.HP6` sample stream, CDC 1 the
+  MCUmgr/SMP control channel, on one cable.
+- `.HP6` container (magic `HPI6`, version `0x0200`) — byte-identical between the
+  live stream and the SD recording, so one parser reads both.
+- MCUmgr group 64 for device info, telemetry, diagnostics, recording, streaming,
+  configuration, Wi-Fi and firmware transfer.
+- Transfer Mode: the microSD card exposed as USB mass storage, enumerated only
+  while armed.
+- Wi-Fi and BLE via the ESP32-C6 co-processor over a framed UART link at 2 Mbaud
+  with hardware flow control.
+
+### Firmware update and recovery
+- MCUboot with ECDSA-P256 verification of the M7 image before boot.
+- M4 images staged to QSPI and written to bank 2 by the M7, verified there with
+  SHA-256, ECDSA-P256 and a vector-table sanity check.
+- One `.hpifw` release bundle covering both cores, applied with
+  `healthypi fw update`.
+- MCUboot serial recovery over USB CDC, entered automatically when no bootable
+  image is present or on request over group 64.
+- `scripts/release.sh` as the only supported production path, gated on a
+  shippability check.
+
+### Display
+- 4" 480×800 touch UI on LVGL with a Material 3 design system.
+
+### Host tooling
+- The `healthypi` Python package and CLI: `.HP6` decode/verify/export, the
+  group-64 catalog and generated wire classes, the firmware updater and bundle
+  format, HealthyLink EEPROM images, and a device acceptance suite.
+- `smpgroup`, the generic MCUmgr custom-group machinery, separable and
+  Apache-2.0.
+- `healthypi/smp/catalog.py` is the single source of truth for the group-64
+  surface; CI re-parses the firmware sources and fails on any disagreement.
+
+### Moved out of this repository
+- **The HealthyLink Compute (STM32N657 NPU) module firmware** now lives in
+  **[`Protocentral/healthylink-compute-fw`](https://github.com/Protocentral/healthylink-compute-fw)**.
+  `app_healthylink_compute/`, `boards/protocentral/healthylink_compute/` and
+  `scripts/npu/` left this tree on 2026-08-31, and `scripts/build.sh npu` /
+  `scripts/flash.sh npu` went with them.
+
+  The reason is licensing. That firmware vendors STMicroelectronics' ATON NPU
+  runtime under **ST SLA0104**, whose clause 5 forbids redistribution "in any
+  manner that would subject the SOFTWARE PACKAGE to any Open Source Terms" —
+  and the agreement names MIT explicitly. This repository declares MIT. The two
+  could not coexist, so the code moved rather than the licence.
+
+  **The host half stays here**: `app_m7/src/healthylink/mod_npu.c`,
+  `drivers/misc/healthylink/`, `include/healthylink/` and the per-board
+  `healthylink-compute.overlay` files. The contract binding the two halves is
+  documented in `docs/HEALTHYLINK.md` §12 here and, in full, in
+  [`docs/SPI_PROTOCOL.md`](https://github.com/Protocentral/healthylink-compute-fw/blob/main/docs/SPI_PROTOCOL.md)
+  there — it did not exist in writing before the split.
+
+### Changes made during release preparation
+
+Work that landed between the first draft of this entry and the release tag.
+Where an entry says what something "was", that earlier behaviour was never
+released.
+
+#### Added
 - **Release workflow** (`.github/workflows/release.yml`). Pushing a `vX.Y.Z`
   tag builds, signs and drafts a GitHub release. Running it manually is a dry
   run with a throwaway key.
@@ -70,7 +165,22 @@ Versions here are the **firmware** version reported by the device
   for 5 s it sends one real status request, so a pending C6 image always hears
   from the host.
 
-### Fixed
+- **`scripts/release.sh` gates a bundle on hardware.** `--port <CDC1>` (or
+  `HP6_RELEASE_PORT`) runs the group-64 acceptance suite (`healthypi test run`)
+  on the attached unit first and refuses to build on any FAIL or if the suite
+  cannot run. SKIPs are listed and allowed, and the report is kept as
+  `build/release/hw-gate.json`. Without a port it refuses unless `--no-hw-gate`
+  is given, which prints a warning that the bundle was not hardware-gated.
+- **`healthypi catalog --json --full` exports the ESP32-C6 update tables.** A
+  new `espfw` section carries `espfw_status`'s state, error and C6-error names
+  and the chunk and timeout limits, so hosts that generate from the catalog
+  (HealthyPi Studio) need not copy them by hand.
+- `CONFIG_HPI_RESP_MIN_AMP_UV` (default 100, unchanged): the respiration-rate
+  detector's amplitude floor, now configurable. With `resp_debug.conf` the
+  detector logs the filtered amplitude it sees and the rate it produced every
+  5 s, so the floor can be set from bench data.
+
+#### Fixed
 - **The self-test's `ecg` and `ppg` require samples, not just a ready
   device.** AFE4400 init only writes registers, so `ppg` passed on a unit whose
   front end never produced a sample. Each now needs a sample in the last
@@ -196,23 +306,7 @@ Versions here are the **firmware** version reported by the device
   normal rates do not trigger it; below about 36 BPM one missed beat does.
   Checked on the host; not yet checked on hardware.
 
-### Added
-- **`scripts/release.sh` gates a bundle on hardware.** `--port <CDC1>` (or
-  `HP6_RELEASE_PORT`) runs the group-64 acceptance suite (`healthypi test run`)
-  on the attached unit first and refuses to build on any FAIL or if the suite
-  cannot run. SKIPs are listed and allowed, and the report is kept as
-  `build/release/hw-gate.json`. Without a port it refuses unless `--no-hw-gate`
-  is given, which prints a warning that the bundle was not hardware-gated.
-- **`healthypi catalog --json --full` exports the ESP32-C6 update tables.** A
-  new `espfw` section carries `espfw_status`'s state, error and C6-error names
-  and the chunk and timeout limits, so hosts that generate from the catalog
-  (HealthyPi Studio) need not copy them by hand.
-- `CONFIG_HPI_RESP_MIN_AMP_UV` (default 100, unchanged): the respiration-rate
-  detector's amplitude floor, now configurable. With `resp_debug.conf` the
-  detector logs the filtered amplitude it sees and the rate it produced every
-  5 s, so the floor can be set from bench data.
-
-### Changed
+#### Changed
 - **`scripts/flash.sh esp32` takes `--full` or `--app-only`.** It ran the C6
   repo's `./hp6.sh flash`, which does not erase, so it could not perform the
   first flash onto the C6's A/B partition layout. It now runs healthybridge-esp32's
@@ -253,102 +347,33 @@ Versions here are the **firmware** version reported by the device
   `hpi6-<version>.hpifw`. The format and signing are unchanged: it was always a
   plain zip. Tools read it by content, so existing `.hpifw` files still work.
 
-## [1.0.0] — unreleased
-
-The first public release. Nothing had shipped before it, so both cores start at
-1.0.0 regardless of the internal numbering used during development.
-
-> **Note on MCUboot downgrade prevention.** Development units running a 2.0.x
-> image cannot be updated *into* 1.0.0 over OTA — MCUboot refuses an image whose
-> version is lower than what is installed (`E: Insufficient version in secondary
-> slot`). Reflash those over SWD with `scripts/flash.sh factory`.
-
-### Acquisition
-- ECG and thoracic respiration on the TI ADS1294R, 24-bit at 500 Hz. Leads I, II
-  and V1 from a 5-electrode cable; other limb leads derived in software.
-- PPG on the TI AFE4400, 22-bit at 250 Hz. The rate has a single source of truth
-  in `CONFIG_AFE4400_PRF_HZ`, which programs the AFE *and* derives the rate
-  advertised on the wire, so hardware and metadata cannot drift apart.
-- ECG lead-off detection for RA, LA and LL: comparators configured, electrode
-  mask debounced and published, and an ECG-derived heart rate suppressed while
-  any electrode is off. V1 is wired into the mask but never asserts on v5 (see
-  Known limitations).
-- Temperature (ams AS6221), motion (BMI323), fuel gauge (MAX17048) and a
-  TI BQ24074 linear charger.
-
-### Architecture
-- Layered publish/subscribe application on the Cortex-M7: a sample bus with
-  per-consumer lock-free rings and drop-on-full, so a slow consumer can never
-  back-pressure acquisition.
-- Cortex-M4 as a calculations-only core over OpenAMP/RPMSG. QRS detection and
-  ECG heart rate are live. SpO₂ and a PPG pulse rate are computed and published,
-  but the R→SpO₂ curve is inherited and uncalibrated on this hardware. HRV
-  (SDNN/RMSSD, LF/HF) is computed by default but not yet validated against a
-  reference. EEG band power is a stub: EEG batches are received and counted,
-  not analysed.
-- HealthyLink expansion framework: provider registry, interface arbiter and a
-  supervisor that quarantines a faulting module without disturbing acquisition.
-
-### Host interface
-- USB composite device: CDC 0 carries the live `.HP6` sample stream, CDC 1 the
-  MCUmgr/SMP control channel, on one cable.
-- `.HP6` container (magic `HPI6`, version `0x0200`) — byte-identical between the
-  live stream and the SD recording, so one parser reads both.
-- MCUmgr group 64 for device info, telemetry, diagnostics, recording, streaming,
-  configuration, Wi-Fi and firmware transfer.
-- Transfer Mode: the microSD card exposed as USB mass storage, enumerated only
-  while armed.
-- Wi-Fi and BLE via the ESP32-C6 co-processor over a framed UART link at 2 Mbaud
-  with hardware flow control.
-
-### Firmware update and recovery
-- MCUboot with ECDSA-P256 verification of the M7 image before boot.
-- M4 images staged to QSPI and written to bank 2 by the M7, verified there with
-  SHA-256, ECDSA-P256 and a vector-table sanity check.
-- One `.hpifw` release bundle covering both cores, applied with
-  `healthypi fw update`.
-- MCUboot serial recovery over USB CDC, entered automatically when no bootable
-  image is present or on request over group 64.
-- `scripts/release.sh` as the only supported production path, gated on a
-  shippability check.
-
-### Display
-- 4" 480×800 touch UI on LVGL with a Material 3 design system.
-
-### Host tooling
-- The `healthypi` Python package and CLI: `.HP6` decode/verify/export, the
-  group-64 catalog and generated wire classes, the firmware updater and bundle
-  format, HealthyLink EEPROM images, and a device acceptance suite.
-- `smpgroup`, the generic MCUmgr custom-group machinery, separable and
-  Apache-2.0.
-- `healthypi/smp/catalog.py` is the single source of truth for the group-64
-  surface; CI re-parses the firmware sources and fails on any disagreement.
-
-### Moved out of this repository
-- **The HealthyLink Compute (STM32N657 NPU) module firmware** now lives in
-  **[`Protocentral/healthylink-compute-fw`](https://github.com/Protocentral/healthylink-compute-fw)**.
-  `app_healthylink_compute/`, `boards/protocentral/healthylink_compute/` and
-  `scripts/npu/` left this tree on 2026-08-31, and `scripts/build.sh npu` /
-  `scripts/flash.sh npu` went with them.
-
-  The reason is licensing. That firmware vendors STMicroelectronics' ATON NPU
-  runtime under **ST SLA0104**, whose clause 5 forbids redistribution "in any
-  manner that would subject the SOFTWARE PACKAGE to any Open Source Terms" —
-  and the agreement names MIT explicitly. This repository declares MIT. The two
-  could not coexist, so the code moved rather than the licence.
-
-  **The host half stays here**: `app_m7/src/healthylink/mod_npu.c`,
-  `drivers/misc/healthylink/`, `include/healthylink/` and the per-board
-  `healthylink-compute.overlay` files. The contract binding the two halves is
-  documented in `docs/HEALTHYLINK.md` §12 here and, in full, in
-  [`docs/SPI_PROTOCOL.md`](https://github.com/Protocentral/healthylink-compute-fw/blob/main/docs/SPI_PROTOCOL.md)
-  there — it did not exist in writing before the split.
-
 ### Known limitations
 - **SpO₂** is computed, but the R→SpO₂ curve has never been calibrated against a
-  reference oximeter on this hardware. Do not treat the value as clinical.
-- **HRV** (SDNN/RMSSD, LF/HF) is computed, but has not been validated against a
-  known RR series.
+  reference oximeter on this hardware. The conversion is the `uch_spo2_table`
+  lookup inherited from HealthyPi 5. Do not treat the value as clinical.
+- **HRV** (SDNN/RMSSD, LF/HF) is computed. Its maths are checked on the host
+  against known RR series (`app_m4/tests/hrv/`), but not yet on hardware with
+  real QRS timing. There is no ectopic-beat filtering: a premature beat inside
+  the accepted RR range counts in full, so the reported SDNN is strictly SDRR
+  (and RMSSD likewise). The heart rate itself is median-filtered and not
+  affected this way.
+- **Slow heart rates.** The ECG rate accepts RR intervals of 300–2000 ms, so
+  there is no ECG rate below 30 BPM. Below about 36 BPM, one missed beat
+  withdraws the rate until three new intervals arrive.
+- **The SD card must be inserted before the device boots.** There is no
+  hot-insert detection; a card inserted later is seen after a reset.
+- **The M4 image has no downgrade protection.** The M7 checks its signature but
+  not its version, so a correctly signed older M4 image is accepted.
+- **The ESP32-C6 has no downgrade protection, and does not check signatures
+  itself.** The update path through the M7 accepts only release-signed images,
+  and `healthypi fw update` refuses an older C6 image unless given `--force`.
+  Anyone with access to the C6's own USB port can reflash it directly.
+- **Converting a C6 from the old single-partition layout to the A/B layout**
+  needs the C6's own USB port and a full erase, which deletes the stored Wi-Fi
+  credentials and settings.
+- **HealthyPi Studio** cannot yet update the ESP32-C6 or show which sensor
+  produced the heart rate over Wi-Fi. The `healthypi` command-line tool does
+  both.
 - **Lead-off** detects RA, LA and LL. **V1 is not detected on v5** — its bit
   in the lead-off mask never asserts, so the absence of a V1 lead-off warning
   does not mean the V1 electrode is attached. This is a board-level limitation,
