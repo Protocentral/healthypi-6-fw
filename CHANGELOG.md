@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions here are the **firmware** version reported by the device
 (`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
 
+## [Unreleased]
+
+### Fixed
+- **ECG heart rate and HRV were never reported on v5 (ADS1294R + M4).** Two
+  faults, either enough on its own:
+  - The ADS1294R was configured with CONFIG1 = `0x56`, the ADS1299's pattern:
+    low-power mode, and bit 4 set where the datasheet requires 0. The part
+    delivered 500 samples/s with a constant offset on every other sample
+    (~100–200 µV), a 250 Hz component hidden by the decimated display. It is
+    now `0xC6`: high-resolution mode, 500 SPS.
+  - The M4 QRS detector filtered each 16-sample batch in isolation. Its
+    batch-edge clamping turned the 250 Hz offset into a spike in every batch,
+    which it learnt as heartbeats; every interval (256 ms) was then rejected,
+    so no rate ever came out. It is replaced by a streaming Pan-Tompkins
+    detector: state carried across batches, a 5–15 Hz band-pass (which also
+    nulls 250 Hz), learnt thresholds with searchback, a T-wave test,
+    relearning, and a floor so a flat line reports no rate. Beats are timed
+    to 2 ms with sub-millisecond jitter, for HRV.
+  Host regression `app_m4/tests/hrv/test_qrs.py` runs in CI.
+
 ## [1.0.0] — 2026-11-22
 
 The first public release. Nothing had shipped before it, so both cores start at

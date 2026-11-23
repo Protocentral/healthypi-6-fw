@@ -145,18 +145,6 @@ void algorithm_reset(void);
 int ecg_process_batch(const void *batch, struct ecg_algorithm_results *results);
 
 /**
- * @brief Detect QRS complex in filtered ECG signal
- * 
- * Implements Pan-Tompkins algorithm for QRS detection.
- * 
- * @param samples Array of filtered ECG samples
- * @param count Number of samples
- * @param detected_index Output: index of detected QRS peak (if found)
- * @return 1 if QRS detected, 0 if not, negative errno on error
- */
-int qrs_detect(const int32_t *samples, size_t count, size_t *detected_index);
-
-/**
  * @brief Calculate heart rate from the newest RR intervals
  *
  * Median of the newest min(count, 8) intervals of a circular RR buffer.

@@ -193,17 +193,25 @@ enum CONFIG3_bits
                            * set VREF_4V. */
 };
 
+/* CONFIG1 (01h), ADS1294R/6R/8R (SBAS459): HR[7] DAISY_EN[6] CLK_EN[5],
+ * bits 4:3 MUST be 0, DR[2:0]. The rate a DR code gives depends on HR: high-
+ * resolution mode runs the modulator at fCLK/4, low-power at fCLK/8, so every
+ * code is half the rate in LP mode (110 = 500 SPS HR, 250 SPS LP). Names below
+ * are the HR-mode rates. NOT the ADS1299's CONFIG1, whose bits 4:3 must be 10
+ * and whose rates differ -- see ads129xx.c for what copying it did. */
 enum CONFIG1_bits
 {
-    DR_250 = 0x06,
-    DR_500 = 0x05,
-    DR_1K = 0x04,
-    DR_2K = 0x03,
-    DR_4K = 0x02,
-    DR_8K = 0x01,
-    DR_16K = 0x00,
+    CONFIG1_HR       = 0x80,  /* 1 = high-resolution mode */
+    CONFIG1_DAISY_EN = 0x40,  /* 1 = multiple readback (despite the name) */
+    CONFIG1_CLK_EN   = 0x20,  /* 1 = drive the oscillator onto CLK */
 
-    CONFIG1_const = 0x90
+    DR_HR_500 = 0x06,
+    DR_HR_1K  = 0x05,
+    DR_HR_2K  = 0x04,
+    DR_HR_4K  = 0x03,
+    DR_HR_8K  = 0x02,
+    DR_HR_16K = 0x01,
+    DR_HR_32K = 0x00,
 };
 
 /* RESP register bits (0x16) - Respiration Control */
