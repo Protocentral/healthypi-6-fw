@@ -135,8 +135,8 @@ not "attached".
 
 ```c
 struct ppg_sample {
-    int32_t red;        /* LED1, raw ADC counts */
-    int32_t ir;         /* LED2, raw ADC counts */
+    int32_t red;        /* red LED (AFE4400 LED2), raw ADC counts */
+    int32_t ir;         /* IR LED (AFE4400 LED1), raw ADC counts */
     uint8_t lead_off;
     uint8_t _pad[3];
 };
@@ -146,6 +146,10 @@ Python: `struct.unpack("<2iB3x", buf)`
 
 **Raw counts, not a physical unit** — 22-bit signed values sign-extended into
 int32. Do not scale them; compute ratios.
+
+**Firmware 1.0.0 swapped the two fields:** in streams and recordings it
+produced, `red` holds the IR channel and `ir` holds red. Swap them back when
+reading 1.0.0 data. 1.0.1 and later are as documented above.
 
 ### VITALS — 16 bytes
 

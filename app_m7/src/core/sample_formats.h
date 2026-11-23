@@ -62,8 +62,8 @@ struct hp6_ecg_sample {
 
 /* HPI_CH_PPG payload (12 B): AFE4400 red/IR, raw 22-bit sign-extended. */
 struct hp6_ppg_sample {
-    int32_t red;         /* LED1 */
-    int32_t ir;          /* LED2 */
+    int32_t red;         /* LED2 (LED1 before 1.0.1: see acquisition.c) */
+    int32_t ir;          /* LED1 */
     uint8_t lead_off;
     uint8_t _pad[3];
 } __packed;

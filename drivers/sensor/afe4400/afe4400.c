@@ -538,12 +538,18 @@ int afe4400_init_registers(const struct device *dev)
     rc = afe4400_reg_write(dev, AFE4400_REG_TIA_AMB_GAIN, 0x000001); /* Stage 2 enabled (HP5 setting) */
     if (rc < 0) return rc;
     
-    /* LED currents are deliberately asymmetric: in the HP6 optical stack the
-     * Red wavelength modulates much more strongly than IR, so equal currents
-     * push the R-ratio far above the valid 0.5-2.0 range.
-     * IR  = 0x50 (15.6 mA), Red = 0x14 (3.9 mA) -> R-ratio ~1.0-1.8.
-     */
-    rc = afe4400_reg_write(dev, AFE4400_REG_LEDCNTRL, 0x005014); /* IR=0x50 (15.6mA), Red=0x14 (3.9mA) HP5 baseline */
+    /* LEDCNTRL: LED1 (IR) current in bits 15:8, LED2 (red) in bits 7:0.
+     * 0x50 = 15.6 mA each.
+     *
+     * WAS 0x005014 (IR 15.6 mA, red 3.9 mA), "deliberately asymmetric" because
+     * equal currents gave an R ratio "far above the valid range". That R was
+     * an artefact of two bugs fixed in 1.0.1, not of the optics: the M7
+     * published red and IR swapped (inverting R), and the M4 computed R with
+     * a 2^21 offset in both DCs (making R ~ AC_red/AC_ir). Starving red to
+     * 3.9 mA cost it most of its pulse; the 2026-08 bench session found equal
+     * 15.6 mA gave real AC on both channels. R is a ratio of AC/DC per channel,
+     * so LED current cancels out of it: set currents for signal, not for R. */
+    rc = afe4400_reg_write(dev, AFE4400_REG_LEDCNTRL, 0x005050); /* IR (LED1) and red (LED2) 15.6 mA */
     if (rc < 0) return rc;
     
     rc = afe4400_reg_write(dev, AFE4400_REG_CONTROL2, 0x000000); /* LED_RANGE=100mA, LED=50mA */
@@ -556,7 +562,7 @@ int afe4400_init_registers(const struct device *dev)
     rc = afe4400_reg_write(dev, AFE4400_REG_PRPCOUNT, AFE4400_PRPCOUNT);
     if (rc < 0) return rc;
 
-    /* LED2 (IR) timing - Phase 1 */
+    /* LED2 (red) timing - Phase 1 */
     rc = afe4400_reg_write(dev, AFE4400_REG_LED2STC, 50);
     if (rc < 0) return rc;
     rc = afe4400_reg_write(dev, AFE4400_REG_LED2ENDC, 399);
@@ -572,7 +578,7 @@ int afe4400_init_registers(const struct device *dev)
     rc = afe4400_reg_write(dev, AFE4400_REG_ALED2ENDC, 799);
     if (rc < 0) return rc;
     
-    /* LED1 (RED) timing - Phase 3 */
+    /* LED1 (IR) timing - Phase 3 */
     rc = afe4400_reg_write(dev, AFE4400_REG_LED1STC, 850);
     if (rc < 0) return rc;
     rc = afe4400_reg_write(dev, AFE4400_REG_LED1ENDC, 1199);

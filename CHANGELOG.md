@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions here are the **firmware** version reported by the device
 (`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
 
+## [Unreleased]
+
+### Fixed
+- **SpO₂ showed "--" with a clean PPG, and would have read wrong when it did
+  show (M4 + M7).** Three faults:
+  - The M4 added 2²¹ to every PPG sample (to make it "unsigned") and kept the
+    offset in the DC terms of R = (AC_red/DC_red)/(AC_ir/DC_ir). R collapsed
+    to about AC_red/AC_ir and left the valid range unless both channels sat
+    at the same DC. Perfusion index read ~10× low for the same reason.
+  - The R → SpO₂ table (Maxim's curve) was indexed with R×100 − 50 instead
+    of R×100: R 1.0, about 80 % SpO₂, read 99 %, and a healthy R below 0.5
+    read "--".
+  - Red and IR were swapped at the source (`red` carried LED1, which is IR),
+    inverting R, in the bus, the `.HP6` stream and recordings too. **Data from
+    1.0.0 has the two PPG fields swapped.** The LED currents, set asymmetric
+    to compensate, are equal again (15.6 mA).
+  Host regression `app_m4/tests/hrv/test_spo2.py` runs in CI. The SpO₂ curve
+  is still uncalibrated for this AFE and probe.
+
 ## [1.0.0] — 2026-11-22
 
 The first public release. Nothing had shipped before it, so both cores start at

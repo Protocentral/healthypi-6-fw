@@ -97,9 +97,20 @@ BUILD_ASSERT(SPO2_SAMPLE_RATE_HZ == HPI_PPG_M4_RATE_HZ,
              "feeds PPG at HPI_PPG_M4_RATE_HZ. Re-tune the filters and the "
              "peak-spacing gate before changing either.");
 
-/* Shared buffers for IR and Red channels (matches HP5 an_x/an_y) */
-static uint32_t an_x[SPO2_BUFFER_SIZE];  /* IR buffer */
-static uint32_t an_y[SPO2_BUFFER_SIZE];  /* Red buffer */
+/* IR and Red windows, raw signed AFE4400 counts as the M7 sends them.
+ *
+ * Signed and WITHOUT an offset. These used to be uint32 with 2^21 added to
+ * every sample "because the HP5 algorithm expects unsigned intensity". The
+ * offset is not light: it went into every DC below, so DC_red and DC_ir were
+ * both ~2.1M plus a little, and R = (AC_red/DC_red)/(AC_ir/DC_ir) collapsed
+ * to ~AC_red/AC_ir. R came out right only when the two channels happened to
+ * sit at the same DC; otherwise it left the 0.5-2.33 table and SpO2 read 0
+ * ("--") however clean the pulse was (true R 0.6 with DC_red = 0.4 DC_ir
+ * gave R 0.25). PI was deflated ~10x the same way -- the origin of the
+ * "HP6 perfusion runs 0.05-0.3%" lore. HealthyPi 5 never added an offset: it
+ * clamped negative samples to 0. Host test: app_m4/tests/hrv/test_spo2.py. */
+static int32_t an_x[SPO2_BUFFER_SIZE];  /* IR buffer */
+static int32_t an_y[SPO2_BUFFER_SIZE];  /* Red buffer */
 static int buffer_index = 0;              /* Current write position in algorithm buffer */
 static bool buffer_ready = false;         /* True when buffer is full */
 
@@ -132,7 +143,7 @@ static void sort_ascend(int32_t *pn_x, int32_t n_size)
  * @brief Calculate mean of array
  * From HealthyPi 5 spo2_process.c
  */
-static int32_t calculate_mean(uint32_t *buffer, int32_t length)
+static int32_t calculate_mean(const int32_t *buffer, int32_t length)
 {
     int64_t sum = 0;
     for (int i = 0; i < length; i++) {
@@ -394,7 +405,7 @@ static uint8_t calculate_spo2_from_r(float r_value);
  * @param dc_values Output array for DC values
  * @param n_valid Output: number of valid AC/DC pairs calculated
  */
-static void calculate_ac_dc_hp5(uint32_t *buffer, int32_t *peak_locs, int32_t n_peaks,
+static void calculate_ac_dc_hp5(const int32_t *buffer, int32_t *peak_locs, int32_t n_peaks,
                                 int32_t *ac_values, int32_t *dc_values, int32_t *n_valid)
 {
     *n_valid = 0;
@@ -420,8 +431,8 @@ static void calculate_ac_dc_hp5(uint32_t *buffer, int32_t *peak_locs, int32_t n_
         }
         
         /* Find min and max in this pulse segment */
-        uint32_t min_val = buffer[start];
-        uint32_t max_val = buffer[start];
+        int32_t min_val = buffer[start];
+        int32_t max_val = buffer[start];
         
         for (int i = start + 1; i < end; i++) {
             if (buffer[i] < min_val) min_val = buffer[i];
@@ -436,7 +447,7 @@ static void calculate_ac_dc_hp5(uint32_t *buffer, int32_t *peak_locs, int32_t n_
         
         /* Debug: log the first few pulses */
         if (*n_valid < 3) {
-            LOG_DBG("Pulse[%d] segment[%d-%d]: min=%u, max=%u → AC=%d, DC=%d", 
+            LOG_DBG("Pulse[%d] segment[%d-%d]: min=%d, max=%d → AC=%d, DC=%d", 
                     *n_valid, start, end, min_val, max_val, ac, dc);
         }
         
@@ -585,26 +596,30 @@ static void calculate_spo2_hp5(int32_t *ac_red, int32_t *dc_red,
 /**
  * @brief Calculate SpO2 from R-value using calibrated lookup table
  * 
- * Uses the industry-standard calibration table from HealthyPi 5.
- * Table is indexed by R*100, covering R values from 0.5 to 2.3.
+ * Maxim's reference table, indexed by R*100 (R 0.03 to 1.83).
  * 
  * @param r_value R-value (AC ratio red/ir)
  * @return SpO2 percentage (70-100%), 0 if invalid
  */
 static uint8_t calculate_spo2_from_r(float r_value)
 {
-    /* Sanity check R-value - table covers 0.5 to 2.33 */
-    if (r_value < 0.5f || r_value > 2.33f) {
-        return 0;  /* Invalid R-value */
+    /* uch_spo2_table is Maxim's reference table (MAXREFDES117), indexed by
+     * R x 100: entry i is round(-45.060 R^2 + 30.354 R + 94.845) at R = i/100,
+     * so it peaks at 100 around R 0.24-0.43 and falls to 80 at R 1.0. Maxim
+     * uses entries 3..183 only.
+     *
+     * This used to index it with R x 100 - 50 (inherited from HealthyPi 5,
+     * which has the same line) and reject R < 0.5. That shifted the curve by
+     * 0.5 in R: R 1.0 (SpO2 ~80%) read 99%, a healthy R under 0.5 read "--",
+     * and R 0.5 read 95% instead of 99%. Host test: test_spo2.py.
+     *
+     * The curve itself is Maxim's, for Maxim's optics. It has never been
+     * calibrated on this AFE and probe (fw-internal-docs SPO2_CALIBRATION_TODO). */
+    int32_t index = (int32_t)(r_value * 100.0f + 0.5f);
+
+    if (index < 3 || index > 183) {
+        return 0;  /* outside the table: no reading */
     }
-    
-    /* Convert R-value to table index: index = (R * 100) - 50 */
-    /* R=0.5 -> index 0, R=2.33 -> index 183 */
-    int32_t index = (int32_t)((r_value * 100.0f) - 50.0f);
-    
-    /* Clamp to table bounds */
-    if (index < 0) index = 0;
-    if (index > 183) index = 183;
     
     /* Lookup SpO2 value */
     uint8_t spo2 = uch_spo2_table[index];
@@ -692,17 +707,17 @@ static int32_t calculate_rms(int32_t *ac_history, uint8_t count)
  * PROBE-OFF DETECTION THRESHOLDS (Adjusted for HealthyPi 6 Hardware)
  * ============================================================================ */
 
-/* HP6 AFE4400 range: raw 22-bit signed ±2,097,151; +2^21 offset maps it to
- * 0..4,194,303 unsigned. Probe on sits near the offset (~2.0-2.5M IR,
- * ~2.0-2.2M Red); saturation is near 0 or 4M; probe-off collapses to the DC
- * offset with minimal variation. HP6 perfusion index runs ~0.05-0.30%
- * (vs 0.5-2.0% on HP5 due to gain settings), so the PI threshold is 0.05%. */
+/* AFE4400 raw range: 22-bit signed, +-2,097,151. These DC limits are the
+ * ones this module always applied, restated in raw counts now that the
+ * buffers no longer carry a 2^21 offset (they were written as offset +- 1e6
+ * and offset - 5e5). PROBE_OFF_PI_THRESHOLD was lowered to 0.03% while PI was
+ * being computed against the offset-inflated DC; with the real DC, PI reads
+ * ~10x higher, so this is now very lenient. Re-check it on the bench. */
 
-#define DC_OFFSET_VALUE             2097152 /* 2^21 - added to signed values */
-#define PROBE_OFF_DC_THRESHOLD      (DC_OFFSET_VALUE - 1000000)  /* <1.1M = probe off (raw < -1M) */
-#define PROBE_OFF_DC_SATURATED      (DC_OFFSET_VALUE + 1000000)  /* >3.1M = saturated (raw > +1M) */
-#define PROBE_OFF_PI_THRESHOLD      3       /* PI < 0.03% = probe off (HP6 - lowered to accept weaker signals) */
-#define PROBE_OFF_WEAK_SIGNAL       (DC_OFFSET_VALUE - 500000)   /* <1.6M = weak (raw < -500k) */
+#define PROBE_OFF_DC_THRESHOLD      (-1000000)  /* raw < -1M = probe off */
+#define PROBE_OFF_DC_SATURATED      (1000000)   /* raw > +1M = saturated */
+#define PROBE_OFF_PI_THRESHOLD      3       /* PI < 0.03% = probe off */
+#define PROBE_OFF_WEAK_SIGNAL       (-500000)   /* raw < -500k = weak */
 #define PROBE_OFF_AC_LOW            10      /* AC amplitude too low */
 #define PROBE_OFF_AC_HIGH           50      /* AC amplitude acceptable */
 
@@ -758,7 +773,7 @@ static int spo2_process_full_buffer(struct spo2_algorithm_results *results)
     
     /* First pass: Remove DC and invert */
     for (int i = 0; i < SPO2_BUFFER_SIZE; i++) {
-        ir_normalized[i] = -((int32_t)an_x[i] - mean_ir);
+        ir_normalized[i] = -(an_x[i] - mean_ir);
     }
     
     /* Second pass: Apply moving average baseline removal (simple high-pass filter)
@@ -869,11 +884,9 @@ static int spo2_process_full_buffer(struct spo2_algorithm_results *results)
          * could never learn that the finger was absent. Verified on hardware:
          * with nothing on the sensor the M4 sent flags=0x00 forever.
          *
-         * The DC checks above cannot catch this case either. They compare
-         * against DC_OFFSET_VALUE +/- 1e6, but an absent signal reads as
-         * ~2^21 once spo2_accumulate_batch adds the unsigned-intensity offset
-         * -- dead centre of the "healthy" band. The offset IS the reading when
-         * nothing is connected, so only the AC/pulsatile evidence can tell. */
+         * The DC checks above cannot catch this case either: an absent
+         * signal sits well inside their +-1M band, so only the AC/pulsatile
+         * evidence can tell. */
         LOG_WRN("Insufficient peaks: %d -- probe off", n_peaks);
         results->flags |= HPI_PPG_FLAG_LEAD_OFF;
         results->algorithm_state = HPI_PPG_ALGO_STATE_SEARCHING;
@@ -1051,12 +1064,8 @@ static int spo2_accumulate_batch(const struct hpi_ipc_ppg_raw_batch *batch,
     
     /* Debug: Log first sample of every 100th batch at accumulation point */
     if ((batch_count % 100) == 0) {  /* Reduced frequency */
-        LOG_DBG("[M4-ACCUM] Batch %u: IR[0]=%d→%u, Red[0]=%d→%u",
-                batch_count,
-                batch->samples[0].ir_raw,
-                (uint32_t)(batch->samples[0].ir_raw + (1 << 21)),
-                batch->samples[0].red_raw,
-                (uint32_t)(batch->samples[0].red_raw + (1 << 21)));
+        LOG_DBG("[M4-ACCUM] Batch %u: IR[0]=%d, Red[0]=%d",
+                batch_count, batch->samples[0].ir_raw, batch->samples[0].red_raw);
     }
     batch_count++;
     
@@ -1064,12 +1073,9 @@ static int spo2_accumulate_batch(const struct hpi_ipc_ppg_raw_batch *batch,
     for (int i = 0; i < batch->sample_count && i < HPI_PPG_BATCH_SIZE; i++) {
         const struct hpi_ipc_ppg_raw_sample *sample = &batch->samples[i];
         
-        /* AFE4400 samples are 22-bit signed (±2^21); the HP5 algorithm expects
-         * unsigned intensity, so add a 2^21 offset → 0..4194303. */
-        const int32_t DC_OFFSET = (1 << 21);  /* 2^21 = 2097152 */
-        
-        an_x[buffer_index] = (uint32_t)(sample->ir_raw + DC_OFFSET);   /* IR buffer */
-        an_y[buffer_index] = (uint32_t)(sample->red_raw + DC_OFFSET);  /* Red buffer */
+        /* Raw signed counts, no offset: see an_x/an_y. */
+        an_x[buffer_index] = sample->ir_raw;   /* IR buffer */
+        an_y[buffer_index] = sample->red_raw;  /* Red buffer */
         
         buffer_index++;
         algo_ctx.sample_count++;
