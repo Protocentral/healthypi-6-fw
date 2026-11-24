@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions here are the **firmware** version reported by the device
 (`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
 
+## [Unreleased]
+
+### Fixed
+- **Respiration rate stayed at 0 for ~5 minutes after power-up, and again
+  after every limb-lead reconnect (M7).** The detector's high-pass filter
+  started from 0, so the thoracic-impedance channel's DC level (~50 mV on v5)
+  entered it as a step; the adaptive threshold (a quarter of a slowly
+  decaying envelope) then sat thousands of µV above any breath. The filter is
+  now seeded with the first sample. Host regression
+  `app_m7/tests/host/test_resp_rate.py` runs in CI.
+- **Respiration rate was never reported at bench signal levels (M7).** A
+  patient simulator at 20 breaths/min gives a ~20 µV p-p breath, which the
+  detector's filters leave at ~±8 µV. Three things hid it:
+  - the amplitude floor (`CONFIG_HPI_RESP_MIN_AMP_UV`) was 100 µV, 12× that
+    breath. It is now **4 µV**, set from that capture;
+  - the Q15 multiply truncated instead of rounding, which built a 7–20 µV
+    offset into the filtered signal: as large as the breath itself, and enough
+    to report a false rate from noise alone once the floor was lowered;
+  - the filters ran in whole µV, a few steps across an 8 µV wave. They now run
+    in 1/16 µV.
+
+  The capture is replayed in CI (`app_m7/tests/host/data/sim_resp_20bpm.txt.gz`):
+  20 /min within ±1 in every second after lock, at 11 s.
+
+### Known limitations
+- **Respiration at the edges of the 6–40 /min range.** The detector's band
+  (high-pass ~0.08 Hz, low-pass ~0.45 Hz) attenuates very slow and fast
+  breathing; at the simulator's ~20 µV, 6 /min and 40 /min do not read
+  correctly and 30 /min is unsteady. A larger real breath (typically
+  0.5–2 Ω on an adult) has more margin; the band needs a real capture to
+  retune.
+
 ## [1.0.1] — 2026-11-24
 
 A vitals release. In 1.0.0 the ECG heart rate and HRV were never reported on
