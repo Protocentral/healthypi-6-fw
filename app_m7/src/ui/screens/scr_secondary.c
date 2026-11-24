@@ -91,6 +91,7 @@ static void note_cancel_cb(lv_event_t *e)
 
 static void rec_stop_cb(lv_event_t *e);
 static void err_overlay_click_cb(lv_event_t *e);
+static void setup_err_show(const char *msg);
 static void note_kb_cb(lv_event_t *ev);
 /* --- small building blocks --- */
 
@@ -341,10 +342,7 @@ static void rec_start_cb(lv_event_t *e)
 		}
 	}
 	if (!any_channel_on) {
-		if (s_rec.err) {
-			lv_label_set_text(s_rec.err, "Select at least one channel to record");
-			lv_obj_clear_flag(s_rec.err, LV_OBJ_FLAG_HIDDEN);
-		}
+		setup_err_show("Select at least one channel to record");
 		return;   /* don't call hpi_recording_start() at all */
 	}
 
@@ -360,10 +358,7 @@ static void rec_start_cb(lv_event_t *e)
 	} else if (ret < 0) {
 		msg = "Start failed";
 	}
-	if (s_rec.err) {
-		lv_label_set_text(s_rec.err, msg ? msg : "");
-		lv_obj_set_flag(s_rec.err, LV_OBJ_FLAG_HIDDEN, msg == NULL);
-	}
+	setup_err_show(msg);
 	if (ret >= 0) {
 		s_rec.stop_armed = false;
 		if (s_rec.stop_timer) {
@@ -570,7 +565,19 @@ static void build_setup(lv_obj_t *parent)
 	lv_obj_set_style_bg_opa(s_rec.sd_bar, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(s_rec.sd_bar, 0, 0);
 
-	/* START CTA + error line, pinned to the bottom. */
+	/* Start error, directly above START: the stack is taller than the
+	 * screen, so a line after BROWSE sat under the bottom edge and needed a
+	 * scroll to read. setup_err_show() also scrolls it into view. */
+	s_rec.err = lv_label_create(s_rec.setup);
+	lv_label_set_text(s_rec.err, "");
+	lv_obj_set_width(s_rec.err, lv_pct(100));
+	lv_label_set_long_mode(s_rec.err, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_align(s_rec.err, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_set_style_text_font(s_rec.err, HPI_M3_FONT_LABEL, 0);
+	lv_obj_set_style_text_color(s_rec.err, HPI_M3_ERROR, 0);
+	lv_obj_add_flag(s_rec.err, LV_OBJ_FLAG_HIDDEN);
+
+	/* START CTA + BROWSE. */
 	lv_obj_t *cta = rec_button(s_rec.setup, HPI_SYM_REC, "START RECORDING",
 				   HPI_M3_CTA, HPI_M3_ON_CTA, rec_start_cb);
 	lv_obj_set_style_margin_top(cta, HPI_M3_SPACE_2, 0);
@@ -581,11 +588,6 @@ static void build_setup(lv_obj_t *parent)
 				      rec_browse_cb);
 	lv_obj_set_style_margin_top(browse, HPI_M3_SPACE_2, 0);
 
-	s_rec.err = lv_label_create(s_rec.setup);
-	lv_label_set_text(s_rec.err, "");
-	lv_obj_set_style_text_font(s_rec.err, HPI_M3_FONT_LABEL, 0);
-	lv_obj_set_style_text_color(s_rec.err, HPI_M3_ERROR, 0);
-	lv_obj_add_flag(s_rec.err, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* --- active view --- */
@@ -661,6 +663,36 @@ static void build_active(lv_obj_t *parent)
 	lv_obj_set_style_margin_top(hint, HPI_M3_SPACE_3, 0);
 }
 
+/* NULL hides the line. */
+static void setup_err_show(const char *msg)
+{
+	if (s_rec.err == NULL) {
+		return;
+	}
+	lv_label_set_text(s_rec.err, msg ? msg : "");
+	lv_obj_set_flag(s_rec.err, LV_OBJ_FLAG_HIDDEN, msg == NULL);
+	if (msg != NULL) {
+		lv_obj_update_layout(s_rec.setup);
+		lv_obj_scroll_to_view(s_rec.err, LV_ANIM_ON);
+	}
+}
+
+/* Why a recording stopped, in words. The codes are enter_error_state()'s in
+ * services/recording_service.c. */
+static const char *rec_error_text(int code)
+{
+	switch (code) {
+	case -ENODEV:
+		return "SD card removed - recording stopped";
+	case -ENOSPC:
+		return "SD card full - recording stopped";
+	case -EIO:
+		return "SD card write failed - recording stopped";
+	default:
+		return NULL;
+	}
+}
+
 static void err_overlay_click_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
@@ -692,6 +724,30 @@ lv_obj_t *hpi_scr_record_create(lv_obj_t *parent)
 	lv_obj_clear_flag(s_rec.recdot, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_move_to_index(s_rec.recdot, 0);
 
+	/* Recording-error banner (hidden unless hpi_recording_has_error()),
+	 * directly under the status bar so it is the first thing on the screen.
+	 * It used to be a bare red line after the body, at the bottom edge,
+	 * easy to miss. Tap to dismiss -- clears the condition so the person can
+	 * try again. */
+	s_rec.err_overlay = lv_label_create(root);
+	lv_label_set_text(s_rec.err_overlay, "");
+	lv_obj_set_width(s_rec.err_overlay, lv_pct(100));
+	lv_label_set_long_mode(s_rec.err_overlay, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_align(s_rec.err_overlay, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_set_style_text_font(s_rec.err_overlay, HPI_M3_FONT_LABEL, 0);
+	lv_obj_set_style_text_color(s_rec.err_overlay, HPI_M3_ERROR, 0);
+	lv_obj_set_style_bg_color(s_rec.err_overlay, HPI_M3_SURFACE_HIGH, 0);
+	lv_obj_set_style_bg_opa(s_rec.err_overlay, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(s_rec.err_overlay, HPI_M3_ERROR, 0);
+	lv_obj_set_style_border_width(s_rec.err_overlay, 2, 0);
+	lv_obj_set_style_radius(s_rec.err_overlay, HPI_M3_RADIUS_MD, 0);
+	lv_obj_set_style_pad_all(s_rec.err_overlay, HPI_M3_SPACE_3, 0);
+	lv_obj_set_style_margin_ver(s_rec.err_overlay, HPI_M3_SPACE_2, 0);
+	hpi_m3_apply_touch(s_rec.err_overlay);
+	lv_obj_add_flag(s_rec.err_overlay, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_add_flag(s_rec.err_overlay, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_add_event_cb(s_rec.err_overlay, err_overlay_click_cb, LV_EVENT_CLICKED, NULL);
+
 	lv_obj_t *body = lv_obj_create(root);
 	lv_obj_set_width(body, lv_pct(100));
 	lv_obj_set_flex_grow(body, 1);
@@ -714,16 +770,6 @@ lv_obj_t *hpi_scr_record_create(lv_obj_t *parent)
 	lv_obj_set_style_text_color(s_rec.batt_overlay, HPI_M3_ERROR, 0);
 	lv_obj_add_flag(s_rec.batt_overlay, LV_OBJ_FLAG_HIDDEN);
 
-	/* Recording-error banner (hidden unless hpi_recording_has_error()).
-	 * Tap to dismiss -- clears the condition so the person can try again. */
-	s_rec.err_overlay = lv_label_create(root);
-	lv_label_set_text(s_rec.err_overlay, "");
-	lv_obj_set_style_text_color(s_rec.err_overlay, HPI_M3_ERROR, 0);
-	lv_obj_set_width(s_rec.err_overlay, lv_pct(100));
-	lv_obj_set_style_text_align(s_rec.err_overlay, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_add_flag(s_rec.err_overlay, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_add_flag(s_rec.err_overlay, LV_OBJ_FLAG_CLICKABLE);
-	lv_obj_add_event_cb(s_rec.err_overlay, err_overlay_click_cb, LV_EVENT_CLICKED, NULL);
 
 	hpi_scr_record_refresh();
 	return root;
@@ -788,8 +834,16 @@ void hpi_scr_record_refresh(void)
 				   st.active ? "Recording" : "New Recording");
 
 	if (st.error) {
-		char ebuf[64];
-		snprintf(ebuf, sizeof(ebuf), "Recording stopped: error %d", st.error_code);
+		char ebuf[96];
+		const char *why = rec_error_text(st.error_code);
+
+		if (why != NULL) {
+			snprintf(ebuf, sizeof(ebuf), "%s\nTap to dismiss", why);
+		} else {
+			snprintf(ebuf, sizeof(ebuf),
+				 "Recording stopped: error %d\nTap to dismiss",
+				 st.error_code);
+		}
 		lv_label_set_text(s_rec.err_overlay, ebuf);
 		lv_obj_clear_flag(s_rec.err_overlay, LV_OBJ_FLAG_HIDDEN);
 	} else {

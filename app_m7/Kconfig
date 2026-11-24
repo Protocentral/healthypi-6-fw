@@ -83,7 +83,7 @@ config HPI_RESP_DEBUG
 
 config HPI_RESP_MIN_AMP_UV
 	int "Respiration-rate detector amplitude floor (filtered uV)"
-	default 100
+	default 4
 	range 1 100000
 	help
 	  The respiration-rate detector ignores a peak or trough of the
@@ -92,11 +92,14 @@ config HPI_RESP_MIN_AMP_UV
 	  threshold actually used is the larger of this floor and a quarter of
 	  the signal envelope.
 
-	  100 was chosen before the respiration front end worked and has not
-	  been checked against a real breathing signal; a bench estimate puts a
-	  breath nearer 18 uV at the input, so it may be too high. Change it
-	  only on bench evidence: build with resp_debug.conf
-	  (CONFIG_HPI_RESP_DEBUG) and read the filtered amplitude it logs.
+	  4 is set from a bench capture (2026-11-24, v5, fw 1.0.1): a patient
+	  simulator at 20 breaths/min gave a ~20 uV p-p breath, which the
+	  filters leave at ~+-8 uV; noise alone filters to ~1-2 uV. 3-5 lock
+	  cleanly on that capture, 6 starts reading half the rate, 8 and above
+	  never lock. Until 1.0.1 this was 100. The capture is replayed by
+	  app_m7/tests/host/test_resp_rate.py, which also takes --capture to
+	  replay another. A larger real breath raises the envelope, and the
+	  envelope / 4 term then takes over from the floor.
 
 config HPI_NPU_UART
 	bool "NPU transport over USART2 (1 Mbaud) -- primary HealthyLink Compute link"

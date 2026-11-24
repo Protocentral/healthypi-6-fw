@@ -8,6 +8,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions here are the **firmware** version reported by the device
 (`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
 
+## [Unreleased]
+
+## [1.0.2] — 2026-11-24
+
+Respiration rate and Record-screen fixes, all on the M7. The M4 is rebuilt
+at 1.0.2 so both cores keep one version; its code is unchanged from 1.0.1.
+The ESP32-C6 image is unchanged.
+
+**Update** from 1.0.0 or 1.0.1 with
+`healthypi fw update --port <CDC1> --bundle <1.0.2 bundle>`.
+
+### Validation
+- **Respiration rate**: a v5 unit on a patient simulator now reports the rate
+  on the bench. On the host, replaying a 90 s simulator capture at 20 /min
+  reads 20 ± 1 in every second after lock (at 11 s). With no breathing it
+  reports no rate at 1× and 2× the measured noise.
+- **Record screen and touch input**: build-verified only. Still to check on a
+  unit: Browse Recordings with 35+ files, START with no card, and pulling the
+  card mid-recording.
+
+### Fixed
+- **Respiration rate stayed at 0 for ~5 minutes after power-up, and again
+  after every limb-lead reconnect (M7).** The detector's high-pass filter
+  started from 0, so the thoracic-impedance channel's DC level (~50 mV on v5)
+  entered it as a step; the adaptive threshold (a quarter of a slowly
+  decaying envelope) then sat thousands of µV above any breath. The filter is
+  now seeded with the first sample. Host regression
+  `app_m7/tests/host/test_resp_rate.py` runs in CI.
+- **Respiration rate was never reported at bench signal levels (M7).** A
+  patient simulator at 20 breaths/min gives a ~20 µV p-p breath, which the
+  detector's filters leave at ~±8 µV. Three things hid it:
+  - the amplitude floor (`CONFIG_HPI_RESP_MIN_AMP_UV`) was 100 µV, 12× that
+    breath. It is now **4 µV**, set from that capture;
+  - the Q15 multiply truncated instead of rounding, which built a 7–20 µV
+    offset into the filtered signal: as large as the breath itself, and enough
+    to report a false rate from noise alone once the floor was lowered;
+  - the filters ran in whole µV, a few steps across an 8 µV wave. They now run
+    in 1/16 µV.
+
+  The capture is replayed in CI (`app_m7/tests/host/data/sim_resp_20bpm.txt.gz`):
+  20 /min within ±1 in every second after lock, at 11 s.
+- **Touch input dropped while Browse Recordings listed the card (M7).** With
+  ~35 or more recordings, the log filled with `input: Event dropped, queue
+  full, not blocking in syswq`. A dropped touch-release can leave the
+  touchscreen reading as pressed and stop the UI responding. Zephyr's input
+  thread ran at the lowest priority, and the STM32 SD driver busy-waits after
+  every block, so the listing kept the CPU. The input thread now runs at
+  priority 6 (`CONFIG_INPUT_THREAD_PRIORITY`).
+- **Record-screen errors were hard to see (M7).**
+  - A failed START ("SD card not ready", …) printed its message below BROWSE
+    RECORDINGS, off the bottom of the screen. It now appears above START and
+    the screen scrolls to it.
+  - A recording stopped by a pulled card showed only "error -19" in a red
+    line at the bottom of the screen. It is now a banner under the status bar
+    that names the cause (card removed, full, or write failed); tap to
+    dismiss.
+
+### Known limitations
+- **Respiration at the edges of the 6–40 /min range.** The detector's band
+  (high-pass ~0.08 Hz, low-pass ~0.45 Hz) attenuates very slow and fast
+  breathing; at the simulator's ~20 µV, 6 /min and 40 /min do not read
+  correctly and 30 /min is unsteady. A larger real breath (typically
+  0.5–2 Ω on an adult) has more margin; the band needs a real capture to
+  retune.
+
 ## [1.0.1] — 2026-11-24
 
 A vitals release. In 1.0.0 the ECG heart rate and HRV were never reported on
