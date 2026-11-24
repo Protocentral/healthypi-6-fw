@@ -61,6 +61,7 @@ static K_THREAD_STACK_DEFINE(resp_stack, RESP_STACK_SIZE);
 static int32_t  ds_acc;
 static uint8_t  ds_n;
 static int32_t  x_prev;
+static bool     primed;         /* x_prev holds a real sample */
 static int32_t  hp_y;
 static int32_t  lp1_y;
 static int32_t  lp2_y;
@@ -117,6 +118,7 @@ static void resp_reset(void)
     ds_acc = 0;
     ds_n = 0;
     x_prev = 0;
+    primed = false;
     hp_y = 0;
     lp1_y = 0;
     lp2_y = 0;
@@ -180,6 +182,19 @@ static void resp_accept_ext(uint32_t t_ms)
 
 static void resp_on_ds(int32_t x, uint32_t t_ms)
 {
+    /* Seed the high-pass with the first point after a reset as a steady DC
+     * level. Without this x_prev started at 0, so the channel's DC (~50 mV
+     * on v5) entered the filter as a step: the envelope caught it, and the
+     * threshold (envelope / 4, decaying with a 14 s time constant) stayed
+     * thousands of uV above any breath for ~5 minutes after boot -- and
+     * again after every limb-lead reconnect, since resp_reset() runs then.
+     * Host test: app_m7/tests/host/test_resp_rate.py. */
+    if (!primed) {
+        x_prev = x;
+        primed = true;
+        return;
+    }
+
     int32_t hp = x - x_prev + q15_mul(hp_y, RESP_HP_R_Q15);
     int32_t lp1 = lp1_y + q15_mul(hp - lp1_y, RESP_LP_A_Q15);
     int32_t y = lp2_y + q15_mul(lp1 - lp2_y, RESP_LP_A_Q15);

@@ -50,6 +50,11 @@ jobs:
              app_m7/src/platform/vitals_arbiter.c \
              -o /tmp/vitals_arbiter_test
           /tmp/vitals_arbiter_test
+      # The respiration-rate detector (core/resp_rate.c, compiled unmodified):
+      # locks from power-up and after a lead reconnect on the channel's real
+      # DC level, withdraws on a breath hold, never reports noise as a rate.
+      - name: M7 respiration rate locks from power-up
+        run: python3 app_m7/tests/host/test_resp_rate.py
 
   m4-hrv-host:
     runs-on: ubuntu-latest

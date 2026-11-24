@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions here are the **firmware** version reported by the device
 (`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
 
+## [Unreleased]
+
+### Fixed
+- **Respiration rate stayed at 0 for ~5 minutes after power-up, and again
+  after every limb-lead reconnect (M7).** The detector's high-pass filter
+  started from 0, so the thoracic-impedance channel's DC level (~50 mV on v5)
+  entered it as a step; the adaptive threshold (a quarter of a slowly
+  decaying envelope) then sat thousands of µV above any breath. The filter is
+  now seeded with the first sample. Host regression
+  `app_m7/tests/host/test_resp_rate.py` runs in CI; the unfixed detector never
+  locks in it.
+
+### Known limitations
+- **The respiration amplitude floor (`CONFIG_HPI_RESP_MIN_AMP_UV`, 100 µV) is
+  still unvalidated** and likely too high for a real breath; it needs a bench
+  capture of a breathing subject to set.
+
 ## [1.0.1] — 2026-11-24
 
 A vitals release. In 1.0.0 the ECG heart rate and HRV were never reported on
