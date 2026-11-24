@@ -36,6 +36,11 @@
  *                ECG_VITALS went out, the fields the M7 reads from it. The
  *                QRS detector itself is not run: beats are placed at exact
  *                sample indices.
+ *   ecg v0..v15  one 16-sample batch of raw Lead I (µV) through
+ *                ecg_process_batch() -- the QRS detector and everything after
+ *                it -- then ecg_report(), with the uptime set to sample time.
+ *                Prints whether a QRS was confirmed, its absolute sample
+ *                index, the rate and the detector's threshold. test_qrs.py.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -73,7 +78,7 @@ int hpi_ipc_register_callback(enum hpi_ipc_msg_type msg_type,
 
 int main(void)
 {
-	char line[128];
+	char line[512];
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 
@@ -144,6 +149,36 @@ int main(void)
 			       captured_vitals.algorithm_state);
 		} else if (strcmp(cmd, "hrv") == 0 && n == 2) {
 			algorithm_set_hrv_enabled(arg != 0);
+		} else if (strcmp(cmd, "ecg") == 0) {
+			struct hpi_ipc_ecg_raw_batch b;
+			struct ecg_algorithm_results r;
+			const char *p = line + 3;
+			char *end;
+
+			memset(&b, 0, sizeof(b));
+			b.sample_count = ECG_BATCH_SIZE;
+			for (int i = 0; i < ECG_BATCH_SIZE; i++) {
+				b.samples[i].ecg_lead1 = (int32_t)strtol(p, &end, 10);
+				if (end == p) {
+					printf("ERR ecg needs %d samples\n", ECG_BATCH_SIZE);
+					return 2;
+				}
+				p = end;
+			}
+			hpi_host_uptime_ms = (uint32_t)(((uint64_t)(ecg_state.sample_count +
+					ECG_BATCH_SIZE) * 1000U) / HPI_ECG_M4_RATE_HZ);
+			captured_vitals_count = 0;
+			if (ecg_process_batch(&b, &r) != 0) {
+				printf("ERR ecg_process_batch\n");
+				return 2;
+			}
+			ecg_report(&r, hpi_host_uptime_ms);
+			printf("E q=%u idx=%llu hr=%u conf=%u rr=%u thr=%lld phase=%d tx=%d\n",
+			       r.qrs_detected,
+			       (unsigned long long)ecg_state.last_qrs_sample,
+			       r.heart_rate, r.confidence, r.rr_interval_ms,
+			       (long long)qrs.thr1, (int)qrs.phase,
+			       captured_vitals_count);
 		} else if (strcmp(cmd, "batch") == 0) {
 			struct ecg_algorithm_results r;
 			uint32_t now;

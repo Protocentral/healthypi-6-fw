@@ -68,6 +68,13 @@ jobs:
         env:
           CMSIS_DSP: ${{ github.workspace }}/cmsis-dsp
         run: python3 app_m4/tests/hrv/test_hrv.py
+      # The QRS detector, raw ECG in: synthetic traces with known beat times,
+      # including the 250 Hz alternation that kept 1.0.0 from ever reporting
+      # a heart rate on v5.
+      - name: M4 QRS detector finds every beat
+        env:
+          CMSIS_DSP: ${{ github.workspace }}/cmsis-dsp
+        run: python3 app_m4/tests/hrv/test_qrs.py
       # The SpO2 module, raw red/IR PPG in: R independent of the DC levels,
       # the R -> SpO2 table indexed correctly, no number without a pulse.
       - name: M4 SpO2 reads the right value from a clean PPG

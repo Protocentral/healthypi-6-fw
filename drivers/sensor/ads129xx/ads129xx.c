@@ -516,8 +516,23 @@ static int ads129xx_chip_init(const struct device *dev)
         return err;
     }
 
-    // Set the device to normal mode
-    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG1, 0b01010110); // HR mode 500 SPS
+    /* CONFIG1 = 0xC6: high-resolution mode, multiple readback, 500 SPS.
+     *
+     * WAS 0x56 (0b0101_0110), commented "HR mode 500 SPS" but neither: HR (bit
+     * 7) was 0, i.e. low-power mode, where DR = 110 is 250 SPS; and bit 4,
+     * which the datasheet says must always be 0, was 1. That is the ADS1299's
+     * CONFIG1 pattern (bits 4:3 = 10 there), not this part's. The device
+     * nevertheless delivered 500 samples/s, every other one offset by a
+     * constant: 96 / 209 / 148 uV on leads I / II / V1 of the unit captured
+     * 2026-11-23, each half-rate stream smooth on its own. Invisible on the
+     * decimated display, it was a 250 Hz square wave at the M4, whose 1.0.0
+     * QRS detector locked onto it and never produced a heart rate.
+     *
+     * NOT YET CONFIRMED ON HARDWARE that 0xC6 removes the alternation (check:
+     * fw-internal-docs/algorithms/hr-debug-2026-11-23/ecg_checks.py, even/odd
+     * offset a few uV at most). HR mode also draws more AFE current than LP. */
+    _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG1,
+                        CONFIG1_HR | CONFIG1_DAISY_EN | DR_HR_500);
     k_sleep(K_MSEC(100));
     _ads129xx_reg_write(dev, ADS129XX_REG_CONFIG2, 0b00000000); // Test signals disabled, normal ECG operation
     k_sleep(K_MSEC(100));

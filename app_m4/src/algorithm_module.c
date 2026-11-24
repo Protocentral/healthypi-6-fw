@@ -26,7 +26,6 @@ LOG_MODULE_REGISTER(algorithm_module, LOG_LEVEL_INF);
 #define ECG_SAMPLE_RATE         500    /* Hz */
 #define ECG_BATCH_SIZE          16     /* Samples per batch */
 #define ECG_QUEUE_SIZE          32     /* Queue depth */
-#define ECG_BUFFER_SIZE         256    /* Circular buffer for context */
 #define RR_HISTORY_SIZE         256    /* Sized for frequency-domain HRV */
 
 /* Heart rate: the median of the newest HR_WINDOW_RR intervals (fewer while
@@ -92,28 +91,139 @@ static bool hrv_enabled = HRV_ENABLED_DEFAULT;
 #define HRV_HF_LOW              0.15f  /* HF band: 0.15 - 0.4 Hz */
 #define HRV_HF_HIGH             0.4f
 
-/* QRS detection parameters (Pan-Tompkins inspired).
- * ECG arrives from the M7 in MICROVOLTS: typical R-peak 500-2000 µV,
- * baseline noise 10-50 µV. After derivative + squaring + integration,
- * R-peaks and noise separate by orders of magnitude. Thresholds adapt from
- * signal/noise estimates, so the initial values below are only starting
- * points. */
-#define QRS_THRESHOLD_INITIAL   50     /* Initial threshold - will adapt up */
-#define QRS_THRESHOLD_MIN       10     /* Minimum threshold floor */
-#define QRS_THRESHOLD_FACTOR    0.5    /* Adaptive threshold factor */
-#define QRS_REFRACTORY_MS       250    /* Refractory period in ms (max 240 BPM) */
-#define QRS_SEARCH_WINDOW       25     /* Samples to search for peak */
-#define QRS_LEARNING_BEATS      5      /* Number of beats before stable detection */
+/* QRS detection: Pan-Tompkins (Pan & Tompkins, IEEE TBME 32(3), 1985), run
+ * sample by sample with all filter state carried across batches.
+ *
+ * Replaces the 1.0.0 detector, which never produced a heart rate on v5. That
+ * one filtered each 16-sample batch on its own: its 5-point derivative clamped
+ * at the batch edges, its "integration" was 8 samples inside the batch, its
+ * "5-15 Hz band-pass" was a bare second difference and its refractory period
+ * was wall-clock. Fed ECG carrying a constant 250 Hz alternation (the ADS1294R
+ * CONFIG1 fault, see drivers/sensor/ads129xx), the clamped edges turned the
+ * alternation into a spike in EVERY batch. The noise estimate started at 0, so
+ * the learning threshold was 10 and the first five spikes were learnt as beats;
+ * from then on every batch crossed the threshold, the noise estimate was never
+ * updated again, and a "beat" fired each time the 250 ms refractory ran out --
+ * 256 ms intervals, every one rejected by the 300 ms RR gate. No intervals, no
+ * rate, on a clean 80 BPM trace. Host regression: app_m4/tests/hrv/test_qrs.py.
+ *
+ * Pipeline, at HPI_ECG_M4_RATE_HZ (500 Hz):
+ *   band-pass 5-15 Hz  two Butterworth biquads (HP 5 Hz, LP 15 Hz); the LP's
+ *                      double zero at Nyquist nulls a 250 Hz alternation
+ *                      outright, and 50/60 Hz mains is down 21/25 dB
+ *   derivative         2x[n] + x[n-1] - x[n-3] - 2x[n-4]   (PT's, unscaled)
+ *   square
+ *   integrate          moving sum over 150 ms (75 samples), exact in int64
+ *   peaks              a local maximum of the integral, confirmed once it has
+ *                      not been exceeded for QRS_PEAK_CONFIRM samples
+ *   classify           QRS if above THR1 = NPKI + (SPKI - NPKI)/4, outside the
+ *                      200 ms refractory, and -- within 360 ms of the last
+ *                      QRS -- with at least half its slope (else a T wave);
+ *                      otherwise noise. SPKI/NPKI track each class (1/8).
+ *   searchback         no QRS for 1.66 x the mean RR: take the largest noise
+ *                      peak since the last QRS if it clears THR1 / 2
+ *   (re)learning       thresholds start from the first 2 s (after 0.5 s for
+ *                      the filters to settle): SPKI = max/3, NPKI = mean/2.
+ *                      Learning restarts after QRS_RELEARN_SAMPLES without a
+ *                      QRS, so a gain change or an artefact that inflated
+ *                      SPKI cannot lock detection out for good.
+ *
+ * Positions are absolute sample indices: RR intervals come out at the ADC's
+ * 2 ms resolution, free of IPC and scheduling jitter (see track_rhythm()). A
+ * QRS is reported at its dominant lobe -- the band-passed extremum, of the
+ * polarity learnt with the thresholds, in the integration window behind the
+ * integrator peak. Not at the integrator peak: it sits on a plateau as wide as
+ * the window minus the QRS and wanders across it with noise (5-9 samples sd
+ * on test signals, an HRV-sized error). And not at the largest |band-passed|
+ * sample: R and S lobes are often of similar size, and flipping between them
+ * moves the point 30 ms from one beat to the next. */
+#define QRS_FS                  HPI_ECG_M4_RATE_HZ
+#define QRS_MS(ms)              ((uint32_t)(((ms) * QRS_FS) / 1000U))
+#define QRS_MWI_LEN             QRS_MS(150)   /* integration window */
+#define QRS_PEAK_CONFIRM        QRS_MS(100)   /* peak must hold this long */
+#define QRS_REFRACTORY          QRS_MS(200)
+#define QRS_TWAVE_WINDOW        QRS_MS(360)
+#define QRS_SETTLE_SAMPLES      QRS_MS(500)   /* filter start-up, ignored */
+#define QRS_LEARN_SAMPLES       QRS_MS(2000)
+#define QRS_RELEARN_SAMPLES     QRS_MS(2500)  /* no QRS this long -> relearn */
+#define QRS_SLOPE_HIST          128           /* power of 2, >= QRS_MWI_LEN */
 
-/* Dual-threshold tracking for noise rejection */
-static int32_t signal_peak_estimate = 0;   /* Running estimate of QRS peak amplitude */
-static int32_t noise_peak_estimate = 0;    /* Running estimate of noise peak amplitude */
-static uint32_t learning_beat_count = 0;   /* Count beats during learning phase */
+/* Absolute floor for a QRS, in integrator units (squared µV-per-sample
+ * derivative, averaged over the window). Without one a flat line learns
+ * thresholds of ~0 and calls its own noise a rhythm. This is the integrator
+ * peak of a ~100 µV QRS (calibrated in test_qrs.py, where a 1 mV synthetic QRS
+ * peaks near 1.4e5 and the inputs-open noise of a v5 unit sits below 100); a
+ * real R wave on any lead is several times larger. */
+#define QRS_MIN_PEAK            1500
 
-/* Filter Coefficients (simplified bandpass 5-15 Hz) */
-#define FILTER_ORDER            5
-static const float bp_filter_b[FILTER_ORDER] = {0.1, 0.2, 0.4, 0.2, 0.1};
-static const float bp_filter_a[FILTER_ORDER] = {1.0, -0.5, 0.3, -0.1, 0.05};
+/* Band-pass coefficients for fs = 500 Hz: RBJ-cookbook Butterworth biquads
+ * (Q = 1/sqrt(2)), normalised so a0 = 1. Regenerate for another rate with
+ * test_qrs.py --coefficients. Response of the pair: -3 dB at 5 and 15 Hz,
+ * -28 dB at 1 Hz, -21.5 dB at 50 Hz, -24.9 dB at 60 Hz, zero at 250 Hz. */
+BUILD_ASSERT(HPI_ECG_M4_RATE_HZ == 500, "QRS band-pass coefficients are for 500 Hz");
+static const float qrs_hp_b[3] = {9.565432256e-01f, -1.913086451e+00f, 9.565432256e-01f};
+static const float qrs_hp_a[2] = {-1.911197067e+00f, 9.149758348e-01f};
+static const float qrs_lp_b[3] = {7.820208033e-03f, 1.564041607e-02f, 7.820208033e-03f};
+static const float qrs_lp_a[2] = {-1.734725769e+00f, 7.660066009e-01f};
+
+enum qrs_phase {
+    QRS_PHASE_SETTLE,   /* filters starting up: nothing classified */
+    QRS_PHASE_LEARN,    /* collecting the integrator's max and mean */
+    QRS_PHASE_RUN,      /* detecting */
+};
+
+struct qrs_detector {
+    uint64_t n;                         /* samples fed so far */
+
+    /* Band-pass (transposed direct form II, one state pair per biquad) */
+    float hp_z1, hp_z2, lp_z1, lp_z2;
+    bool primed;                        /* HP state set from the first sample */
+
+    /* Derivative input history: band-passed x[n-1..n-4] */
+    float bp_hist[4];
+
+    /* |derivative| and band-passed history over the integration window: the
+     * slope of a peak (T-wave test) and the R-wave position */
+    int32_t slope_hist[QRS_SLOPE_HIST];
+    float bp_hist_w[QRS_SLOPE_HIST];
+    float polarity;                     /* +1 / -1: sign of the dominant QRS lobe */
+    float learn_bp_pos, learn_bp_neg;   /* largest excursions while learning */
+
+    /* Moving-window integrator */
+    int64_t sq_ring[QRS_MWI_LEN];
+    int64_t sq_sum;
+    uint32_t ring_pos;
+
+    /* Peak picking on the integrator output */
+    int64_t cand_val;
+    uint64_t cand_idx;                  /* integrator peak */
+    uint64_t cand_fid;                  /* its R wave (fiducial point) */
+    int32_t cand_slope;
+    bool cand_rising;                   /* candidate is a real local max */
+
+    /* Thresholds */
+    enum qrs_phase phase;
+    uint64_t phase_start;
+    int64_t learn_max;
+    int64_t learn_sum;
+    uint32_t learn_count;
+    int64_t spki;                       /* signal peak estimate */
+    int64_t npki;                       /* noise peak estimate */
+    int64_t thr1;
+
+    /* Last QRS */
+    bool have_qrs;
+    uint64_t last_qrs;
+    int32_t last_qrs_slope;
+    uint32_t rr_avg;                    /* mean QRS-QRS distance, samples */
+
+    /* Searchback: the largest noise peak since the last QRS */
+    int64_t sb_val;
+    uint64_t sb_idx;
+    int32_t sb_slope;
+};
+
+static struct qrs_detector qrs;
 
 /* HRV Time Domain Results */
 struct hrv_time_domain {
@@ -140,18 +250,11 @@ struct hrv_freq_domain {
 
 /* Algorithm State */
 struct ecg_algorithm_state {
-    /* Signal buffers */
-    int32_t ecg_buffer[ECG_BUFFER_SIZE];  /* Raw ECG circular buffer */
-    int32_t filtered[ECG_BUFFER_SIZE];    /* Filtered signal */
-    int32_t integrated[ECG_BUFFER_SIZE];  /* Integrated signal */
-    size_t buffer_index;                   /* Current write position */
     size_t sample_count;                   /* Total samples processed */
 
-    /* QRS detection state */
-    int32_t detection_threshold;          /* Current adaptive threshold */
-    uint32_t last_qrs_time_ms;            /* Timestamp of last QRS (refractory only) */
+    /* QRS detection state (the detector's own state is in `qrs`) */
+    int32_t detection_threshold;          /* THR1, saturated to int32, for debug reads */
     uint64_t last_qrs_sample;             /* Absolute sample index of last QRS (RR) */
-    bool in_refractory;                   /* Refractory period flag */
 
     /* RR interval tracking (expanded for HRV) */
     uint16_t rr_intervals[RR_HISTORY_SIZE];  /* Last 64 RR intervals */
@@ -185,7 +288,6 @@ struct ecg_algorithm_state {
 };
 
 static struct ecg_algorithm_state ecg_state = {
-    .detection_threshold = QRS_THRESHOLD_INITIAL,
     .signal_quality = 0,
     .hr_confidence = 0,
 };
@@ -229,10 +331,8 @@ static float32_t hrv_hanning_window[HRV_FFT_SIZE];
 
 /* Forward Declarations */
 static void ecg_algorithm_thread_func(void *p1, void *p2, void *p3);
-static int apply_bandpass_filter(const int32_t *input, int32_t *output, size_t count);
-static int calculate_derivative(const int32_t *input, int32_t *output, size_t count);
-static int square_signal(const int32_t *input, int32_t *output, size_t count);
-static int moving_window_integration(const int32_t *input, int32_t *output, size_t count);
+static void qrs_detector_reset(void);
+static bool qrs_feed(int32_t x, uint64_t *qrs_sample);
 static uint8_t assess_signal_quality(const int32_t *samples, size_t count);
 static uint16_t rr_ms_from_sample_delta(uint64_t d);
 static void update_rr_interval(uint16_t interval_ms);
@@ -264,12 +364,7 @@ int algorithm_module_init(void)
 {
     /* Reset algorithm state */
     memset(&ecg_state, 0, sizeof(ecg_state));
-    ecg_state.detection_threshold = QRS_THRESHOLD_INITIAL;
-
-    /* Reset dual-threshold estimates and learning state */
-    signal_peak_estimate = 0;
-    noise_peak_estimate = 0;
-    learning_beat_count = 0;
+    qrs_detector_reset();
 
     /* Reset statistics */
     memset(&algo_stats, 0, sizeof(algo_stats));
@@ -335,22 +430,11 @@ int algorithm_configure_ecg(const struct ecg_algorithm_config *config)
 
 void algorithm_reset(void)
 {
-    /* Clear buffers but keep configuration */
-    memset(ecg_state.ecg_buffer, 0, sizeof(ecg_state.ecg_buffer));
-    memset(ecg_state.filtered, 0, sizeof(ecg_state.filtered));
-    memset(ecg_state.integrated, 0, sizeof(ecg_state.integrated));
-
-    ecg_state.buffer_index = 0;
+    /* Clear detector state but keep configuration */
     ecg_state.sample_count = 0;
-    ecg_state.detection_threshold = QRS_THRESHOLD_INITIAL;
-    ecg_state.last_qrs_time_ms = 0;
+    ecg_state.detection_threshold = 0;
     ecg_state.last_qrs_sample = 0;
-    ecg_state.in_refractory = false;
-
-    /* Reset dual-threshold estimates and learning state */
-    signal_peak_estimate = 0;
-    noise_peak_estimate = 0;
-    learning_beat_count = 0;
+    qrs_detector_reset();
 
     memset(ecg_state.rr_intervals, 0, sizeof(ecg_state.rr_intervals));
     ecg_state.rr_count = 0;
@@ -517,51 +601,32 @@ int ecg_process_batch(const void *batch_ptr, struct ecg_algorithm_results *resul
     uint8_t quality = assess_signal_quality(samples, ECG_BATCH_SIZE);
     ecg_state.signal_quality = quality;
     
-    /* Add samples to circular buffer */
+    /* Run the detector sample by sample. It confirms a QRS up to
+     * QRS_PEAK_CONFIRM samples (or, by searchback, ~1.66 RR) after it happened
+     * and reports its absolute sample index, so the QRS may lie in an earlier
+     * batch; track_rhythm() works in absolute indices and does not care. The
+     * 200 ms refractory allows at most one QRS per 32 ms batch. */
+    bool qrs_found = false;
+    uint64_t qrs_sample = 0;
+
     for (size_t i = 0; i < ECG_BATCH_SIZE; i++) {
-        ecg_state.ecg_buffer[ecg_state.buffer_index] = samples[i];
-        ecg_state.buffer_index = (ecg_state.buffer_index + 1) % ECG_BUFFER_SIZE;
+        uint64_t s;
+
+        if (qrs_feed(samples[i], &s)) {
+            qrs_found = true;
+            qrs_sample = s;
+        }
         ecg_state.sample_count++;
     }
-    
-    /* Wait for buffer to fill before processing */
-    if (ecg_state.sample_count < ECG_BUFFER_SIZE) {
-        memset(results, 0, sizeof(*results));
-        results->signal_quality = quality;
-        return 0;  /* Not enough data yet */
-    }
-    
-    /* Apply bandpass filter (5-15 Hz) */
-    int32_t filtered[ECG_BATCH_SIZE];
-    apply_bandpass_filter(samples, filtered, ECG_BATCH_SIZE);
-    
-    /* Derivative (emphasizes QRS slope) */
-    int32_t derivative[ECG_BATCH_SIZE];
-    calculate_derivative(filtered, derivative, ECG_BATCH_SIZE);
-    
-    /* Squaring (amplifies QRS, suppresses noise) */
-    int32_t squared[ECG_BATCH_SIZE];
-    square_signal(derivative, squared, ECG_BATCH_SIZE);
-    
-    /* Moving window integration (smooths) */
-    int32_t integrated[ECG_BATCH_SIZE];
-    moving_window_integration(squared, integrated, ECG_BATCH_SIZE);
+    ecg_state.detection_threshold =
+        (qrs.thr1 > INT32_MAX) ? INT32_MAX : (int32_t)qrs.thr1;
 
-    /* QRS detection */
-    size_t qrs_index = 0;
-    int qrs_found = qrs_detect(integrated, ECG_BATCH_SIZE, &qrs_index);
-    
     /* Build results */
     memset(results, 0, sizeof(*results));
     results->timestamp = k_uptime_get_32();
     results->signal_quality = quality;
 
-    /* qrs_index is the QRS position within this batch, and sample_count has
-     * already been advanced past the batch, so the absolute index is
-     * sample_count - ECG_BATCH_SIZE + qrs_index. */
-    track_rhythm(qrs_found > 0,
-                 (uint64_t)ecg_state.sample_count - ECG_BATCH_SIZE + qrs_index,
-                 results);
+    track_rhythm(qrs_found, qrs_sample, results);
 
     ecg_state.batches_processed++;
 
@@ -599,7 +664,6 @@ static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
          * The interval that spans a pause long enough to expire the rate is
          * > HR_STALE_SAMPLES (5 s), far outside the 2000 ms gate, so it is
          * rejected here and enters neither the HR window nor HRV. */
-        uint32_t current_time_ms = results->timestamp;
         uint16_t rr_ms = 0;
 
         if (ecg_state.last_qrs_sample > 0) {
@@ -614,7 +678,6 @@ static void track_rhythm(bool qrs_found, uint64_t qrs_sample,
         }
 
         ecg_state.last_qrs_sample = qrs_sample;
-        ecg_state.last_qrs_time_ms = current_time_ms;  /* refractory gate only */
     }
 
     expire_stale_heart_rate();
@@ -688,215 +751,275 @@ static void update_heart_rate(struct ecg_algorithm_results *results)
 }
 
 /*----------------------------------------------------------------------------*/
-/* QRS Detection (Simplified Pan-Tompkins)                                   */
+/* QRS Detection (Pan-Tompkins, streaming; see the QRS_* constants above)     */
 /*----------------------------------------------------------------------------*/
 
-int qrs_detect(const int32_t *samples, size_t count, size_t *detected_index)
+static void qrs_detector_reset(void)
 {
-    if (!samples || count == 0) {
-        return -EINVAL;
+    memset(&qrs, 0, sizeof(qrs));
+    qrs.phase = QRS_PHASE_SETTLE;
+    qrs.polarity = 1.0f;
+}
+
+static void qrs_start_learning(uint64_t now)
+{
+    qrs.phase = QRS_PHASE_LEARN;
+    qrs.phase_start = now;
+    qrs.learn_max = 0;
+    qrs.learn_sum = 0;
+    qrs.learn_count = 0;
+    qrs.learn_bp_pos = 0.0f;
+    qrs.learn_bp_neg = 0.0f;
+}
+
+static void qrs_update_thr(void)
+{
+    qrs.thr1 = qrs.npki + (qrs.spki - qrs.npki) / 4;
+    if (qrs.thr1 < QRS_MIN_PEAK) {
+        qrs.thr1 = QRS_MIN_PEAK;
+    }
+}
+
+/* Sample n has just become the peak candidate: over the integration window
+ * ending at n, find the steepest slope (largest |derivative|, for the T-wave
+ * test) and the fiducial point (band-passed extremum of the learnt polarity).
+ * The window is still in the history at this moment. */
+static void qrs_candidate_window(uint64_t n)
+{
+    int32_t m = 0;
+    float best = 0.0f;
+    bool have = false;
+    uint64_t fid = n;
+
+    for (uint32_t i = 0; i < QRS_MWI_LEN && i <= n; i++) {
+        uint32_t k = (uint32_t)((n - i) & (QRS_SLOPE_HIST - 1U));
+
+        if (qrs.slope_hist[k] > m) {
+            m = qrs.slope_hist[k];
+        }
+        float v = qrs.polarity * qrs.bp_hist_w[k];
+
+        if (!have || v > best) {
+            best = v;
+            fid = n - i;
+            have = true;
+        }
+    }
+    qrs.cand_slope = m;
+    qrs.cand_fid = fid;
+}
+
+/* A confirmed QRS at absolute sample `idx`. */
+static void qrs_accept(uint64_t idx, int32_t slope)
+{
+    if (qrs.have_qrs) {
+        uint32_t rr = (uint32_t)(idx - qrs.last_qrs);
+
+        /* Searchback uses the mean RR; only plausible intervals feed it
+         * (the same 300-2000 ms window the HR gate applies). */
+        if (rr >= QRS_MS(300) && rr <= QRS_MS(2000)) {
+            qrs.rr_avg = (qrs.rr_avg == 0) ? rr : (qrs.rr_avg * 7U + rr) / 8U;
+        }
+    }
+    qrs.have_qrs = true;
+    qrs.last_qrs = idx;
+    qrs.last_qrs_slope = slope;
+    qrs.sb_val = 0;
+}
+
+/* Distance in samples from the last QRS to `idx`; 0 if `idx` is not after it.
+ * A peak's fiducial point is searched for up to QRS_MWI_LEN samples behind the
+ * peak, so it can land on or before the previous QRS; the unsigned difference
+ * would then wrap and pass every "too soon" test below. */
+static uint64_t qrs_since_last(uint64_t idx)
+{
+    return (qrs.have_qrs && idx > qrs.last_qrs) ? idx - qrs.last_qrs :
+           (qrs.have_qrs ? 0U : UINT64_MAX);
+}
+
+/* Classify one confirmed integrator peak. Returns true if it is a QRS. */
+static bool qrs_classify(int64_t val, uint64_t idx, int32_t slope)
+{
+    if (qrs.phase != QRS_PHASE_RUN) {
+        return false;
     }
 
-    /* Check refractory period */
-    uint32_t current_time_ms = k_uptime_get_32();
-    if (ecg_state.in_refractory) {
-        if (current_time_ms - ecg_state.last_qrs_time_ms < QRS_REFRACTORY_MS) {
-            return 0;  /* Still in refractory period */
-        }
-        ecg_state.in_refractory = false;
+    const uint64_t since = qrs_since_last(idx);
+
+    if (since < QRS_REFRACTORY) {
+        return false;   /* physiologically impossible: ignore entirely */
     }
 
-    /* Find peak in integrated signal */
-    int32_t max_val = 0;
-    size_t max_idx = 0;
+    if (val > qrs.thr1) {
+        bool twave = since < QRS_TWAVE_WINDOW &&
+                     slope < qrs.last_qrs_slope / 2;
 
-    for (size_t i = 0; i < count; i++) {
-        if (samples[i] > max_val) {
-            max_val = samples[i];
-            max_idx = i;
+        if (!twave) {
+            qrs.spki = (val + 7 * qrs.spki) / 8;
+            qrs_update_thr();
+            qrs_accept(idx, slope);
+            return true;
         }
     }
 
-    /* Sanity check: If max_val is much larger than threshold but we've been
-     * missing QRS for a while, reset the estimates. This handles cases where
-     * signal estimates got corrupted earlier. */
-    static uint32_t batches_since_qrs = 0;
-    batches_since_qrs++;
-
-    /* If we haven't detected QRS for >3 seconds (100 batches at 31.25/sec),
-     * and current max is reasonable (>50), reset and try to learn again */
-    if (batches_since_qrs > 100 && max_val > 50 && learning_beat_count >= QRS_LEARNING_BEATS) {
-        LOG_WRN("QRS timeout: resetting signal estimates (max=%d, old_sig=%d)",
-                max_val, signal_peak_estimate);
-        signal_peak_estimate = max_val * 2;  /* Start with current as estimate */
-        noise_peak_estimate = max_val / 4;
-        learning_beat_count = 3;  /* Partial re-learning */
+    /* Noise (or a T wave). Remember the largest since the last QRS that is
+     * clear of the T-wave window, for searchback. */
+    qrs.npki = (val + 7 * qrs.npki) / 8;
+    qrs_update_thr();
+    if (since >= QRS_TWAVE_WINDOW && val > qrs.sb_val) {
+        qrs.sb_val = val;
+        qrs.sb_idx = idx;
+        qrs.sb_slope = slope;
     }
+    return false;
+}
 
-    /* Adaptive threshold, relative to signal amplitude (never absolute):
-     * learning phase uses a very low threshold to catch the first beats;
-     * afterwards it sits 25% of the way from the noise estimate to the
-     * signal estimate (Pan-Tompkins style). */
-    int32_t adaptive_threshold;
+/* Feed one raw ECG sample (µV). Returns true when a QRS is confirmed, with its
+ * absolute sample index in *qrs_sample. The index of the first sample fed after
+ * a reset is 0, matching ecg_state.sample_count. */
+static bool qrs_feed(int32_t x_in, uint64_t *qrs_sample)
+{
+    const uint64_t n = qrs.n++;
+    const float x = (float)x_in;
+    bool found = false;
 
-    if (learning_beat_count < QRS_LEARNING_BEATS) {
-        /* Learning phase: use very low threshold to catch first beats
-         * Threshold = max(MIN, noise_estimate * 2) to stay above noise floor */
-        adaptive_threshold = noise_peak_estimate * 2;
-        if (adaptive_threshold < QRS_THRESHOLD_MIN) {
-            adaptive_threshold = QRS_THRESHOLD_MIN;
-        }
-        /* But don't go too high during learning */
-        if (adaptive_threshold > QRS_THRESHOLD_INITIAL * 10) {
-            adaptive_threshold = QRS_THRESHOLD_INITIAL * 10;
-        }
+    /* Band-pass. Prime the high-pass with the first sample as a steady DC
+     * level, so an electrode offset of tens of mV does not ring through. */
+    if (!qrs.primed) {
+        /* Steady state for a constant input x (the high-pass output is 0):
+         *   z2 = b2*x,  z1 = b1*x + z2 = (b1 + b2)*x */
+        qrs.hp_z2 = qrs_hp_b[2] * x;
+        qrs.hp_z1 = (qrs_hp_b[1] + qrs_hp_b[2]) * x;
+        qrs.primed = true;
+    }
+    float hp = qrs_hp_b[0] * x + qrs.hp_z1;
+    qrs.hp_z1 = qrs_hp_b[1] * x - qrs_hp_a[0] * hp + qrs.hp_z2;
+    qrs.hp_z2 = qrs_hp_b[2] * x - qrs_hp_a[1] * hp;
+
+    float bp = qrs_lp_b[0] * hp + qrs.lp_z1;
+    qrs.lp_z1 = qrs_lp_b[1] * hp - qrs_lp_a[0] * bp + qrs.lp_z2;
+    qrs.lp_z2 = qrs_lp_b[2] * hp - qrs_lp_a[1] * bp;
+
+    /* Derivative (Pan-Tompkins' five-point, without its 1/8: the extra
+     * resolution matters once it is rounded to an integer). */
+    float d = 2.0f * bp + qrs.bp_hist[0] - qrs.bp_hist[2] - 2.0f * qrs.bp_hist[3];
+    qrs.bp_hist[3] = qrs.bp_hist[2];
+    qrs.bp_hist[2] = qrs.bp_hist[1];
+    qrs.bp_hist[1] = qrs.bp_hist[0];
+    qrs.bp_hist[0] = bp;
+
+    /* Clamp before squaring: 2^24 squared still fits in int64 with room for
+     * a 75-sample sum. A real derivative is under ~1e4. */
+    int32_t di;
+    if (d > 16777215.0f) {
+        di = 16777215;
+    } else if (d < -16777215.0f) {
+        di = -16777215;
     } else {
-        /* Stable phase: use Pan-Tompkins style threshold
-         * Threshold at 25% between noise and signal peaks */
-        if (signal_peak_estimate > noise_peak_estimate) {
-            adaptive_threshold = noise_peak_estimate +
-                                (signal_peak_estimate - noise_peak_estimate) / 4;
-        } else {
-            /* Fallback if estimates are inverted */
-            adaptive_threshold = signal_peak_estimate / 2;
-        }
-
-        /* Ensure minimum threshold */
-        if (adaptive_threshold < QRS_THRESHOLD_MIN) {
-            adaptive_threshold = QRS_THRESHOLD_MIN;
-        }
+        di = (int32_t)d;
     }
+    qrs.slope_hist[n & (QRS_SLOPE_HIST - 1)] = (di < 0) ? -di : di;
+    qrs.bp_hist_w[n & (QRS_SLOPE_HIST - 1)] = bp;
 
-    /* Update detection threshold */
-    ecg_state.detection_threshold = adaptive_threshold;
+    /* Moving-window integration, exact */
+    int64_t sq = (int64_t)di * di;
+    qrs.sq_sum += sq - qrs.sq_ring[qrs.ring_pos];
+    qrs.sq_ring[qrs.ring_pos] = sq;
+    qrs.ring_pos = (qrs.ring_pos + 1U) % QRS_MWI_LEN;
+    const int64_t mwi = qrs.sq_sum / QRS_MWI_LEN;
 
-    if (max_val > adaptive_threshold) {
-        /* Potential QRS detected - update signal peak estimate
-         * During learning: fast adaptation (50% old + 50% new)
-         * After learning: slow adaptation (87.5% old + 12.5% new) */
-        batches_since_qrs = 0;  /* Reset timeout counter */
-
-        if (learning_beat_count < QRS_LEARNING_BEATS) {
-            signal_peak_estimate = (signal_peak_estimate + max_val) / 2;
-            learning_beat_count++;
-            LOG_INF("Learning beat %u: peak=%d, new_sig_est=%d",
-                    learning_beat_count, max_val, signal_peak_estimate);
-        } else {
-            signal_peak_estimate = (signal_peak_estimate * 7 + max_val) / 8;
+    /* Phases */
+    if (qrs.phase == QRS_PHASE_SETTLE) {
+        if (n + 1U >= QRS_SETTLE_SAMPLES) {
+            qrs_start_learning(n + 1U);
         }
-
-        *detected_index = max_idx;
-        ecg_state.in_refractory = true;
-
-        LOG_DBG("QRS detected: peak=%d, thresh=%d", max_val, adaptive_threshold);
-
-        return 1;  /* QRS detected */
-    } else {
-        /* No QRS - this peak is noise, update noise estimate
-         * Use faster adaptation during learning */
-        if (learning_beat_count < QRS_LEARNING_BEATS) {
-            noise_peak_estimate = (noise_peak_estimate + max_val) / 2;
-        } else {
-            noise_peak_estimate = (noise_peak_estimate * 7 + max_val) / 8;
+    } else if (qrs.phase == QRS_PHASE_LEARN) {
+        if (mwi > qrs.learn_max) {
+            qrs.learn_max = mwi;
         }
-    }
-
-    /* Slowly decay signal estimate if no QRS detected for a while
-     * This handles the case where leads are disconnected */
-    if (ecg_state.batches_processed % 32 == 0 && learning_beat_count >= QRS_LEARNING_BEATS) {
-        /* Decay signal estimate by ~3% */
-        signal_peak_estimate = (signal_peak_estimate * 31) / 32;
-
-        /* Don't let signal estimate fall below noise + minimum gap */
-        if (signal_peak_estimate < noise_peak_estimate + QRS_THRESHOLD_MIN) {
-            signal_peak_estimate = noise_peak_estimate + QRS_THRESHOLD_MIN;
+        qrs.learn_sum += mwi;
+        qrs.learn_count++;
+        if (bp > qrs.learn_bp_pos) {
+            qrs.learn_bp_pos = bp;
+        }
+        if (-bp > qrs.learn_bp_neg) {
+            qrs.learn_bp_neg = -bp;
+        }
+        if (qrs.learn_count >= QRS_LEARN_SAMPLES) {
+            if (qrs.learn_max / 3 < QRS_MIN_PEAK) {
+                /* Nothing QRS-sized in 2 s (flat line, leads off): keep
+                 * learning rather than adopt thresholds of ~0. */
+                qrs_start_learning(n + 1U);
+            } else {
+                qrs.polarity = (qrs.learn_bp_neg > qrs.learn_bp_pos) ? -1.0f : 1.0f;
+                qrs.spki = qrs.learn_max / 3;
+                qrs.npki = qrs.learn_sum / (int64_t)qrs.learn_count / 2;
+                qrs_update_thr();
+                qrs.phase = QRS_PHASE_RUN;
+                qrs.phase_start = n + 1U;
+                qrs.sb_val = 0;
+                LOG_INF("QRS thresholds learnt: spki=%d npki=%d thr=%d polarity=%d",
+                        (int)qrs.spki, (int)qrs.npki, (int)qrs.thr1,
+                        (int)qrs.polarity);
+            }
         }
     }
 
-    return 0;  /* No QRS detected */
-}
-
-/*----------------------------------------------------------------------------*/
-/* Signal Processing Functions                                                */
-/*----------------------------------------------------------------------------*/
-
-static int apply_bandpass_filter(const int32_t *input, int32_t *output, size_t count)
-{
-    /* Second-difference high-pass (y[n] = x[n] - 2x[n-1] + x[n-2]) drawn from
-     * the 256-sample circular buffer so filtering is continuous across
-     * batches. buffer_index is the next write slot, so the newest sample is
-     * at buffer_index-1. */
-    size_t newest_idx = (ecg_state.buffer_index + ECG_BUFFER_SIZE - 1) % ECG_BUFFER_SIZE;
-
-    for (size_t i = 0; i < count; i++) {
-        /* Calculate position of this sample and previous samples in circular buffer */
-        size_t offset = count - 1 - i;  /* How far back from newest sample */
-        size_t curr_idx = (newest_idx + ECG_BUFFER_SIZE - offset) % ECG_BUFFER_SIZE;
-        size_t prev1_idx = (curr_idx + ECG_BUFFER_SIZE - 1) % ECG_BUFFER_SIZE;
-        size_t prev2_idx = (curr_idx + ECG_BUFFER_SIZE - 2) % ECG_BUFFER_SIZE;
-
-        /* Simple 3-tap high-pass filter: emphasizes changes, removes DC */
-        int32_t curr = ecg_state.ecg_buffer[curr_idx];
-        int32_t prev1 = ecg_state.ecg_buffer[prev1_idx];
-        int32_t prev2 = ecg_state.ecg_buffer[prev2_idx];
-
-        /* High-pass: y[n] = x[n] - 2*x[n-1] + x[n-2] (second difference) */
-        output[i] = curr - 2 * prev1 + prev2;
-    }
-
-    return 0;
-}
-
-static int calculate_derivative(const int32_t *input, int32_t *output, size_t count)
-{
-    /* 5-point derivative: y[n] = (-x[n-2] - 2*x[n-1] + 2*x[n+1] + x[n+2]) / 8.
-     * Batch edges clamp to the first/last valid sample. */
-    for (size_t i = 0; i < count; i++) {
-        /* Get indices, clamping to valid range */
-        size_t im2 = (i >= 2) ? (i - 2) : 0;
-        size_t im1 = (i >= 1) ? (i - 1) : 0;
-        size_t ip1 = (i + 1 < count) ? (i + 1) : (count - 1);
-        size_t ip2 = (i + 2 < count) ? (i + 2) : (count - 1);
-
-        output[i] = (-input[im2] - 2*input[im1] + 2*input[ip1] + input[ip2]) / 8;
-    }
-
-    return 0;
-}
-
-static int square_signal(const int32_t *input, int32_t *output, size_t count)
-{
-    /* Square each sample (amplifies QRS, suppresses noise). No post-division:
-     * it would lose small values needed for detection. Values fit in int32_t
-     * (max derivative ~1000 → 1,000,000 squared). */
-    for (size_t i = 0; i < count; i++) {
-        int64_t squared = (int64_t)input[i] * input[i];
-        /* No division - keep small values for proper detection */
-        output[i] = (int32_t)squared;
-    }
-
-    return 0;
-}
-
-static int moving_window_integration(const int32_t *input, int32_t *output, size_t count)
-{
-    /* Moving window integration (150ms window @ 500Hz = 75 samples)
-     * For batch processing, use smaller window (8 samples)
-     */
-    const size_t window = 8;
-    
-    for (size_t i = 0; i < count; i++) {
-        int64_t sum = 0;
-        size_t window_start = (i >= window) ? (i - window) : 0;
-        
-        for (size_t j = window_start; j <= i; j++) {
-            sum += input[j];
+    /* Peak picking: follow the integrator down to a valley, then up to a
+     * maximum; confirm the maximum once QRS_PEAK_CONFIRM samples have passed
+     * without a larger value. */
+    if (!qrs.cand_rising) {
+        if (mwi < qrs.cand_val || n == 0) {
+            qrs.cand_val = mwi;
+            qrs.cand_idx = n;
+        } else if (mwi > qrs.cand_val) {
+            qrs.cand_rising = true;
+            qrs.cand_val = mwi;
+            qrs.cand_idx = n;
+            qrs_candidate_window(n);
         }
-        
-        output[i] = (int32_t)(sum / (i - window_start + 1));
+    } else if (mwi > qrs.cand_val) {
+        qrs.cand_val = mwi;
+        qrs.cand_idx = n;
+        qrs_candidate_window(n);
+    } else if (n - qrs.cand_idx >= QRS_PEAK_CONFIRM) {
+        if (qrs_classify(qrs.cand_val, qrs.cand_fid, qrs.cand_slope)) {
+            *qrs_sample = qrs.cand_fid;
+            found = true;
+        }
+        qrs.cand_rising = false;
+        qrs.cand_val = mwi;
+        qrs.cand_idx = n;
     }
-    
-    return 0;
+
+    if (qrs.phase != QRS_PHASE_RUN || found) {
+        return found;
+    }
+
+    /* Searchback: overdue by 1.66 mean RR -> the largest noise peak since the
+     * last QRS, if it clears THR1 / 2, was a QRS. */
+    if (qrs.have_qrs && qrs.rr_avg != 0 && qrs.sb_val > qrs.thr1 / 2 &&
+        n - qrs.last_qrs > (uint64_t)qrs.rr_avg * 166U / 100U) {
+        uint64_t idx = qrs.sb_idx;
+
+        qrs.spki = (qrs.sb_val + 3 * qrs.spki) / 4;
+        qrs_update_thr();
+        qrs_accept(idx, qrs.sb_slope);
+        *qrs_sample = idx;
+        return true;
+    }
+
+    /* Nothing for QRS_RELEARN_SAMPLES (from the last QRS, or from the start
+     * of this run): start again from fresh thresholds. */
+    uint64_t since = qrs.have_qrs && qrs.last_qrs > qrs.phase_start ?
+                     qrs.last_qrs : qrs.phase_start;
+    if (n > since && n - since > QRS_RELEARN_SAMPLES) {
+        LOG_WRN("QRS: none for %u ms, relearning thresholds",
+                (unsigned)((n - since) * 1000U / QRS_FS));
+        qrs_start_learning(n + 1U);
+    }
+
+    return false;
 }
 
 static uint8_t assess_signal_quality(const int32_t *samples, size_t count)
