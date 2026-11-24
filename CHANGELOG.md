@@ -8,7 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions here are the **firmware** version reported by the device
 (`app_m7/VERSION`, `app_m4/VERSION`) and carried in the release bundle.
 
-## [Unreleased]
+## [1.0.1] — 2026-11-24
+
+A vitals release. In 1.0.0 the ECG heart rate and HRV were never reported on
+v5, and SpO₂ was blank or wrong; the causes are below. Both cores move to
+1.0.1; the ESP32-C6 image is unchanged.
+
+**Update** from 1.0.0 with `healthypi fw update --port <CDC1> --bundle <1.0.1 bundle>`.
+MCUboot accepts 1.0.1 over 1.0.0.
+
+### Validation
+- **ECG heart rate / HRV**: validated on the host, **not yet on hardware with
+  electrodes**. The new QRS detector passes 19 synthetic cases (40–180 BPM,
+  the v5 250 Hz alternation, mains, wander, small and tall waves, amplitude
+  steps, flat line) with beats timed to < 1 ms. Replaying a 30 s capture from
+  a failing 1.0.0 unit gives 80 BPM on leads I, II and V1, where 1.0.0
+  accepted 0 of 115 intervals. The M7 vitals arbiter host tests pass.
+  Whether the ADS1294R CONFIG1 change removes the 250 Hz alternation at the
+  source is still to be confirmed on a unit; the detector rejects it either way.
+- **PPG / SpO₂**: validated on a v5 unit with a finger in: PPG pulse rate
+  71–72 BPM, R 0.66–0.68 steady across rounds, SpO₂ 94–95 % (uncalibrated).
 
 ### Fixed
 - **ECG heart rate and HRV were never reported on v5 (ADS1294R + M4).** Two
@@ -61,6 +80,22 @@ Versions here are the **firmware** version reported by the device
   generic R-to-SpO₂ curve, which has not been calibrated on this AFE and probe
   against a reference oximeter; near R ≈ 0.1–0.35 the curve reads 97–100 %
   for any value. Do not use it as a clinical measurement.
+
+### Known limitations
+- **SpO₂ is uncalibrated** and labelled so. Maxim's generic R-to-SpO₂ curve
+  has not been calibrated on this AFE and probe against a reference oximeter.
+  Do not use it as a clinical measurement.
+- **The PPG pulse rate halves above about 80 BPM** (the peak finder requires
+  0.75 s between peaks, a dicrotic-notch guard). SpO₂ is unaffected, and with
+  ECG leads on the displayed heart rate comes from the ECG.
+- **Below about 50 BPM** a 2 s PPG window can hold a single beat, and the PPG
+  reading drops out for that window.
+- **ECG on hardware**: see Validation above.
+- **1.0.0 data**: in streams and recordings made by 1.0.0 the PPG `red` and
+  `ir` fields are swapped, and both are raw LED samples (no ambient
+  subtraction). See `docs/HP6_DATA_FORMAT.md`.
+- The 1.0.0 limitations on HRV ectopic filtering, slow heart rates and SD card
+  hot-insert still apply.
 
 ## [1.0.0] — 2026-11-22
 
