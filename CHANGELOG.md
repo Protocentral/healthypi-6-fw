@@ -24,8 +24,19 @@ Versions here are the **firmware** version reported by the device
     inverting R, in the bus, the `.HP6` stream and recordings too. **Data from
     1.0.0 has the two PPG fields swapped.** The LED currents, set asymmetric
     to compensate, are equal again (15.6 mA).
-  Host regression `app_m4/tests/hrv/test_spo2.py` runs in CI. The SpO₂ curve
-  is still uncalibrated for this AFE and probe.
+  - PPG values carried ambient light and the receiver offset (~88 % of the
+    red reading with a finger in), which deflated R and made it drift. Each
+    PPG sample is now its LED phase minus that LED's ambient phase, on the
+    bus, in the `.HP6` stream and in recordings.
+  Host regression `app_m4/tests/hrv/test_spo2.py` runs in CI. Bench, v5 with
+  a finger in: pulse rate 66–74 BPM matching the PPG, R steady at ~0.17.
+
+### Changed
+- **SpO₂ is labelled uncalibrated** on the device screens (`SPO2 UNCAL`), in
+  the `.HP6` format documentation and in the CLI. It comes from Maxim's
+  generic R-to-SpO₂ curve, which has not been calibrated on this AFE and probe
+  against a reference oximeter; near R ≈ 0.1–0.35 the curve reads 97–100 %
+  for any value. Do not use it as a clinical measurement.
 
 ## [1.0.0] — 2026-11-22
 

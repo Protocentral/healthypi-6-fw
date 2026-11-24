@@ -276,7 +276,7 @@ lv_obj_t *hpi_scr_home_create(lv_obj_t *parent)
 	lv_obj_set_flex_flow(chips, LV_FLEX_FLOW_COLUMN);
 
 	lv_obj_t *r1 = chip_row(chips);
-	chip_create(&s_h.spo2, r1, HPI_SYM_SPO2, "%",           "SPO2", HPI_M3_SIG_SPO2,
+	chip_create(&s_h.spo2, r1, HPI_SYM_SPO2, "%",           "SPO2 UNCAL", HPI_M3_SIG_SPO2,
 		    HPI_TREND_SPO2);
 	chip_create(&s_h.resp, r1, HPI_SYM_RESP, "/MIN",        "RESP", HPI_M3_SIG_RESP,
 		    HPI_TREND_RESP);

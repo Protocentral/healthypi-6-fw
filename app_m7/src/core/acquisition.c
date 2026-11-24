@@ -262,10 +262,18 @@ static void ppg_publish(const struct afe4400_encoded_data *d)
      * as IR and LED2VAL as red; the LEDCNTRL comment in drivers/sensor/afe4400
      * says the same; and the published "red" carried ~3x the pulse amplitude of
      * the published "IR" at equal LED current, where real red is the smaller.
-     * Bench check: finger on, R (ppg dbg line) ~0.4-0.7. */
+     *
+     * Each channel is the LED phase minus its own ambient phase (ALED2 for
+     * red, ALED1 for IR), sampled with the LED off a few hundred microseconds
+     * apart: only light from the LED is left. Raw LED values carry ambient
+     * light and the TIA's offset too, and on v5 with a finger in that was
+     * ~545k of a ~620k red reading (bench, 2026-11-24). Dividing the pulse by
+     * that inflated DC made R ~0.05 and drift with it; ambient-subtracted it
+     * is steady (~0.17 on the same finger). The difference of two 22-bit
+     * samples fits int32. */
     ppg_batch[ppg_n] = (struct hp6_ppg_sample){
-        .red = sext22(d->led2_val),
-        .ir  = sext22(d->led1_val),
+        .red = sext22(d->led2_val) - sext22(d->amb2_val),
+        .ir  = sext22(d->led1_val) - sext22(d->amb1_val),
         .lead_off = 0,   /* TODO(hw): derive from diag_val if needed */
     };
     if (++ppg_n < PPG_BATCH) {
