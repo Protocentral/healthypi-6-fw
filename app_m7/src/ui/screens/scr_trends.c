@@ -29,7 +29,7 @@ static const struct {
 	uint16_t    scale;         /* real value = stored / scale (Temp x10) */
 } VMETA[V_N] = {
 	{ "HR",   "BPM",         40,  180, 1  },
-	{ "SPO2", "%",           80,  100, 1  },
+	{ "SPO2 UNCAL", "%",           80,  100, 1  },
 	{ "RESP", "/MIN",        5,   40,  1  },
 	{ "TEMP", "\xC2\xB0" "C", 340, 420, 10 },
 };

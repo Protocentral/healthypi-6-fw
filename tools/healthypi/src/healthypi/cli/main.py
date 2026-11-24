@@ -565,7 +565,7 @@ def cmd_wifi_stream_monitor(args) -> int:
         print(
             f"seq={pkt.seq:<8} ecg={pkt.ecg1:>9} resp={pkt.respiration:>7} "
             f"red={pkt.ppg_red:>8} ir={pkt.ppg_ir:>8} "
-            f"hr={pkt.heart_rate:>3} spo2={pkt.spo2:>3}"
+            f"hr={pkt.heart_rate:>3} spo2(uncal)={pkt.spo2:>3}"
         )
 
     cb = show if args.verbose else None

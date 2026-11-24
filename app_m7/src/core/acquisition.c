@@ -253,9 +253,26 @@ static void ppg_publish(const struct afe4400_encoded_data *d)
     if (ppg_n == 0) {
         ppg_t0_us = (uint64_t)k_uptime_get() * 1000ULL;
     }
+    /* LED1 is IR and LED2 is red. These were the other way round until
+     * 1.0.1, which put red in the IR field and vice versa everywhere -- bus,
+     * .HP6 stream, recordings and the M4's R ratio (inverted: a healthy ~0.5
+     * read ~2-3, the "R far too high" of the 2026-08 bench session that the
+     * asymmetric LED currents in the AFE4400 driver were set to fight).
+     * Evidence: HealthyPi 5 (same AFE4400, same probe connector) reads LED1VAL
+     * as IR and LED2VAL as red; the LEDCNTRL comment in drivers/sensor/afe4400
+     * says the same; and the published "red" carried ~3x the pulse amplitude of
+     * the published "IR" at equal LED current, where real red is the smaller.
+     *
+     * Each channel is the LED phase minus its own ambient phase (ALED2 for
+     * red, ALED1 for IR), sampled with the LED off a few hundred microseconds
+     * apart: only light from the LED is left. Raw LED values carry ambient
+     * light and the receiver's offset too -- on v5 with a finger in, most of
+     * the red reading (bench, 2026-11-24) -- and dividing the pulse by that
+     * inflated DC deflates R and makes it drift with the offset. The
+     * difference of two 22-bit samples fits int32. */
     ppg_batch[ppg_n] = (struct hp6_ppg_sample){
-        .red = sext22(d->led1_val),
-        .ir  = sext22(d->led2_val),
+        .red = sext22(d->led2_val) - sext22(d->amb2_val),
+        .ir  = sext22(d->led1_val) - sext22(d->amb1_val),
         .lead_off = 0,   /* TODO(hw): derive from diag_val if needed */
     };
     if (++ppg_n < PPG_BATCH) {

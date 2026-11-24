@@ -296,6 +296,8 @@ class VitalsSample(Sample):
 
     @property
     def spo2_or_none(self) -> float | None:
+        """SpO2 in percent, or None. UNCALIBRATED: a generic R curve, never
+        calibrated on HealthyPi 6 against a reference oximeter."""
         return self.spo2_x10 / 10.0 if self.spo2_x10 else None
 
     @property

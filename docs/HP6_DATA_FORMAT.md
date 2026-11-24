@@ -135,8 +135,8 @@ not "attached".
 
 ```c
 struct ppg_sample {
-    int32_t red;        /* LED1, raw ADC counts */
-    int32_t ir;         /* LED2, raw ADC counts */
+    int32_t red;        /* red LED (AFE4400 LED2) minus ambient, ADC counts */
+    int32_t ir;         /* IR LED (AFE4400 LED1) minus ambient, ADC counts */
     uint8_t lead_off;
     uint8_t _pad[3];
 };
@@ -144,15 +144,22 @@ struct ppg_sample {
 
 Python: `struct.unpack("<2iB3x", buf)`
 
-**Raw counts, not a physical unit** — 22-bit signed values sign-extended into
-int32. Do not scale them; compute ratios.
+**ADC counts, not a physical unit.** Each value is the LED sample minus the
+ambient sample the AFE4400 takes with that LED off, so it is the light the LED
+contributed: ambient light and the receiver's offset are removed. Do not scale
+them; compute ratios.
+
+**Firmware 1.0.0 differs in two ways.** Its `red` holds the IR channel and its
+`ir` holds red (swap them back), and both are raw LED samples (22-bit,
+sign-extended) with ambient and offset still in them, so their DC is not
+comparable with 1.0.1 data.
 
 ### VITALS — 16 bytes
 
 ```c
 struct vitals_sample {
     uint16_t hr_bpm;         /* heart rate, bpm */
-    uint16_t spo2_x10;       /* SpO2 percent × 10  (975 = 97.5 %) */
+    uint16_t spo2_x10;       /* SpO2 percent × 10  (975 = 97.5 %), UNCALIBRATED */
     uint16_t rr_bpm;         /* breaths/min; 0 = not locked / RA,LA,LL off */
     int16_t  temp_c_x100;    /* °C × 100; 0 = AS6221 unplugged / not ready */
     uint16_t hrv_sdnn_ms;    /* SDNN, milliseconds */
@@ -171,6 +178,10 @@ Python: `struct.unpack("<HHHhHHHBx", buf)` → `(hr_bpm, spo2_x10, rr_bpm, temp_
 > in healthy young adults at rest and routinely in atrial fibrillation, and a
 > clamped 255 could not be distinguished from a measured one. The payload grew
 > 12 B → 16 B.
+
+**`spo2_x10` is uncalibrated.** It comes from a generic R-to-SpO₂ curve that
+has not been calibrated on HealthyPi 6's AFE and probe against a reference
+oximeter. Present it as uncalibrated, never as a clinical measurement.
 
 **Zero means "not available", not "measured zero."** `rr_bpm` is 0 until the
 thoracic-Z detector has a 6–40 bpm estimate, and while RA/LA/LL are off.

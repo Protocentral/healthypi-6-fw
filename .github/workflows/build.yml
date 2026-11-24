@@ -75,6 +75,10 @@ jobs:
         env:
           CMSIS_DSP: ${{ github.workspace }}/cmsis-dsp
         run: python3 app_m4/tests/hrv/test_qrs.py
+      # The SpO2 module, raw red/IR PPG in: R independent of the DC levels,
+      # the R -> SpO2 table indexed correctly, no number without a pulse.
+      - name: M4 SpO2 reads the right value from a clean PPG
+        run: python3 app_m4/tests/hrv/test_spo2.py
 
   no-private-keys:
     runs-on: ubuntu-latest

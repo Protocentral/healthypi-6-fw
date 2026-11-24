@@ -1,6 +1,6 @@
 /*
  * Host shim for the subset of <zephyr/kernel.h> that app_m4/src/algorithm_module.c
- * touches. Only the HRV maths is exercised on the host; the kernel objects
+ * and spo2_module.c touch. Only the HRV maths is exercised on the host; the kernel objects
  * below exist so the module compiles unmodified, and are never run.
  *
  * SPDX-License-Identifier: MIT
@@ -32,6 +32,8 @@ typedef int k_tid_t;
 extern uint32_t hpi_host_uptime_ms;
 
 static inline uint32_t k_uptime_get_32(void) { return hpi_host_uptime_ms; }
+static inline int64_t k_uptime_get(void) { return hpi_host_uptime_ms; }
+static inline void k_yield(void) { }
 static inline uint32_t k_cycle_get_32(void) { return 0; }
 static inline uint32_t k_cyc_to_us_floor32(uint32_t c) { return c; }
 static inline int k_msgq_get(struct k_msgq *q, void *d, int t) { (void)q; (void)d; (void)t; return -EAGAIN; }
