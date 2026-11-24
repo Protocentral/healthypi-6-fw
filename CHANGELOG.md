@@ -22,14 +22,22 @@ Versions here are the **firmware** version reported by the device
     read "--".
   - Red and IR were swapped at the source (`red` carried LED1, which is IR),
     inverting R, in the bus, the `.HP6` stream and recordings too. **Data from
-    1.0.0 has the two PPG fields swapped.** The LED currents, set asymmetric
-    to compensate, are equal again (15.6 mA).
-  - PPG values carried ambient light and the receiver offset (~88 % of the
-    red reading with a finger in), which deflated R and made it drift. Each
-    PPG sample is now its LED phase minus that LED's ambient phase, on the
-    bus, in the `.HP6` stream and in recordings.
+    1.0.0 has the two PPG fields swapped.**
+  - **The AFE4400 timing put the wrong phases in the result registers.** A
+    custom compressed pattern converted each phase during its own sampling
+    window, so red and IR pulsed in anti-phase (impossible for a real pulse)
+    and R swung between 2.5 and 10 at one placement. It is now TI's standard
+    four-phase timing, as on HealthyPi 5. The LED currents, set asymmetric to
+    chase R, are 3.9 mA each (HealthyPi 5's); 15.6 mA clipped the IR channel
+    with a finger in.
+  - PPG values carried ambient light and the receiver offset, which deflated
+    R and made it drift. Each PPG sample is now its LED phase minus that
+    LED's ambient phase, on the bus, in the `.HP6` stream and in recordings.
+    The M4's "saturated" limit moved from 1M to 1.9M counts to match.
   Host regression `app_m4/tests/hrv/test_spo2.py` runs in CI. Bench, v5 with
-  a finger in: pulse rate 66–74 BPM matching the PPG, R steady at ~0.17.
+  a finger in, timings alternated at one placement: red and IR in step
+  (r = +1.00), R 0.66–0.68 in both rounds, PPG pulse rate 71–72 BPM, SpO₂
+  94–95 % (uncalibrated).
 
 ### Changed
 - **SpO₂ is labelled uncalibrated** on the device screens (`SPO2 UNCAL`), in

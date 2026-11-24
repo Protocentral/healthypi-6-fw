@@ -23,21 +23,14 @@ LOG_MODULE_REGISTER(afe4400, LOG_LEVEL_INF);
  * asserts DATA_READY once, so the PRF *is* the PPG sample rate. Derived from
  * CONFIG_AFE4400_PRF_HZ so there is exactly one place to set the rate.
  *
- * Only the period scales. The LED / ambient / convert phase timings below are
- * intentionally NOT scaled: they encode tuned optical behaviour, so keeping
- * them fixed makes every sample identical at any PRF -- a slower rate just
- * idles longer between acquisitions (and drops average LED power).
+ * The whole acquisition pattern scales with the period: it is TI's standard
+ * four-phase timing, one quarter per phase (see afe4400_init_registers()).
  */
 #define AFE4400_TIMER_CLK_HZ   4000000U
 #define AFE4400_PRPCOUNT       ((AFE4400_TIMER_CLK_HZ / CONFIG_AFE4400_PRF_HZ) - 1U)
 
-/* The acquisition pattern occupies counts 0..1650 (ALED1/ADCRST3 end), so the
- * period must contain it -- that bounds the maximum PRF. PRPCOUNT is a 16-bit
- * register field, which bounds the minimum. */
-#define AFE4400_PATTERN_END_CT 1650U
-BUILD_ASSERT(AFE4400_PRPCOUNT > AFE4400_PATTERN_END_CT,
-	     "CONFIG_AFE4400_PRF_HZ too high: the acquisition pattern would not "
-	     "fit inside one pulse repetition period");
+/* PRPCOUNT is a 16-bit register field, which bounds the minimum PRF. The
+ * maximum is the AFE's own (2000 Hz); Kconfig limits the range. */
 BUILD_ASSERT(AFE4400_PRPCOUNT <= 65535U,
 	     "CONFIG_AFE4400_PRF_HZ too low: PRPCOUNT exceeds the 16-bit field");
 
@@ -192,112 +185,6 @@ int afe4400_powerdown(const struct device *dev, bool powerdown)
 
     /* Wait for power state to settle */
     k_msleep(10);
-    return 0;
-}
-
-/* Configure timing registers for typical pulse oximetry application */
-int afe4400_configure_timing(const struct device *dev)
-{
-    int rc;
-
-    /* Dual-LED timing per the AFE4400 datasheet Table 2 example.
-     * All values are 4 MHz clock counts (0.25 us per count). */
-
-    /* LED2 (typically IR) timing - Phase 1 */
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2STC, 50); /* LED2 start at 12.5us */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2ENDC, 399); /* LED2 end at 99.75us */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2LEDSTC, 50); /* LED2 LED start */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2LEDENDC, 399); /* LED2 LED end */
-    if (rc < 0)
-        return rc;
-
-    /* ALED2 (ambient for LED2) timing - Phase 2 */
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED2STC, 450); /* ALED2 start at 112.5us */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED2ENDC, 799); /* ALED2 end at 199.75us */
-    if (rc < 0)
-        return rc;
-
-    /* LED1 (typically RED) timing - Phase 3 */
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1STC, 850); /* LED1 start at 212.5us */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1ENDC, 1199); /* LED1 end at 299.75us */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1LEDSTC, 850); /* LED1 LED start */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1LEDENDC, 1199); /* LED1 LED end */
-    if (rc < 0)
-        return rc;
-
-    /* ALED1 (ambient for LED1) timing - Phase 4 */
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED1STC, 1250); /* ALED1 start at 312.5us */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED1ENDC, 1599); /* ALED1 end at 399.75us */
-    if (rc < 0)
-        return rc;
-
-    /* ADC conversion timing */
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2CONVST, 80); /* LED2 conversion start */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2CONVEND, 399); /* LED2 conversion end */
-    if (rc < 0)
-        return rc;
-
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED2CONVST, 480); /* ALED2 conversion start */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED2CONVEND, 799); /* ALED2 conversion end */
-    if (rc < 0)
-        return rc;
-
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1CONVST, 880); /* LED1 conversion start */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1CONVEND, 1199); /* LED1 conversion end */
-    if (rc < 0)
-        return rc;
-
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED1CONVST, 1280); /* ALED1 conversion start */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED1CONVEND, 1599); /* ALED1 conversion end */
-    if (rc < 0)
-        return rc;
-
-    /* ADC reset timing */
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTSTCT0, 0); /* ADC reset start */
-    if (rc < 0)
-        return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTENDCT0, 79); /* ADC reset end */
-    if (rc < 0)
-        return rc;
-
-    /* Pattern repeat count - sets the PRF (Pulse Repetition Frequency).
-     * NOTE: this function is currently unused -- afe4400_init() configures the
-     * device through afe4400_init_registers() instead. Kept in sync with the
-     * live path so it cannot silently reintroduce a rate mismatch if wired up. */
-    rc = afe4400_reg_write(dev, AFE4400_REG_PRPCOUNT, AFE4400_PRPCOUNT);
-    if (rc < 0)
-        return rc;
-
-    /* Enable timer and set clock alarm pin configuration */
-    rc = afe4400_reg_write(dev, AFE4400_REG_CONTROL1, AFE4400_CONTROL1_TIMEREN);
-    if (rc < 0)
-        return rc;
-
-    LOG_DBG("AFE4400 timing configuration completed");
     return 0;
 }
 
@@ -539,96 +426,89 @@ int afe4400_init_registers(const struct device *dev)
     if (rc < 0) return rc;
     
     /* LEDCNTRL: LED1 (IR) current in bits 15:8, LED2 (red) in bits 7:0.
-     * 0x50 = 15.6 mA each.
+     * 0x14 = 3.9 mA each, as on HealthyPi 5.
      *
-     * WAS 0x005014 (IR 15.6 mA, red 3.9 mA), "deliberately asymmetric" because
-     * equal currents gave an R ratio "far above the valid range". That R was
-     * an artefact of two bugs fixed in 1.0.1, not of the optics: the M7
-     * published red and IR swapped (inverting R), and the M4 computed R with
-     * a 2^21 offset in both DCs (making R ~ AC_red/AC_ir). Starving red to
-     * 3.9 mA cost it most of its pulse; the 2026-08 bench session found equal
-     * 15.6 mA gave real AC on both channels. R is a ratio of AC/DC per channel,
-     * so LED current cancels out of it: set currents for signal, not for R. */
-    rc = afe4400_reg_write(dev, AFE4400_REG_LEDCNTRL, 0x005050); /* IR (LED1) and red (LED2) 15.6 mA */
+     * WAS 0x005014 (IR 15.6 mA, red 3.9 mA), "deliberately asymmetric" to get
+     * R into range -- but that R was an artefact of the bugs fixed in 1.0.1
+     * (the conversion timing below, red/IR swapped, a 2^21 offset in the
+     * M4's DC). R is AC/DC per channel, so LED current cancels out of it: set
+     * currents for headroom and signal, not for R. Bench, v5, finger in,
+     * 2026-11-24: 15.6 mA clipped the IR channel at some placements (pulse
+     * flattened, M4 reports saturated, everything blank); 3.9 mA sat at about
+     * half scale with a 3-4 % pulse on both channels. */
+    rc = afe4400_reg_write(dev, AFE4400_REG_LEDCNTRL, 0x001414); /* IR (LED1) and red (LED2) 3.9 mA */
     if (rc < 0) return rc;
     
     rc = afe4400_reg_write(dev, AFE4400_REG_CONTROL2, 0x000000); /* LED_RANGE=100mA, LED=50mA */
     if (rc < 0) return rc;
     
-    rc = afe4400_reg_write(dev, AFE4400_REG_CONTROL1, 0x010707); /* Timers ON, average 3 samples */
+    rc = afe4400_reg_write(dev, AFE4400_REG_CONTROL1, 0x010707); /* Timers ON, NUMAV 7 = average 8 conversions */
     if (rc < 0) return rc;
     
     /* Pulse repetition period = PPG sample period. See AFE4400_PRPCOUNT. */
     rc = afe4400_reg_write(dev, AFE4400_REG_PRPCOUNT, AFE4400_PRPCOUNT);
     if (rc < 0) return rc;
 
-    /* LED2 (red) timing - Phase 1 */
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2STC, 50);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2ENDC, 399);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2LEDSTC, 50);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2LEDENDC, 399);
-    if (rc < 0) return rc;
-    
-    /* ALED2 (ambient for LED2) timing - Phase 2 */
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED2STC, 450);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED2ENDC, 799);
-    if (rc < 0) return rc;
-    
-    /* LED1 (IR) timing - Phase 3 */
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1STC, 850);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1ENDC, 1199);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1LEDSTC, 850);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1LEDENDC, 1199);
-    if (rc < 0) return rc;
-    
-    /* ALED1 (ambient for LED1) timing - Phase 4 */
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED1STC, 1250);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED1ENDC, 1599);
-    if (rc < 0) return rc;
-    
-    /* ADC conversion timing */
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2CONVST, 80);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED2CONVEND, 399);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED2CONVST, 480);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED2CONVEND, 799);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1CONVST, 880);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_LED1CONVEND, 1199);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED1CONVST, 1280);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ALED1CONVEND, 1599);
-    if (rc < 0) return rc;
-    
-    /* ADC reset timing */
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTSTCT0, 0);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTENDCT0, 79);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTSTCT1, 850);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTENDCT1, 850);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTSTCT2, 1250);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTENDCT2, 1250);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTSTCT3, 1650);
-    if (rc < 0) return rc;
-    rc = afe4400_reg_write(dev, AFE4400_REG_ADCRSTENDCT3, 1650);
-    if (rc < 0) return rc;
+    /* Timing engine: TI's standard four-phase pattern (the AFE4400 datasheet
+     * example, and what HealthyPi 5 programs), scaled to the period. Q is a
+     * quarter period. Each quarter samples one phase -- ALED2, LED1, ALED1,
+     * LED2 -- with the LED on for its whole quarter, and CONVERTS the phase
+     * sampled in the quarter before it, after an ADC reset at the boundary.
+     *
+     * Before 1.0.1 this was a compressed custom pattern (87.5 us LED pulses,
+     * each phase converted DURING its own sampling window, ADC resets mid-
+     * pattern). The AFE converts what was held from the previous phase, so the
+     * result registers did not hold the phases their names say. Bench, v5,
+     * finger in, same placement, timings alternated (2026-11-24): the custom
+     * pattern gave red and IR pulsing in ANTI-phase (r = -0.98) -- impossible
+     * for a blood-volume pulse -- with R jumping 2.5 / 10.4; this one gave
+     * r = +1.00 and R 0.66-0.68 in both rounds. */
+    {
+        const uint32_t Q = (AFE4400_PRPCOUNT + 1U) / 4U;
+        const struct {
+            uint8_t reg;
+            uint32_t val;
+        } t[] = {
+            /* LED2 (red): sample in Q3, convert in Q0 (next period) */
+            { AFE4400_REG_LED2STC,      3U * Q },
+            { AFE4400_REG_LED2ENDC,     4U * Q - 2U },
+            { AFE4400_REG_LED2LEDSTC,   3U * Q },
+            { AFE4400_REG_LED2LEDENDC,  4U * Q - 1U },
+            { AFE4400_REG_LED2CONVST,   2U },
+            { AFE4400_REG_LED2CONVEND,  Q - 1U },
+            /* ALED2 (ambient after red): sample in Q0, convert in Q1 */
+            { AFE4400_REG_ALED2STC,     0U },
+            { AFE4400_REG_ALED2ENDC,    Q - 2U },
+            { AFE4400_REG_ALED2CONVST,  Q + 2U },
+            { AFE4400_REG_ALED2CONVEND, 2U * Q - 1U },
+            /* LED1 (IR): sample in Q1, convert in Q2 */
+            { AFE4400_REG_LED1STC,      Q },
+            { AFE4400_REG_LED1ENDC,     2U * Q - 2U },
+            { AFE4400_REG_LED1LEDSTC,   Q },
+            { AFE4400_REG_LED1LEDENDC,  2U * Q - 1U },
+            { AFE4400_REG_LED1CONVST,   2U * Q + 2U },
+            { AFE4400_REG_LED1CONVEND,  3U * Q - 1U },
+            /* ALED1 (ambient after IR): sample in Q2, convert in Q3 */
+            { AFE4400_REG_ALED1STC,     2U * Q },
+            { AFE4400_REG_ALED1ENDC,    3U * Q - 2U },
+            { AFE4400_REG_ALED1CONVST,  3U * Q + 2U },
+            { AFE4400_REG_ALED1CONVEND, 4U * Q - 1U },
+            /* ADC reset at each quarter boundary */
+            { AFE4400_REG_ADCRSTSTCT0,  0U },
+            { AFE4400_REG_ADCRSTENDCT0, 0U },
+            { AFE4400_REG_ADCRSTSTCT1,  Q },
+            { AFE4400_REG_ADCRSTENDCT1, Q },
+            { AFE4400_REG_ADCRSTSTCT2,  2U * Q },
+            { AFE4400_REG_ADCRSTENDCT2, 2U * Q },
+            { AFE4400_REG_ADCRSTSTCT3,  3U * Q },
+            { AFE4400_REG_ADCRSTENDCT3, 3U * Q },
+        };
+
+        for (size_t i = 0; i < ARRAY_SIZE(t); i++) {
+            rc = afe4400_reg_write(dev, t[i].reg, t[i].val);
+            if (rc < 0) return rc;
+        }
+    }
 
     /* Enable SPI_READ for register readback */
     rc = afe4400_reg_write(dev, AFE4400_REG_CONTROL0, AFE4400_CONTROL0_SPI_READ);
@@ -645,8 +525,6 @@ int afe4400_init_registers(const struct device *dev)
     return 0;
 }
 
-/* Forward declaration */
-int afe4400_configure_timing(const struct device *dev);
 
 static int afe4400_init(const struct device *dev)
 {

@@ -715,7 +715,11 @@ static int32_t calculate_rms(int32_t *ac_history, uint8_t count)
  * ~10x higher, so this is now very lenient. Re-check it on the bench. */
 
 #define PROBE_OFF_DC_THRESHOLD      (-1000000)  /* raw < -1M = probe off */
-#define PROBE_OFF_DC_SATURATED      (1000000)   /* raw > +1M = saturated */
+/* PPG is ambient-subtracted (LED - ambient) since 1.0.1, with the 22-bit
+ * ADC's ceiling at +2,097,151. With the TI timing a finger at 3.9 mA sits near
+ * 1M, so the old 1M limit called a good signal "saturated"; 1.9M is near
+ * full scale. */
+#define PROBE_OFF_DC_SATURATED      (1900000)   /* DC > 1.9M = saturated */
 #define PROBE_OFF_PI_THRESHOLD      3       /* PI < 0.03% = probe off */
 #define PROBE_OFF_WEAK_SIGNAL       (-500000)   /* raw < -500k = weak */
 #define PROBE_OFF_AC_LOW            10      /* AC amplitude too low */

@@ -39,7 +39,6 @@ int afe4400_hardware_reset(const struct device *dev);
 int afe4400_software_reset(const struct device *dev);
 /* Controls AFE4400 power state using both PWDN GPIO pin and CONTROL2 register */
 int afe4400_powerdown(const struct device *dev, bool powerdown);
-int afe4400_configure_timing(const struct device *dev);
 int afe4400_configure_led_current(const struct device *dev, uint8_t led1_current, uint8_t led2_current);
 int afe4400_configure_tia_gain(const struct device *dev);
 int afe4400_read_diagnostics(const struct device *dev, uint32_t *diag_status);
