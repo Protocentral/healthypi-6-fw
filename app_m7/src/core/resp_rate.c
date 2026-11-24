@@ -32,6 +32,12 @@ LOG_MODULE_REGISTER(hpi_resp, CONFIG_HPI_APP_LOG_LEVEL);
  * MA already on hp6_ecg_sample.resp. */
 #define RESP_DS_N           20
 #define RESP_DS_HZ          (HPI_ECG_RATE_HZ / RESP_DS_N)
+/* The filters run in 1/RESP_FRAC uV. A breath on the bench is ~20 uV p-p,
+ * which the low-pass leaves at ~+-8 uV: in whole uV the filtered wave was a
+ * handful of steps, and the threshold compare was as coarse. env, the
+ * threshold and the debug extremes are in these units too; logs and
+ * hpi_resp_* report uV. */
+#define RESP_FRAC           16
 
 #define RESP_BPM_MIN        6
 #define RESP_BPM_MAX        40
@@ -47,8 +53,8 @@ LOG_MODULE_REGISTER(hpi_resp, CONFIG_HPI_APP_LOG_LEVEL);
 #define RESP_HP_R_Q15       32115
 #define RESP_LP_A_Q15       3506
 #define RESP_ENV_DECAY_Q15  32735   /* 0.999/sample ≈ 14 s tau at 25 Hz */
-/* Filtered µV; below this stay at 0. Unvalidated -- see the Kconfig help, and
- * CONFIG_HPI_RESP_DEBUG for the amplitude log that should set it. */
+/* Filtered µV; below this stay at 0. Set from a bench capture -- see the
+ * Kconfig help; CONFIG_HPI_RESP_DEBUG logs the filtered amplitude. */
 #define RESP_MIN_AMP        CONFIG_HPI_RESP_MIN_AMP_UV
 
 #define RESP_N_INT          3
@@ -88,9 +94,15 @@ static uint32_t dbg_ext;
 static uint32_t dbg_n;
 #endif
 
+/* Round to nearest. A bare >> 15 floors, i.e. drops -0.5 LSB on average
+ * every call; in the high-pass (pole 0.98) that bias settles at about
+ * -0.5 / (1 - 0.98) = -25 uV, and the low-pass stages add their own. With
+ * ordinary noise on the channel the filtered output sat 7-20 uV below zero,
+ * which is the size of a whole breath on the bench (~20 uV p-p): any
+ * wiggle could cross the threshold as a "breath". */
 static int32_t q15_mul(int32_t x, int32_t a)
 {
-    return (int32_t)(((int64_t)x * a) >> 15);
+    return (int32_t)((((int64_t)x * a) + (1 << 14)) >> 15);
 }
 
 static uint32_t median3(uint32_t a, uint32_t b, uint32_t c)
@@ -214,8 +226,8 @@ static void resp_on_ds(int32_t x, uint32_t t_ms)
 
     int32_t thresh = env / 4;
 
-    if (thresh < RESP_MIN_AMP) {
-        thresh = RESP_MIN_AMP;
+    if (thresh < RESP_MIN_AMP * RESP_FRAC) {
+        thresh = RESP_MIN_AMP * RESP_FRAC;
     }
 
 #if defined(CONFIG_HPI_RESP_DEBUG)
@@ -280,7 +292,7 @@ static void resp_on_sample(const struct hp6_ecg_sample *s, uint32_t t_ms)
         return;
     }
 
-    int32_t x = ds_acc / (int32_t)RESP_DS_N;
+    int32_t x = (int32_t)(((int64_t)ds_acc * RESP_FRAC) / RESP_DS_N);
 
     ds_acc = 0;
     ds_n = 0;
@@ -333,15 +345,17 @@ static void resp_maybe_log(void)
     struct hpi_bus_sub_stats st = { 0 };
 
     hpi_bus_sub_get_stats(g_sub, &st);
-    LOG_INF("resp: %u bpm env=%d drop=%u", rr, env, st.frames_dropped);
+    LOG_INF("resp: %u bpm env=%d drop=%u", rr, env / RESP_FRAC,
+            st.frames_dropped);
 
 #if defined(CONFIG_HPI_RESP_DEBUG)
     /* n=0: no downsampled point reached the filter in this window (leads off,
      * or no ECG frames), so the amplitude fields mean nothing. */
     LOG_INF("resp dbg: filtered p-p=%d uV (max %d, min %d) env=%d thresh=%d "
             "(floor %d) extrema=%u n=%u -> %u bpm",
-            dbg_n ? (dbg_y_max - dbg_y_min) : 0, dbg_y_max, dbg_y_min, env,
-            dbg_thresh, RESP_MIN_AMP, dbg_ext, dbg_n, rr);
+            dbg_n ? (dbg_y_max - dbg_y_min) / RESP_FRAC : 0,
+            dbg_y_max / RESP_FRAC, dbg_y_min / RESP_FRAC, env / RESP_FRAC,
+            dbg_thresh / RESP_FRAC, RESP_MIN_AMP, dbg_ext, dbg_n, rr);
     dbg_y_max = 0;
     dbg_y_min = 0;
     dbg_thresh = 0;

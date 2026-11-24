@@ -53,7 +53,7 @@ int main(void)
 		resp_on_sample(&s, n * 2U);   /* 500 Hz -> 2 ms per sample */
 		n++;
 		if (n % 500U == 0U) {
-			printf("R %u %u %d\n", n / 500U, hpi_resp_rate_bpm(), (int)env);
+			printf("R %u %u %d\n", n / 500U, hpi_resp_rate_bpm(), (int)(env / RESP_FRAC));
 		}
 	}
 	return 0;
