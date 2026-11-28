@@ -129,24 +129,24 @@ enum hpi_m3_theme_id hpi_m3_theme_active(void);
  * one-file edit here + a re-run of convert_fonts.sh. */
 #include "ui/fonts/hpi_fonts.h"
 
-#define HPI_M3_FONT_DISPLAY       (&saira_700_28)
-#define HPI_M3_FONT_HEADLINE      (&saira_700_28)
-#define HPI_M3_FONT_TITLE         (&saira_600_18)
-#define HPI_M3_FONT_BODY          (&manrope_700_16)
-#define HPI_M3_FONT_LABEL         (&manrope_700_16)
-#define HPI_M3_FONT_LABEL_SM      (&manrope_700_12)
+#define HPI_M3_FONT_DISPLAY       (&saira_700_30)
+#define HPI_M3_FONT_HEADLINE      (&saira_700_30)
+#define HPI_M3_FONT_TITLE         (&saira_600_20)
+#define HPI_M3_FONT_BODY          (&manrope_700_18)
+#define HPI_M3_FONT_LABEL         (&manrope_700_18)
+#define HPI_M3_FONT_LABEL_SM      (&manrope_700_14)
 
 /* Intent-named roles used by the screens. */
 #define HPI_M3_FONT_NUMERAL_XL    (&rubik_500_148)   /* focal HR / hero numerals */
-#define HPI_M3_FONT_NUMERAL       (&rubik_500_28)    /* vital-chip numerals */
-#define HPI_M3_FONT_CAPS          (&manrope_700_16)  /* caps labels / units */
-#define HPI_M3_FONT_CAPS_SM       (&manrope_700_12)
-#define HPI_M3_FONT_MONO          (&jetbrains_mono_14)  /* clock / filenames / versions */
-#define HPI_M3_FONT_MONO_SM       (&jetbrains_mono_14)
+#define HPI_M3_FONT_NUMERAL       (&rubik_500_32)    /* vital-chip numerals */
+#define HPI_M3_FONT_CAPS          (&manrope_700_18)  /* caps labels / units */
+#define HPI_M3_FONT_CAPS_SM       (&manrope_700_14)
+#define HPI_M3_FONT_MONO          (&jetbrains_mono_16)  /* clock / filenames / versions */
+#define HPI_M3_FONT_MONO_SM       (&jetbrains_mono_16)
 
 /* LVGL's built-in glyphs (LV_SYMBOL_*) are baked into the Montserrat faces, not
  * the design faces — use this for any label that renders an LV_SYMBOL_*. */
-#define HPI_M3_FONT_SYMBOL        (&lv_font_montserrat_16)
+#define HPI_M3_FONT_SYMBOL        (&lv_font_montserrat_18)
 
 /* Material Symbols icons (HPI_SYM_* string literals from hpi_symbols.h). */
 #define HPI_M3_FONT_ICON          (&matsym_20)   /* chips / status / caption */

@@ -17,12 +17,12 @@ extern "C" {
 #endif
 
 LV_FONT_DECLARE(rubik_500_148);   /* focal HR / hero numerals */
-LV_FONT_DECLARE(rubik_500_28);    /* vital-chip numerals      */
-LV_FONT_DECLARE(manrope_700_16);  /* caption / unit / body / label */
-LV_FONT_DECLARE(manrope_700_12);  /* small labels / nav / chip role */
-LV_FONT_DECLARE(saira_700_28);    /* headline / display titles */
-LV_FONT_DECLARE(saira_600_18);    /* screen titles */
-LV_FONT_DECLARE(jetbrains_mono_14); /* clock / filenames / versions */
+LV_FONT_DECLARE(rubik_500_32);    /* vital-chip numerals      */
+LV_FONT_DECLARE(manrope_700_18);  /* caption / unit / body / label */
+LV_FONT_DECLARE(manrope_700_14);  /* small labels / nav / chip role */
+LV_FONT_DECLARE(saira_700_30);    /* headline / display titles */
+LV_FONT_DECLARE(saira_600_20);    /* screen titles */
+LV_FONT_DECLARE(jetbrains_mono_16); /* clock / filenames / versions */
 LV_FONT_DECLARE(matsym_20);       /* Material Symbols — chips/status/caption */
 LV_FONT_DECLARE(matsym_24);       /* Material Symbols — nav */
 
