@@ -344,8 +344,8 @@ static void render_lead_off(uint8_t mask)
 	}
 	/* Dim the trace instead of letting a floating electrode's rail-to-rail
 	 * artefact scroll past looking like a signal. */
-	lv_obj_set_style_line_opa(s_ecg.chart, mask ? LV_OPA_20 : LV_OPA_60,
-				  LV_PART_ITEMS);
+	lv_obj_set_style_line_opa(s_ecg.chart, mask ? LV_OPA_20 : LV_OPA_COVER,
+				  LV_PART_ITEMS);   /* full when on: 60 % read dim on black */
 
 	/* The vitals producer suppresses an ECG HR while the leads are off, but it
 	 * only speaks when the M4 sends something. Blank the numeral here too, so
