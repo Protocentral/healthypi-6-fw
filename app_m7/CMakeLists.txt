@@ -77,6 +77,7 @@ target_sources_ifdef(CONFIG_HPI_SECURITY app PRIVATE
 # components + screens compile only with the display flavor.
 target_sources(app PRIVATE src/ui/ui_module.c)
 target_sources_ifdef(CONFIG_HPI_DISPLAY_ENABLED app PRIVATE
+    src/ui/theme/hpi_m3_theme.c
     src/ui/components/hpi_ui_components.c
     src/ui/screens/scr_home.c
     src/ui/screens/scr_live.c

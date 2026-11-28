@@ -6,32 +6,25 @@
  * truth for color roles, the type scale, shape (corner radii) and the 4 dp
  * spacing grid. Screens and components reference ONLY these tokens.
  *
- * HealthyPi 6 palette ("navy ink"): brand blue #6FB3CC for nav/selection/
- * primary actions; Signal Amber #FBBF24 for ECG/HR and the single big CTA per
- * screen.
+ * Two palettes, DARK (navy ink) and LIGHT, chosen once at boot from
+ * Settings -> Theme (hpi_config_display_theme()). Screens are built once and
+ * never rebuilt, so a change applies at the next restart.
  *
  * ---------------------------------------------------------------------------
- * HOW TO RESTYLE THE UI -- every colour, radius and state lives in this file.
+ * HOW TO RESTYLE THE UI
  *
- *   1. Background / cards / outlines ..... "Surfaces" below
- *   2. Text greys ........................ "Text"
- *   3. Brand + status accents ............ "Accents"
- *   4. What each button kind looks like .. "Buttons" (HPI_M3_BTN_*)
- *   5. Pressed / disabled feedback ....... "Interaction states"
+ *   Colours ........ theme/hpi_m3_theme.c -- one table per theme, the same
+ *                    fields in the same order, so the two read side by side.
+ *   Which colour each button kind uses, switches, radius, pressed/disabled
+ *                    feedback ...... "Buttons" / "Interaction states" below.
+ *   Fonts, spacing, touch floor .... further down this file.
  *
  * Screens never name a hex value; components never name a colour that is not
- * a token here. Change a value, rebuild, done.
+ * a token. Change a value, rebuild, done.
  * ---------------------------------------------------------------------------
  *
- * Why navy and not black or grey: this is a backlit TFT, not an OLED.
- * Backlight bleed lifts dark values toward a common grey, so a near-black
- * ramp merged into one flat field, and a neutral slate (#1E252C, tried next)
- * read as black that had washed out. A saturated dark hue (navy, sat ~0.7 at
- * RGB565) survives the bleed and reads as a deliberate colour; it is the brand
- * blue's own family. Surfaces step ~1.25:1 apart so cards read as layers, and
- * waveforms keep a darker PLOT_WELL for maximum trace contrast. Keep every
- * accent and text token >= 4.5:1 on SURFACE and SURFACE_CONTAINER if you
- * change them (measure at RGB565 -- the UI renders 16-bit).
+ * The colour tokens (HPI_M3_SURFACE, ...) read the active palette, so they are
+ * runtime values: they cannot initialise a file-scope `static const`.
  *
  * No `static lv_style_t` anywhere in the UI — apply tokens with direct
  * lv_obj_set_style_* setters (see helpers below).
@@ -40,48 +33,93 @@
 #define HPI_UI_M3_THEME_H
 
 #include <lvgl.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ==== 1. Surfaces (darkest -> lightest) ==== */
-#define HPI_M3_SURFACE_DIM        lv_color_hex(0x0A1826)  /* splash / ambient / power backdrop */
-#define HPI_M3_PLOT_WELL          lv_color_hex(0x0A1826)  /* behind waveforms: recessed, max trace contrast */
-#define HPI_M3_SURFACE            lv_color_hex(0x0F2233)  /* screen background */
-#define HPI_M3_SURFACE_CONTAINER  lv_color_hex(0x18324A)  /* card / list row / nav bar */
-#define HPI_M3_SURFACE_HIGH       lv_color_hex(0x23425E)  /* raised: secondary buttons, stepper keys */
-#define HPI_M3_OUTLINE            lv_color_hex(0x3A5C7C)  /* 1 px card / button edge */
-#define HPI_M3_DIVIDER            lv_color_hex(0x1F3B55)  /* hairline row divider, chart grid */
+/* ==== Colour tokens ========================================================
+ * Each is one field of struct hpi_m3_palette (hex RGB), filled per theme in
+ * hpi_m3_theme.c. The comments say what the token is FOR; the values live in
+ * the .c file. */
+struct hpi_m3_palette {
+	/* Surfaces */
+	uint32_t surface_dim;        /* splash / ambient / power backdrop        */
+	uint32_t plot_well;          /* behind waveforms                         */
+	uint32_t surface;            /* screen background                        */
+	uint32_t surface_container;  /* card / list row / nav bar                */
+	uint32_t surface_high;       /* raised: secondary buttons, stepper keys  */
+	uint32_t outline;            /* 1 px card / button edge                  */
+	uint32_t divider;            /* hairline row divider, chart grid         */
+	/* Text */
+	uint32_t on_surface;         /* primary text                             */
+	uint32_t on_surface_variant; /* secondary text / labels                  */
+	uint32_t on_surface_muted;   /* units, captions                          */
+	uint32_t on_surface_faint;   /* disabled / pending -- decorative only    */
+	/* Accents */
+	uint32_t primary;            /* brand blue: nav, selection, actions      */
+	uint32_t on_primary;         /* text/icon on primary                     */
+	uint32_t primary_container;  /* tonal fill: TONAL buttons, active nav    */
+	uint32_t on_primary_container; /* text/icon on primary_container        */
+	uint32_t error, on_error;
+	uint32_t warning, success;
+	uint32_t cta, on_cta;        /* the one big call-to-action per screen    */
+	/* Signals (waveforms, vitals) */
+	uint32_t sig_ecg;            /* ECG trace + heart rate                   */
+	uint32_t sig_ppg;            /* PPG trace + SpO2                         */
+	uint32_t sig_resp;
+	uint32_t sig_temp;
+	uint32_t sig_hrv;
+};
 
-/* ==== 2. Text ==== */
-#define HPI_M3_ON_SURFACE         lv_color_hex(0xECEFF1)  /* primary text (bright) */
-#define HPI_M3_ON_SURFACE_VARIANT lv_color_hex(0x9AA6AD)  /* secondary text / labels */
-#define HPI_M3_ON_SURFACE_MUTED   lv_color_hex(0x8A9BAA)  /* units, captions (4.7:1 on CONTAINER) */
-#define HPI_M3_ON_SURFACE_FAINT   lv_color_hex(0x5E7287)  /* disabled / pending -- decorative only */
+enum hpi_m3_theme_id {
+	HPI_M3_THEME_DARK  = 0,   /* == HPI_CONFIG_THEME_DARK  */
+	HPI_M3_THEME_LIGHT = 1,   /* == HPI_CONFIG_THEME_LIGHT */
+	HPI_M3_THEME_COUNT
+};
 
-/* ==== 3. Accents ==== */
-#define HPI_M3_PRIMARY            lv_color_hex(0x6FB3CC)  /* brand blue: nav, selection, primary actions */
-#define HPI_M3_ON_PRIMARY         lv_color_hex(0x0E1114)  /* dark text/icon on brand blue */
-#define HPI_M3_PRIMARY_CONTAINER  lv_color_hex(0x24566B)  /* brand-tinted fill: TONAL buttons, active nav item */
-#define HPI_M3_PRIMARY_LIGHT      lv_color_hex(0xA8D4E4)  /* text/icon on PRIMARY_CONTAINER */
-#define HPI_M3_ERROR              lv_color_hex(0xF87171)
-#define HPI_M3_ON_ERROR           lv_color_hex(0x2A0A0A)  /* dark text on red (6.9:1; white was 2.3:1) */
-#define HPI_M3_WARNING            lv_color_hex(0xFB923C)
-#define HPI_M3_SUCCESS            lv_color_hex(0x4ADE80)
+/* The active palette. Set by hpi_m3_theme_select(), once, before any screen
+ * is built; never NULL (defaults to DARK). */
+extern const struct hpi_m3_palette *hpi_m3_pal;
+void hpi_m3_theme_select(enum hpi_m3_theme_id id);
+enum hpi_m3_theme_id hpi_m3_theme_active(void);
 
-/* Brand CTA: the single big call-to-action per screen = Signal Amber. */
-#define HPI_M3_CTA                lv_color_hex(0xFBBF24)
-#define HPI_M3_ON_CTA             lv_color_hex(0x1F1300)  /* dark text/icon on amber */
+#define HPI_M3_C(field)           lv_color_hex(hpi_m3_pal->field)
 
-/* ---- signal colors (HealthyPi 6 palette) ---- */
-#define HPI_M3_SIG_ECG            lv_color_hex(0xFBBF24)  /* Signal Amber (ECG waveform + HR) */
-#define HPI_M3_SIG_HR             lv_color_hex(0xFBBF24)  /* heart rate (= ECG amber) */
-#define HPI_M3_SIG_PPG            lv_color_hex(0x6FB3CC)  /* PPG / SpO2 blue */
-#define HPI_M3_SIG_SPO2           lv_color_hex(0x6FB3CC)  /* SpO2 (= PPG blue) */
-#define HPI_M3_SIG_RESP           lv_color_hex(0x4CC38A)  /* respiration green */
-#define HPI_M3_SIG_TEMP           lv_color_hex(0xFB923C)  /* temperature orange */
-#define HPI_M3_SIG_HRV            lv_color_hex(0x9A94F5)  /* HRV violet (lifted: 4.4 -> 5.2:1 on navy cards) */
+#define HPI_M3_SURFACE_DIM        HPI_M3_C(surface_dim)
+#define HPI_M3_PLOT_WELL          HPI_M3_C(plot_well)
+#define HPI_M3_SURFACE            HPI_M3_C(surface)
+#define HPI_M3_SURFACE_CONTAINER  HPI_M3_C(surface_container)
+#define HPI_M3_SURFACE_HIGH       HPI_M3_C(surface_high)
+#define HPI_M3_OUTLINE            HPI_M3_C(outline)
+#define HPI_M3_DIVIDER            HPI_M3_C(divider)
+
+#define HPI_M3_ON_SURFACE         HPI_M3_C(on_surface)
+#define HPI_M3_ON_SURFACE_VARIANT HPI_M3_C(on_surface_variant)
+#define HPI_M3_ON_SURFACE_MUTED   HPI_M3_C(on_surface_muted)
+#define HPI_M3_ON_SURFACE_FAINT   HPI_M3_C(on_surface_faint)
+
+#define HPI_M3_PRIMARY            HPI_M3_C(primary)
+#define HPI_M3_ON_PRIMARY         HPI_M3_C(on_primary)
+#define HPI_M3_PRIMARY_CONTAINER  HPI_M3_C(primary_container)
+/* Historical name: "light" was right only on the dark theme. It is the text
+ * colour that sits on PRIMARY_CONTAINER. */
+#define HPI_M3_PRIMARY_LIGHT      HPI_M3_C(on_primary_container)
+#define HPI_M3_ERROR              HPI_M3_C(error)
+#define HPI_M3_ON_ERROR           HPI_M3_C(on_error)
+#define HPI_M3_WARNING            HPI_M3_C(warning)
+#define HPI_M3_SUCCESS            HPI_M3_C(success)
+#define HPI_M3_CTA                HPI_M3_C(cta)
+#define HPI_M3_ON_CTA             HPI_M3_C(on_cta)
+
+#define HPI_M3_SIG_ECG            HPI_M3_C(sig_ecg)
+#define HPI_M3_SIG_HR             HPI_M3_C(sig_ecg)   /* heart rate = ECG colour */
+#define HPI_M3_SIG_PPG            HPI_M3_C(sig_ppg)
+#define HPI_M3_SIG_SPO2           HPI_M3_C(sig_ppg)   /* SpO2 = PPG colour */
+#define HPI_M3_SIG_RESP           HPI_M3_C(sig_resp)
+#define HPI_M3_SIG_TEMP           HPI_M3_C(sig_temp)
+#define HPI_M3_SIG_HRV            HPI_M3_C(sig_hrv)
 
 /* ---- M3 type scale ----------------------------------------------------------
  * The design fonts (LVGL bitmap fonts generated from the design TTFs by
