@@ -10,6 +10,56 @@ Versions here are the **firmware** version reported by the device
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-11-28
+
+An on-device UI restyle for the backlit TFT, with a new light theme as the
+default. All changes are on the M7. The M4 is rebuilt at 1.1.0 so both cores
+keep one version; its code is unchanged from 1.0.2. The ESP32-C6 image is
+unchanged.
+
+**Update** from 1.0.x with
+`healthypi fw update --port <CDC1> --bundle <1.1.0 bundle>`.
+
+### Validation
+- The light theme, the black plot areas and the per-electrode trace dimming
+  were checked on a v5 unit.
+- Build-verified only, still to check on a unit: switching themes in both
+  directions (and the restart being refused while recording), the dark theme
+  overall, and the larger text in the Live controls row, the Trends tabs and
+  the navigation bar.
+
+### Added
+- **Settings → Theme: Light or Dark (M7).** Stored in the config service
+  (`disp_theme`); the choice applies after a restart, which RESTART TO APPLY
+  performs. The restart is refused while a recording is active. A unit with
+  no stored choice boots **light**. Units that saved Dark keep it.
+- **The full ProtoCentral logo on the splash screen**, replacing the
+  "PROTOCENTRAL ELECTRONICS" text, and a light splash for the light theme.
+
+### Changed
+- **Colours suited to the TFT (M7).** The dark grey palette looked like
+  washed-out black on this backlit panel. The light theme is a soft
+  blue-grey page; the dark theme is now navy rather than grey. Every colour
+  is a named token in one file, `app_m7/src/ui/theme/hpi_m3_theme.c`.
+- **Buttons look like buttons on every screen (M7).** One shared button
+  component (CTA, filled, tonal, secondary, danger) with consistent pressed,
+  selected and disabled states replaces per-screen styling; previously only
+  the Rec screen's buttons looked pressable. Settings and Rec share one
+  segmented control.
+- **Waveforms are easier to read (M7).** Live and Home plot on black with
+  bright traces: ECG green, PPG blue, respiration yellow. The Home ECG strip
+  is taller.
+- **Larger text throughout (M7)**, about 2 px in every type role.
+- **A trace dims only when one of its own electrodes is off (M7).** The ECG
+  trace (Lead II) dims for RA or LL, respiration for RA, LA or LL. V1 off no
+  longer dims anything. The lead-off warnings still name every electrode
+  that is off. The respiration-rate detector uses the same electrode set.
+- **"UNCAL" is removed from the SpO2 labels** on the device and in
+  `healthypi`'s Wi-Fi stream monitor.
+
+### Fixed
+- **The Home ECG strip was drawn at 60 % opacity with every lead on (M7).**
+
 ## [1.0.2] — 2026-11-24
 
 Respiration rate and Record-screen fixes, all on the M7. The M4 is rebuilt
