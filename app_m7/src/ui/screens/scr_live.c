@@ -295,7 +295,7 @@ lv_obj_t *hpi_scr_live_create(lv_obj_t *parent)
 	 * is slow (9, ~0.04 Hz): a faster block (6, ~0.33 Hz) cut into normal
 	 * breathing at 0.2-0.5 Hz. */
 	lane_create(&s_l.ecg,  lanes, "ECG \xC2\xB7 LEAD II", "BPM",   HPI_M3_SIG_ECG,  HPI_M3_TRACE_ECG,  9, 2000,   true);
-	lane_create(&s_l.ppg,  lanes, "PPG \xC2\xB7 IR",      "% SPO2 UNCAL", HPI_M3_SIG_PPG,  HPI_M3_TRACE_PPG,  5, 200000, true);
+	lane_create(&s_l.ppg,  lanes, "PPG \xC2\xB7 IR",      "% SPO2",       HPI_M3_SIG_PPG,  HPI_M3_TRACE_PPG,  5, 200000, true);
 	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, HPI_M3_TRACE_RESP, 9, 2000,   false);
 	hpi_ui_waveform_set_target(&s_l.resp.wf, RESP_TARGET);
 	hpi_ui_waveform_set_floor(&s_l.resp.wf, RESP_FLOOR_UV);
