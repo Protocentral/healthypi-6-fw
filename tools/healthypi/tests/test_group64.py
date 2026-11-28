@@ -126,14 +126,30 @@ def test_selftest_nested_health_map():
             "ppg": True,
             "m4": True,
             "qspi": True,
-            "pass": 6,
+            "imu": True,
+            "pass": 7,
             "fail": 0,
             "health_overall": 0,
             "health": {"acq": 0, "m4": 0, "stream": 0, "rec": 0, "hl": 1},
         },
         0x0080,
     )
-    assert r.health.hl == 1 and r.m4 is True
+    assert r.health.hl == 1 and r.m4 is True and r.imu is True
+
+
+def test_selftest_reply_from_firmware_without_imu():
+    """1.1.0 and older send no `imu`: the reply must still parse."""
+    r = _reply(
+        g.diag_run_selftest.Response,
+        {
+            "suite_ver": 1, "sd": True, "batt": True, "ecg": True,
+            "ppg": True, "m4": True, "qspi": True, "pass": 6, "fail": 0,
+            "health_overall": 0,
+            "health": {"acq": 0, "m4": 0, "stream": 0, "rec": 0, "hl": 1},
+        },
+        0x0080,
+    )
+    assert r.imu is None
 
 
 def test_stream_start_encodes_masks():

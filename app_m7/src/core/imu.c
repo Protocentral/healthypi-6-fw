@@ -46,6 +46,8 @@ static int32_t g_ay;
 static int32_t g_az;
 static int32_t g_mag;
 static int64_t g_stats_ms;
+/* Uptime of the last good accel read; 0 = none yet. */
+static atomic_t g_last_ok_ms;
 static struct k_thread imu_thread;
 static K_THREAD_STACK_DEFINE(imu_stack, IMU_STACK_SIZE);
 
@@ -217,6 +219,8 @@ static void imu_thread_fn(void *p1, void *p2, void *p3)
 		int32_t mag;
 
 		if (imu_read_mag(bmi323, &mag) == 0) {
+			/* +1 keeps a read at uptime 0 distinct from "none yet". */
+			atomic_set(&g_last_ok_ms, (atomic_val_t)(k_uptime_get_32() + 1U));
 			imu_apply_mag(mag);
 		}
 		imu_maybe_stats();
@@ -258,4 +262,14 @@ int hpi_imu_init(void)
 bool hpi_imu_motion(void)
 {
 	return atomic_get(&g_motion) != 0;
+}
+
+uint32_t hpi_imu_sample_age_ms(void)
+{
+	uint32_t last = (uint32_t)atomic_get(&g_last_ok_ms);
+
+	if (last == 0U) {
+		return UINT32_MAX;
+	}
+	return k_uptime_get_32() + 1U - last;
 }

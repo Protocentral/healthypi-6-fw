@@ -415,8 +415,8 @@ def test_cli_run_silent_port_exits_3(monkeypatch, capsys):
 
 
 def _selftest_reply(**over):
-    vals = {"suite_ver": 1, "sd": True, "batt": True, "ecg": True, "ppg": True,
-            "m4": True, "qspi": True, "pass": 6, "fail": 0}
+    vals = {"suite_ver": 2, "sd": True, "batt": True, "ecg": True, "ppg": True,
+            "m4": True, "qspi": True, "imu": True, "pass": 7, "fail": 0}
     vals.update(over)
 
     class R:
@@ -443,14 +443,30 @@ def test_selftest_case_passes_only_when_every_subsystem_passes():
     assert _run_selftest_case(_selftest_reply()).outcome is Outcome.PASS
 
 
-@pytest.mark.parametrize("over", [{"sd": False, "pass": 5, "fail": 1},
+@pytest.mark.parametrize("over", [{"sd": False, "pass": 6, "fail": 1},
                                   {"m4": False},
+                                  {"imu": False, "pass": 6, "fail": 1},
                                   {"fail": 1}])
 def test_selftest_case_fails_when_the_device_reports_a_failure(over):
     """It used to PASS on any answer, so a unit reporting sd=FAIL passed the
     release gate (bench 2026-11-20, readiness item 16)."""
     res = _run_selftest_case(_selftest_reply(**over))
     assert res.outcome is Outcome.FAIL
+
+
+def test_selftest_case_names_a_missing_imu():
+    res = _run_selftest_case(_selftest_reply(imu=False, fail=1, **{"pass": 6}))
+    assert res.outcome is Outcome.FAIL
+    assert "imu=FAIL" in res.detail and "down: imu" in res.detail
+
+
+def test_selftest_case_accepts_firmware_without_the_imu_check():
+    """Suite v1 (firmware 1.1.0 and older) has no `imu` key: that is not a
+    failure, and the IMU is not listed at all."""
+    reply = _selftest_reply(suite_ver=1, imu=None, **{"pass": 6})
+    res = _run_selftest_case(reply)
+    assert res.outcome is Outcome.PASS
+    assert "imu" not in res.detail
 
 
 # ------------------------------------------------------------- smpgroup ---

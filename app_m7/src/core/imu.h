@@ -11,6 +11,7 @@
 #define HPI_CORE_IMU_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,11 @@ int hpi_imu_init(void);
 
 /* True while RMS accel is above the motion threshold. */
 bool hpi_imu_motion(void);
+
+/* Milliseconds since the last successful accel read, or UINT32_MAX if there
+ * has been none (no chip, configure failed, or every read failing). The
+ * self-test uses it as proof the IMU answers now, not just at boot. */
+uint32_t hpi_imu_sample_age_ms(void);
 
 #ifdef __cplusplus
 }

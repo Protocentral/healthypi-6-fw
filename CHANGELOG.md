@@ -10,6 +10,15 @@ Versions here are the **firmware** version reported by the device
 
 ## [Unreleased]
 
+### Fixed
+- **The self-test did not check the BMI323 IMU (M7).** A unit with a missing
+  or dead IMU passed. The group-64 self-test (`0x0080`) now reports `imu`. It
+  passes only when the BMI323 answered with its chip ID at boot **and** has
+  returned an accelerometer reading in the last second. The check counts in
+  `pass`/`fail` (7 checks, was 6), and the suite version is now **2**. Host
+  tools before this change ignore the new key; `healthypi test run` names it
+  when it fails and accepts firmware that does not report it.
+
 ## [1.1.0] — 2026-11-28
 
 An on-device UI restyle for the backlit TFT, with a new light theme as the
