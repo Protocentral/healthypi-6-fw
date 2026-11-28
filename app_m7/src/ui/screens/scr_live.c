@@ -167,15 +167,18 @@ static void lane_create(struct live_lane *ln, lv_obj_t *parent, const char *labe
 			const char *unit, lv_color_t color, uint8_t bl_shift,
 			int32_t yseed, bool border_bottom)
 {
+	/* Each lane is its own plot-well panel: the trace is drawn on the
+	 * surface the palette reserves for traces (brightest in LIGHT, darkest
+	 * in DARK), not on the page background. The gaps between panels
+	 * separate the lanes, so there is no divider line. */
+	ARG_UNUSED(border_bottom);
 	lv_obj_t *lane = lv_obj_create(parent);
 	lv_obj_set_width(lane, lv_pct(100));
 	lv_obj_set_flex_grow(lane, 1);
-	lv_obj_set_style_bg_opa(lane, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_border_width(lane, border_bottom ? 1 : 0, 0);
-	lv_obj_set_style_border_side(lane, LV_BORDER_SIDE_BOTTOM, 0);
-	lv_obj_set_style_border_color(lane, HPI_M3_OUTLINE, 0);
+	hpi_m3_apply_card(lane, HPI_M3_PLOT_WELL, HPI_M3_RADIUS_MD);
+	lv_obj_set_style_border_width(lane, 0, 0);
 	lv_obj_set_style_pad_hor(lane, HPI_M3_SPACE_3, 0);
-	lv_obj_set_style_pad_ver(lane, HPI_M3_SPACE_1, 0);
+	lv_obj_set_style_pad_ver(lane, HPI_M3_SPACE_2, 0);
 	lv_obj_clear_flag(lane, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(lane, LV_FLEX_FLOW_COLUMN);
 
@@ -282,8 +285,9 @@ lv_obj_t *hpi_scr_live_create(lv_obj_t *parent)
 	lv_obj_set_flex_grow(lanes, 1);
 	lv_obj_set_style_bg_opa(lanes, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_border_width(lanes, 0, 0);
-	lv_obj_set_style_pad_all(lanes, 0, 0);
-	lv_obj_set_style_pad_row(lanes, 0, 0);
+	lv_obj_set_style_pad_hor(lanes, HPI_M3_SPACE_2, 0);
+	lv_obj_set_style_pad_ver(lanes, HPI_M3_SPACE_1, 0);
+	lv_obj_set_style_pad_row(lanes, HPI_M3_SPACE_2, 0);
 	lv_obj_clear_flag(lanes, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(lanes, LV_FLEX_FLOW_COLUMN);
 

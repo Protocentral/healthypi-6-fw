@@ -238,6 +238,9 @@ enum hpi_m3_theme_id hpi_m3_theme_active(void);
  * controls so the two don't fight. DISABLED_OPA is below with the helpers. */
 #define HPI_M3_PRESSED_LIGHTEN    LV_OPA_20
 
+/* Waveform trace line width, px (Live lanes, Home ECG; Trends draws its own). */
+#define HPI_M3_TRACE_W  3
+
 /* ---- layout constants ---- */
 #define HPI_M3_NAVBAR_H   80   /* M3 bottom navigation bar height (5 slots) */
 #define HPI_M3_APPBAR_H   40   /* top status bar height */

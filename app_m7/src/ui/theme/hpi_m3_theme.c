@@ -58,40 +58,44 @@ static const struct hpi_m3_palette PAL_DARK = {
 	.sig_hrv              = 0x9A94F5,
 };
 
-/* LIGHT -- what an LCD renders best: no backlight bleed to fight, readable in
- * bright rooms and at an angle. Cool off-white background, white cards and
- * plot area. Every accent and signal is a DARKER version of its dark-theme
- * counterpart, because the bright ones fail on white (amber #FBBF24 is ~1.7:1).
- * The CTA stays a filled amber with dark text. */
+/* LIGHT -- "mist". What an LCD renders best: no backlight bleed to fight,
+ * readable in bright rooms and at an angle. The page is a soft blue-grey
+ * (#D3DDE4, ~20 % less luminous than near-white #EEF2F5, which glared at
+ * full backlight); cards sit a step lighter, and the waveform plot well is
+ * the BRIGHTEST surface, so traces get the most contrast where they are read.
+ * Every accent and signal is a deep version of its dark-theme counterpart:
+ * the bright ones fail on light (amber #FBBF24 is ~1.7:1). Signals are
+ * >= 4.5:1 on cards and >= 5.2:1 on the plot well. The CTA stays a filled
+ * amber with dark text. */
 static const struct hpi_m3_palette PAL_LIGHT = {
-	.surface_dim          = 0xE3E8ED,
-	.plot_well            = 0xFFFFFF,
-	.surface              = 0xEEF2F5,
-	.surface_container    = 0xFFFFFF,
-	.surface_high         = 0xDCE3E9,
-	.outline              = 0x8A97A3,
-	.divider              = 0xDCE3E9,
+	.surface_dim          = 0xC9D4DC,
+	.plot_well            = 0xF5F8FA,
+	.surface              = 0xD3DDE4,
+	.surface_container    = 0xE6ECF0,
+	.surface_high         = 0xC3CFD8,
+	.outline              = 0x6F7F8C,
+	.divider              = 0xBFCBD4,
 
 	.on_surface           = 0x111820,
-	.on_surface_variant   = 0x3A4651,
-	.on_surface_muted     = 0x55626D,
-	.on_surface_faint     = 0x8C98A3,
+	.on_surface_variant   = 0x34414C,
+	.on_surface_muted     = 0x4A5661,
+	.on_surface_faint     = 0x7D8A96,
 
-	.primary              = 0x0B6E8E,
+	.primary              = 0x0A6483,
 	.on_primary           = 0xFFFFFF,
-	.primary_container    = 0xCDE8F2,
+	.primary_container    = 0xBFE0EC,
 	.on_primary_container = 0x0A4F66,
-	.error                = 0xC62828,
+	.error                = 0xB71C1C,
 	.on_error             = 0xFFFFFF,
-	.warning              = 0xB45309,
-	.success              = 0x12733A,
+	.warning              = 0x9A4A06,
+	.success              = 0x0F6B35,
 	.cta                  = 0xF59E0B,
 	.on_cta               = 0x1F1300,
 
-	.sig_ecg              = 0xA15C07,
-	.sig_ppg              = 0x0B6E8E,
-	.sig_resp             = 0x12733A,
-	.sig_temp             = 0xC2410C,
+	.sig_ecg              = 0x9C4305,
+	.sig_ppg              = 0x0369A1,
+	.sig_resp             = 0x047857,
+	.sig_temp             = 0xB93A0B,
 	.sig_hrv              = 0x6D28D9,
 };
 

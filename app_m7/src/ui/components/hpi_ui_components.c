@@ -866,7 +866,7 @@ void hpi_ui_waveform_create(struct hpi_ui_waveform *w, lv_obj_t *parent,
 	lv_obj_set_style_border_width(w->chart, 0, 0);
 	/* Line only, no per-sample markers; set the width explicitly rather than
 	 * inheriting it. */
-	lv_obj_set_style_line_width(w->chart, 3, LV_PART_ITEMS);
+	lv_obj_set_style_line_width(w->chart, HPI_M3_TRACE_W, LV_PART_ITEMS);
 	hpi_ui_chart_hide_points(w->chart);
 	w->series = lv_chart_add_series(w->chart, color, LV_CHART_AXIS_PRIMARY_Y);
 
