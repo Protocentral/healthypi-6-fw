@@ -100,23 +100,13 @@ static void sweep_cb(lv_event_t *e)
  * relabel it as the value changes. */
 static lv_obj_t *pill_cycle(lv_obj_t *row, const char *text, lv_event_cb_t cb)
 {
-	lv_obj_t *p = lv_button_create(row);
+	lv_obj_t *p = hpi_ui_button_create(row, HPI_UI_BTN_SECONDARY, NULL, text,
+					   cb, NULL);
+	lv_obj_t *l = hpi_ui_button_label(p);
 
-	lv_obj_set_size(p, LV_SIZE_CONTENT, HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(p, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_radius(p, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(p, 1, 0);
-	lv_obj_set_style_border_color(p, HPI_M3_OUTLINE, 0);
+	/* Three controls + the lead indicator share one 480 px row. */
 	lv_obj_set_style_pad_hor(p, HPI_M3_SPACE_3, 0);
-	lv_obj_set_style_pad_ver(p, 0, 0);
-	lv_obj_add_event_cb(p, cb, LV_EVENT_CLICKED, NULL);
-
-	lv_obj_t *l = lv_label_create(p);
-
-	lv_label_set_text(l, text);
-	lv_obj_center(l);
-	lv_obj_set_style_text_font(l, HPI_M3_FONT_MONO, 0);
-	lv_obj_set_style_text_color(l, HPI_M3_ON_SURFACE_VARIANT, 0);
+	lv_obj_set_style_text_font(l, HPI_M3_FONT_MONO, 0);   /* a value, not a verb */
 	return l;
 }
 
@@ -135,17 +125,10 @@ static void controls_create(lv_obj_t *root)
 			      LV_FLEX_ALIGN_CENTER);
 
 	/* Pause (functional). */
-	lv_obj_t *pause = lv_button_create(row);
-	lv_obj_set_height(pause, HPI_M3_TOUCH_MIN);
-	hpi_m3_apply_card(pause, HPI_M3_PRIMARY_CONTAINER, HPI_M3_RADIUS_PILL);
-	lv_obj_set_style_border_width(pause, 0, 0);
+	lv_obj_t *pause = hpi_ui_button_create(row, HPI_UI_BTN_TONAL, NULL, "PAUSE",
+					       pause_cb, NULL);
 	lv_obj_set_style_pad_hor(pause, HPI_M3_SPACE_3, 0);
-	lv_obj_add_event_cb(pause, pause_cb, LV_EVENT_CLICKED, NULL);
-	s_l.pause_lbl = lv_label_create(pause);
-	lv_label_set_text(s_l.pause_lbl, "PAUSE");
-	lv_obj_center(s_l.pause_lbl);
-	lv_obj_set_style_text_font(s_l.pause_lbl, HPI_M3_FONT_CAPS_SM, 0);
-	lv_obj_set_style_text_color(s_l.pause_lbl, HPI_M3_PRIMARY_LIGHT, 0);
+	s_l.pause_lbl = hpi_ui_button_label(pause);
 
 	/* Zoom / sweep — live; both cycle their step on tap. Applied to all three
 	 * lanes at once, and only to the display: acquisition, the stream and the

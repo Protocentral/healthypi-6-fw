@@ -44,7 +44,7 @@ static lv_obj_t *toggle(lv_obj_t *parent, bool on, lv_obj_t **knob_out)
 	lv_obj_set_size(sw, 44, 24);
 	lv_obj_set_ext_click_area(sw, 20);
 	lv_obj_set_style_radius(sw, 12, 0);
-	lv_obj_set_style_bg_color(sw, on ? HPI_M3_PRIMARY : HPI_M3_OUTLINE, 0);
+	lv_obj_set_style_bg_color(sw, on ? HPI_M3_SWITCH_TRACK_ON : HPI_M3_SWITCH_TRACK_OFF, 0);
 	lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(sw, 0, 0);
 	lv_obj_clear_flag(sw, LV_OBJ_FLAG_SCROLLABLE);
@@ -52,7 +52,7 @@ static lv_obj_t *toggle(lv_obj_t *parent, bool on, lv_obj_t **knob_out)
 	lv_obj_set_size(k, 20, 20);
 	lv_obj_align(k, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -2 : 2, 0);
 	lv_obj_set_style_radius(k, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_bg_color(k, on ? HPI_M3_SURFACE : HPI_M3_ON_SURFACE_MUTED, 0);
+	lv_obj_set_style_bg_color(k, on ? HPI_M3_SWITCH_KNOB_ON : HPI_M3_SWITCH_KNOB_OFF, 0);
 	lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(k, 0, 0);
 	lv_obj_clear_flag(k, LV_OBJ_FLAG_SCROLLABLE);
@@ -64,9 +64,9 @@ static lv_obj_t *toggle(lv_obj_t *parent, bool on, lv_obj_t **knob_out)
 
 static void toggle_set(lv_obj_t *sw, lv_obj_t *knob, bool on)
 {
-	lv_obj_set_style_bg_color(sw, on ? HPI_M3_PRIMARY : HPI_M3_OUTLINE, 0);
+	lv_obj_set_style_bg_color(sw, on ? HPI_M3_SWITCH_TRACK_ON : HPI_M3_SWITCH_TRACK_OFF, 0);
 	lv_obj_align(knob, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -2 : 2, 0);
-	lv_obj_set_style_bg_color(knob, on ? HPI_M3_SURFACE : HPI_M3_ON_SURFACE_MUTED, 0);
+	lv_obj_set_style_bg_color(knob, on ? HPI_M3_SWITCH_KNOB_ON : HPI_M3_SWITCH_KNOB_OFF, 0);
 }
 
 static lv_obj_t *link_card(lv_obj_t *parent, const char *icon, lv_color_t icol,
@@ -196,22 +196,9 @@ lv_obj_t *hpi_scr_link_create(lv_obj_t *parent)
 	lv_obj_set_width(s_ln.wifi_detail, lv_pct(100));
 
 	/* Provisioning: a full-width button inside the Wi-Fi card. */
-	lv_obj_t *sap = lv_obj_create(wc);
+	lv_obj_t *sap = hpi_ui_button_create(wc, HPI_UI_BTN_TONAL, NULL, "SET UP WI-FI",
+					     softap_cb, NULL);
 	lv_obj_set_width(sap, lv_pct(100));
-	lv_obj_set_height(sap, LV_SIZE_CONTENT);
-	hpi_m3_apply_card(sap, HPI_M3_SURFACE, HPI_M3_RADIUS_PILL);
-	hpi_m3_apply_touch(sap);
-	lv_obj_set_style_border_width(sap, 1, 0);
-	lv_obj_set_style_border_color(sap, HPI_M3_PRIMARY, 0);
-	lv_obj_set_style_pad_ver(sap, HPI_M3_SPACE_2, 0);
-	lv_obj_clear_flag(sap, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_add_flag(sap, LV_OBJ_FLAG_CLICKABLE);
-	lv_obj_add_event_cb(sap, softap_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *sapl = lv_label_create(sap);
-	lv_label_set_text(sapl, "SET UP WI-FI");
-	lv_obj_set_style_text_font(sapl, HPI_M3_FONT_CAPS_SM, 0);
-	lv_obj_set_style_text_color(sapl, HPI_M3_PRIMARY, 0);
-	lv_obj_center(sapl);
 
 	/* BLE (live -- the co-processor handles BLE_ADV_START/_STOP). */
 	lv_obj_t *bhdr;

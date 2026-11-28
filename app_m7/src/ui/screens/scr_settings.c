@@ -100,6 +100,7 @@ static void entry(lv_obj_t *parent, const char *icon, lv_color_t icol,
 	lv_obj_t *c = card(parent);
 	lv_obj_add_flag(c, LV_OBJ_FLAG_CLICKABLE);
 	hpi_m3_apply_touch(c);
+	hpi_m3_apply_pressable(c, HPI_M3_SURFACE_CONTAINER);
 	lv_obj_add_event_cb(c, nav_cb, LV_EVENT_CLICKED, (void *)(intptr_t)to);
 	lv_obj_t *r = row_head(c, icon, icol, name);
 	if (trail) {
@@ -112,65 +113,6 @@ static void entry(lv_obj_t *parent, const char *icon, lv_color_t icol,
 	lv_label_set_text(ch, HPI_SYM_CHEV);
 	lv_obj_set_style_text_font(ch, HPI_M3_FONT_ICON, 0);
 	lv_obj_set_style_text_color(ch, HPI_M3_ON_SURFACE_MUTED, 0);
-}
-
-/* Segmented control. `cb` NULL builds it as an indicator (caller should then
- * hpi_m3_apply_inert() it); otherwise each segment is tappable and calls back
- * with its index. Returns the container so the caller can restyle or disable it.
- */
-static void seg_select(lv_obj_t *seg, int sel)
-{
-	uint32_t n = lv_obj_get_child_count(seg);
-
-	for (uint32_t i = 0; i < n; i++) {
-		lv_obj_t *s = lv_obj_get_child(seg, i);
-		bool on = ((int)i == sel);
-
-		lv_obj_set_style_bg_opa(s, on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-		lv_obj_set_style_text_color(lv_obj_get_child(s, 0),
-					    on ? HPI_M3_PRIMARY_LIGHT
-					       : HPI_M3_ON_SURFACE_VARIANT, 0);
-	}
-}
-
-static lv_obj_t *segmented(lv_obj_t *parent, const char *const *items, int n, int sel,
-			   lv_event_cb_t cb)
-{
-	lv_obj_t *seg = lv_obj_create(parent);
-	lv_obj_set_size(seg, lv_pct(100), HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(seg, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_radius(seg, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(seg, 1, 0);
-	lv_obj_set_style_border_color(seg, HPI_M3_OUTLINE, 0);
-	lv_obj_set_style_pad_all(seg, 0, 0);
-	lv_obj_set_style_clip_corner(seg, true, 0);
-	lv_obj_clear_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
-	for (int i = 0; i < n; i++) {
-		lv_obj_t *s = lv_obj_create(seg);
-		lv_obj_set_height(s, lv_pct(100));
-		lv_obj_set_flex_grow(s, 1);
-		lv_obj_set_style_bg_color(s, HPI_M3_PRIMARY_CONTAINER, 0);
-		lv_obj_set_style_bg_opa(s, i == sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-		lv_obj_set_style_radius(s, 0, 0);
-		lv_obj_set_style_border_width(s, i < n - 1 ? 1 : 0, 0);
-		lv_obj_set_style_border_side(s, LV_BORDER_SIDE_RIGHT, 0);
-		lv_obj_set_style_border_color(s, HPI_M3_OUTLINE, 0);
-		lv_obj_set_style_pad_all(s, 0, 0);
-		lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);
-		if (cb) {
-			lv_obj_add_flag(s, LV_OBJ_FLAG_CLICKABLE);
-			lv_obj_add_event_cb(s, cb, LV_EVENT_CLICKED,
-					    (void *)(intptr_t)i);
-		}
-		lv_obj_t *l = lv_label_create(s);
-		lv_label_set_text(l, items[i]);
-		lv_obj_center(l);
-		lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
-		lv_obj_set_style_text_color(l, i == sel ? HPI_M3_PRIMARY_LIGHT
-							: HPI_M3_ON_SURFACE_VARIANT, 0);
-	}
-	return seg;
 }
 
 /* ============================ Settings ============================ */
@@ -217,7 +159,7 @@ static void sleep_cb(lv_event_t *e)
 		return;
 	}
 	hpi_config_set_display_sleep_s(SLEEP_SECS[i]);
-	seg_select(s_sleep_seg, i);
+	hpi_ui_segmented_select(s_sleep_seg, i);
 }
 
 lv_obj_t *hpi_scr_settings_create(lv_obj_t *parent)
@@ -246,41 +188,16 @@ lv_obj_t *hpi_scr_settings_create(lv_obj_t *parent)
 	/* Display sleep (live) -- drives the UI's ambient-clock idle timeout. */
 	lv_obj_t *sc = card(body);
 	row_head(sc, HPI_SYM_SLEEP, HPI_M3_PRIMARY, "Display sleep");
-	s_sleep_seg = segmented(sc, SLEEP_LABEL, SLEEP_N, sleep_index(),
-				sleep_cb);
+	s_sleep_seg = hpi_ui_segmented_create(sc, SLEEP_LABEL, SLEEP_N,
+					      sleep_index(), sleep_cb);
 
 	/* Temperature unit -- inert: there is no temperature producer yet, so the
 	 * Temp chip reads "--" and there is nothing for a unit to apply to. */
 	lv_obj_t *tc = card(body);
 	lv_obj_t *tr = row_head(tc, HPI_SYM_TEMP, HPI_M3_SIG_TEMP, "Temperature unit");
 	static const char *const UNIT[] = { "\xC2\xB0" "C", "\xC2\xB0" "F" };
-	lv_obj_t *useg = lv_obj_create(tr);
-	lv_obj_set_size(useg, 2 * HPI_M3_TOUCH_MIN, HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(useg, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_radius(useg, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(useg, 1, 0);
-	lv_obj_set_style_border_color(useg, HPI_M3_OUTLINE, 0);
-	lv_obj_set_style_pad_all(useg, 0, 0);
-	lv_obj_set_style_clip_corner(useg, true, 0);
-	lv_obj_clear_flag(useg, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_set_flex_flow(useg, LV_FLEX_FLOW_ROW);
-	for (int i = 0; i < 2; i++) {
-		lv_obj_t *s = lv_obj_create(useg);
-		lv_obj_set_height(s, lv_pct(100));
-		lv_obj_set_flex_grow(s, 1);
-		lv_obj_set_style_bg_color(s, HPI_M3_PRIMARY_CONTAINER, 0);
-		lv_obj_set_style_bg_opa(s, i == 0 ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-		lv_obj_set_style_radius(s, 0, 0);
-		lv_obj_set_style_border_width(s, 0, 0);
-		lv_obj_set_style_pad_all(s, 0, 0);
-		lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);
-		lv_obj_t *l = lv_label_create(s);
-		lv_label_set_text(l, UNIT[i]);
-		lv_obj_center(l);
-		lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
-		lv_obj_set_style_text_color(l, i == 0 ? HPI_M3_PRIMARY_LIGHT
-						      : HPI_M3_ON_SURFACE_VARIANT, 0);
-	}
+	lv_obj_t *useg = hpi_ui_segmented_create(tr, UNIT, 2, 0, NULL);
+	lv_obj_set_width(useg, 2 * HPI_M3_TOUCH_MIN);
 	hpi_m3_apply_inert(useg);
 
 	/* Entries. */

@@ -177,9 +177,9 @@ static lv_obj_t *hl_toggle(lv_obj_t *parent, lv_obj_t **knob_out)
 
 static void hl_toggle_set(lv_obj_t *sw, lv_obj_t *knob, bool on)
 {
-	lv_obj_set_style_bg_color(sw, on ? HPI_M3_PRIMARY : HPI_M3_OUTLINE, 0);
+	lv_obj_set_style_bg_color(sw, on ? HPI_M3_SWITCH_TRACK_ON : HPI_M3_SWITCH_TRACK_OFF, 0);
 	lv_obj_align(knob, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -2 : 2, 0);
-	lv_obj_set_style_bg_color(knob, on ? HPI_M3_SURFACE : HPI_M3_ON_SURFACE_MUTED, 0);
+	lv_obj_set_style_bg_color(knob, on ? HPI_M3_SWITCH_KNOB_ON : HPI_M3_SWITCH_KNOB_OFF, 0);
 }
 
 /* Dimmed and untouchable when the slot cannot be switched or is mid-change. */

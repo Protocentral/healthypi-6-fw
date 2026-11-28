@@ -343,6 +343,8 @@ lv_obj_t *hpi_ui_subbar_create(lv_obj_t *parent, const char *title, int back_to)
 	lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_border_width(back, 0, 0);
 	lv_obj_set_style_pad_all(back, 0, 0);
+	lv_obj_set_style_radius(back, HPI_M3_RADIUS_PILL, 0);
+	hpi_m3_apply_pressable(back, HPI_M3_SURFACE);
 	lv_obj_add_event_cb(back, subbar_back_cb, LV_EVENT_CLICKED,
 			    (void *)(intptr_t)back_to);
 	lv_obj_move_to_index(back, 0);   /* ahead of the title */
@@ -422,6 +424,7 @@ lv_obj_t *hpi_ui_navbar_create(lv_obj_t *parent, int active)
 		lv_obj_set_flex_grow(btn, 1);        /* 5 equal-width items */
 		lv_obj_set_height(btn, lv_pct(100));
 		hpi_m3_apply_touch(btn);
+		hpi_m3_apply_pressable(btn, HPI_M3_SURFACE_CONTAINER);
 		lv_obj_set_style_pad_all(btn, HPI_M3_SPACE_1, 0);
 		lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
 		lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
@@ -509,6 +512,203 @@ void hpi_ui_chip_set(lv_obj_t *chip_label, const char *text, lv_color_t col)
 	}
 }
 
+/* ---- button ---- */
+
+struct btn_look {
+	lv_color_t bg, fg, edge;
+};
+
+/* The only place a kind is turned into colours -- and it only reads tokens. */
+static struct btn_look btn_look(enum hpi_ui_btn_kind kind)
+{
+	switch (kind) {
+	case HPI_UI_BTN_CTA:
+		return (struct btn_look){ HPI_M3_BTN_CTA_BG, HPI_M3_BTN_CTA_FG,
+					  HPI_M3_BTN_CTA_EDGE };
+	case HPI_UI_BTN_FILLED:
+		return (struct btn_look){ HPI_M3_BTN_FILLED_BG, HPI_M3_BTN_FILLED_FG,
+					  HPI_M3_BTN_FILLED_EDGE };
+	case HPI_UI_BTN_TONAL:
+		return (struct btn_look){ HPI_M3_BTN_TONAL_BG, HPI_M3_BTN_TONAL_FG,
+					  HPI_M3_BTN_TONAL_EDGE };
+	case HPI_UI_BTN_DANGER:
+		return (struct btn_look){ HPI_M3_BTN_DANGER_BG, HPI_M3_BTN_DANGER_FG,
+					  HPI_M3_BTN_DANGER_EDGE };
+	case HPI_UI_BTN_SECONDARY:
+	default:
+		return (struct btn_look){ HPI_M3_BTN_SECONDARY_BG,
+					  HPI_M3_BTN_SECONDARY_FG,
+					  HPI_M3_BTN_SECONDARY_EDGE };
+	}
+}
+
+/* LV_SYMBOL_* strings are Montserrat private-use glyphs (UTF-8 lead 0xEF);
+ * the Material Symbols face does not carry them. */
+static const lv_font_t *icon_font_for(const char *icon)
+{
+	return ((uint8_t)icon[0] == 0xEF) ? HPI_M3_FONT_SYMBOL : HPI_M3_FONT_ICON;
+}
+
+/* Paint one object's resting + pressed + selected + disabled states. Shared
+ * by buttons and segments so the two cannot drift. */
+static void paint_states(lv_obj_t *o, struct btn_look k, bool with_edge)
+{
+	struct btn_look s = { HPI_M3_BTN_SELECTED_BG, HPI_M3_BTN_SELECTED_FG,
+			      HPI_M3_BTN_SELECTED_EDGE };
+
+	lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+	lv_obj_set_style_bg_color(o, k.bg, 0);
+	lv_obj_set_style_text_color(o, k.fg, 0);
+	lv_obj_set_style_bg_color(o, lv_color_lighten(k.bg, HPI_M3_PRESSED_LIGHTEN),
+				  LV_STATE_PRESSED);
+
+	lv_obj_set_style_bg_color(o, s.bg, LV_STATE_CHECKED);
+	lv_obj_set_style_text_color(o, s.fg, LV_STATE_CHECKED);
+	lv_obj_set_style_bg_color(o, lv_color_lighten(s.bg, HPI_M3_PRESSED_LIGHTEN),
+				  LV_STATE_CHECKED | LV_STATE_PRESSED);
+	if (with_edge) {
+		lv_obj_set_style_border_width(o, HPI_M3_BTN_EDGE_W, 0);
+		lv_obj_set_style_border_opa(o, LV_OPA_COVER, 0);
+		lv_obj_set_style_border_color(o, k.edge, 0);
+		lv_obj_set_style_border_color(o, s.edge, LV_STATE_CHECKED);
+	}
+
+	/* The default theme's pressed style is a 35 % black recolor: invisible
+	 * on dark fills, muddy on amber. Ours is the lighten above. */
+	lv_obj_set_style_recolor_opa(o, LV_OPA_TRANSP, LV_STATE_PRESSED);
+	lv_obj_set_style_opa(o, HPI_M3_DISABLED_OPA, LV_STATE_DISABLED);
+}
+
+lv_obj_t *hpi_ui_button_create(lv_obj_t *parent, enum hpi_ui_btn_kind kind,
+			       const char *icon, const char *text,
+			       lv_event_cb_t cb, void *user)
+{
+	lv_obj_t *b = lv_button_create(parent);
+
+	lv_obj_set_size(b, LV_SIZE_CONTENT, HPI_M3_TOUCH_MIN);
+	hpi_m3_apply_touch(b);
+	lv_obj_set_style_radius(b, HPI_M3_BTN_RADIUS, 0);
+	lv_obj_set_style_shadow_width(b, 0, 0);
+	lv_obj_set_style_pad_hor(b, HPI_M3_BTN_PAD_HOR, 0);
+	lv_obj_set_style_pad_ver(b, 0, 0);
+	lv_obj_set_style_pad_column(b, HPI_M3_SPACE_2, 0);
+	lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(b, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+			      LV_FLEX_ALIGN_CENTER);
+	paint_states(b, btn_look(kind), true);
+	if (cb) {
+		lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
+	}
+
+	lv_obj_t *ic = lv_label_create(b);            /* child 0 */
+
+	lv_label_set_text(ic, icon ? icon : "");
+	lv_obj_set_style_text_font(ic, icon ? icon_font_for(icon) : HPI_M3_FONT_ICON, 0);
+	if (!icon) {
+		lv_obj_add_flag(ic, LV_OBJ_FLAG_HIDDEN);
+	}
+
+	lv_obj_t *l = lv_label_create(b);             /* child 1 */
+
+	lv_label_set_text(l, text ? text : "");
+	lv_obj_set_style_text_font(l, HPI_M3_BTN_FONT, 0);
+	if (!text) {
+		lv_obj_add_flag(l, LV_OBJ_FLAG_HIDDEN);
+	}
+	return b;
+}
+
+void hpi_ui_button_set_kind(lv_obj_t *btn, enum hpi_ui_btn_kind kind)
+{
+	if (btn) {
+		paint_states(btn, btn_look(kind), true);
+	}
+}
+
+lv_obj_t *hpi_ui_button_label(lv_obj_t *btn)
+{
+	return btn ? lv_obj_get_child(btn, 1) : NULL;
+}
+
+void hpi_ui_button_set_selected(lv_obj_t *btn, bool selected)
+{
+	if (btn) {
+		lv_obj_set_state(btn, LV_STATE_CHECKED, selected);
+	}
+}
+
+void hpi_ui_button_set_selected_colors(lv_obj_t *btn, lv_color_t bg, lv_color_t fg)
+{
+	if (btn == NULL) {
+		return;
+	}
+	lv_obj_set_style_bg_color(btn, bg, LV_STATE_CHECKED);
+	lv_obj_set_style_text_color(btn, fg, LV_STATE_CHECKED);
+	lv_obj_set_style_border_color(btn, bg, LV_STATE_CHECKED);
+	lv_obj_set_style_bg_color(btn, lv_color_lighten(bg, HPI_M3_PRESSED_LIGHTEN),
+				  LV_STATE_CHECKED | LV_STATE_PRESSED);
+}
+
+/* ---- segmented control ---- */
+
+void hpi_ui_segmented_select(lv_obj_t *seg, int sel)
+{
+	uint32_t n = seg ? lv_obj_get_child_count(seg) : 0;
+
+	for (uint32_t i = 0; i < n; i++) {
+		lv_obj_set_state(lv_obj_get_child(seg, i), LV_STATE_CHECKED,
+				 (int)i == sel);
+	}
+}
+
+lv_obj_t *hpi_ui_segmented_create(lv_obj_t *parent, const char *const *items,
+				  int n, int sel, lv_event_cb_t cb)
+{
+	struct btn_look k = btn_look(HPI_UI_BTN_SECONDARY);
+	lv_obj_t *seg = lv_obj_create(parent);
+
+	lv_obj_set_size(seg, lv_pct(100), HPI_M3_TOUCH_MIN);
+	lv_obj_set_style_bg_color(seg, k.bg, 0);
+	lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
+	lv_obj_set_style_radius(seg, HPI_M3_BTN_RADIUS, 0);
+	lv_obj_set_style_border_width(seg, HPI_M3_BTN_EDGE_W, 0);
+	lv_obj_set_style_border_color(seg, k.edge, 0);
+	lv_obj_set_style_pad_all(seg, 0, 0);
+	lv_obj_set_style_pad_column(seg, 0, 0);
+	/* Clips the end segments' fill to the rounded bar. */
+	lv_obj_set_style_clip_corner(seg, true, 0);
+	lv_obj_clear_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
+
+	for (int i = 0; i < n; i++) {
+		lv_obj_t *s = lv_obj_create(seg);
+
+		lv_obj_set_height(s, lv_pct(100));
+		lv_obj_set_flex_grow(s, 1);
+		lv_obj_set_style_radius(s, 0, 0);
+		lv_obj_set_style_pad_all(s, 0, 0);
+		paint_states(s, k, false);
+		/* Divider between segments only, on the segment's right edge. */
+		lv_obj_set_style_border_side(s, LV_BORDER_SIDE_RIGHT, 0);
+		lv_obj_set_style_border_width(s, i < n - 1 ? HPI_M3_BTN_EDGE_W : 0, 0);
+		lv_obj_set_style_border_color(s, k.edge, 0);
+		lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);
+		if (cb) {
+			lv_obj_add_flag(s, LV_OBJ_FLAG_CLICKABLE);
+			lv_obj_add_event_cb(s, cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+		}
+
+		lv_obj_t *l = lv_label_create(s);
+
+		lv_label_set_text(l, items[i]);
+		lv_obj_center(l);
+		lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
+	}
+	hpi_ui_segmented_select(seg, sel);
+	return seg;
+}
+
 /* ---- stepper ---- */
 
 /* One key of the stepper: a HPI_M3_TOUCH_MIN square, so the tap area is the
@@ -516,22 +716,12 @@ void hpi_ui_chip_set(lv_obj_t *chip_label, const char *text, lv_color_t col)
 static lv_obj_t *stepper_key(lv_obj_t *parent, const char *sym,
 			     lv_event_cb_t cb, struct hpi_ui_stepper *s)
 {
-	lv_obj_t *b = lv_button_create(parent);
+	lv_obj_t *b = hpi_ui_button_create(parent, HPI_UI_BTN_SECONDARY, sym, NULL,
+					   cb, s);
 
-	lv_obj_set_size(b, HPI_M3_TOUCH_MIN, HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_color(b, HPI_M3_SURFACE_HIGH, 0);
-	lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-	lv_obj_set_style_radius(b, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(b, 0, 0);
-	lv_obj_set_style_pad_all(b, 0, 0);
-	lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, s);
-
-	lv_obj_t *l = lv_label_create(b);
-
-	lv_label_set_text(l, sym);
-	lv_obj_center(l);
-	lv_obj_set_style_text_font(l, HPI_M3_FONT_ICON_LG, 0);
-	lv_obj_set_style_text_color(l, HPI_M3_ON_SURFACE, 0);
+	lv_obj_set_width(b, HPI_M3_TOUCH_MIN);
+	lv_obj_set_style_pad_hor(b, 0, 0);
+	lv_obj_set_style_text_font(lv_obj_get_child(b, 0), HPI_M3_FONT_ICON_LG, 0);
 	return b;
 }
 
@@ -655,7 +845,7 @@ void hpi_ui_waveform_create(struct hpi_ui_waveform *w, lv_obj_t *parent,
 	w->panel = lv_obj_create(parent);
 	lv_obj_set_width(w->panel, lv_pct(100));
 	lv_obj_set_flex_grow(w->panel, 1);
-	hpi_m3_apply_card(w->panel, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_MD);
+	hpi_m3_apply_card(w->panel, HPI_M3_PLOT_WELL, HPI_M3_RADIUS_MD);
 	lv_obj_set_style_pad_all(w->panel, HPI_M3_SPACE_2, 0);
 	lv_obj_clear_flag(w->panel, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(w->panel, LV_FLEX_FLOW_COLUMN);

@@ -63,7 +63,7 @@ static struct {
 	lv_timer_t *stop_timer;  /* one-shot confirm timer */
 	lv_obj_t   *chan_sw[REC_CHAN_COUNT];  /* switch tracks, visual only */
 	bool        chan_on[REC_CHAN_COUNT];
-	lv_obj_t   *dur_seg[REC_DUR_COUNT];
+	lv_obj_t   *dur_seg;     /* shared segmented control */
 	int         dur_idx;
 	bool        mark_long_active; /* suppress click after long-press */
 	lv_obj_t   *pause_btn;
@@ -134,7 +134,7 @@ static void stop_confirm_timeout(lv_timer_t *t)
 	lv_obj_t *btn = (lv_obj_t *)lv_timer_get_user_data(t);
 	s_rec.stop_armed = false;
 	if (btn) {
-		lv_label_set_text(lv_obj_get_child(btn, 1), "STOP & SAVE");
+		lv_label_set_text(hpi_ui_button_label(btn), "STOP & SAVE");
 	}
 	lv_timer_del(t);
 	s_rec.stop_timer = NULL;
@@ -145,7 +145,7 @@ static void stop_btn_cb(lv_event_t *e)
 	lv_obj_t *btn = lv_event_get_target(e);
 	if (!s_rec.stop_armed) {
 		s_rec.stop_armed = true;
-		lv_label_set_text(lv_obj_get_child(btn, 1), "CONFIRM");
+		lv_label_set_text(hpi_ui_button_label(btn), "CONFIRM");
 		s_rec.stop_timer = lv_timer_create(stop_confirm_timeout, 2000, btn);
 		lv_timer_set_user_data(s_rec.stop_timer, btn);
 		return;
@@ -171,6 +171,7 @@ static lv_obj_t *channel_row(lv_obj_t *parent, const char *icon, lv_color_t icol
 	lv_obj_set_width(row, lv_pct(100));
 	lv_obj_set_height(row, LV_SIZE_CONTENT);
 	hpi_m3_apply_touch(row);
+	hpi_m3_apply_pressable(row, HPI_M3_SURFACE_CONTAINER);
 	lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_add_event_cb(row, channel_toggle_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
 	lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
@@ -220,69 +221,23 @@ static lv_obj_t *channel_row(lv_obj_t *parent, const char *icon, lv_color_t icol
 /* Paint a switch track for its on/off state. */
 static void channel_switch_paint(lv_obj_t *sw, bool on)
 {
-	lv_obj_set_style_bg_color(sw, on ? HPI_M3_PRIMARY : HPI_M3_OUTLINE, 0);
+	lv_obj_set_style_bg_color(sw, on ? HPI_M3_SWITCH_TRACK_ON : HPI_M3_SWITCH_TRACK_OFF, 0);
 	lv_obj_t *knob = lv_obj_get_child(sw, 0);
 	if (knob) {
 		lv_obj_align(knob, on ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, on ? -2 : 2, 0);
-		lv_obj_set_style_bg_color(knob, on ? HPI_M3_SURFACE : HPI_M3_ON_SURFACE_MUTED, 0);
+		lv_obj_set_style_bg_color(knob, on ? HPI_M3_SWITCH_KNOB_ON : HPI_M3_SWITCH_KNOB_OFF, 0);
 	}
 }
 
-/* Filled M3 CTA/button with an icon + caps label. */
+/* A full-width Rec action. Looks come from the shared button table
+ * (HPI_M3_BTN_* in the theme); child 1 is the label the handlers relabel. */
 static lv_obj_t *rec_button(lv_obj_t *parent, const char *icon, const char *text,
-			    lv_color_t bg, lv_color_t fg, lv_event_cb_t cb)
+			    enum hpi_ui_btn_kind kind, lv_event_cb_t cb)
 {
-	lv_obj_t *b = lv_button_create(parent);
-	lv_obj_set_size(b, lv_pct(100), HPI_M3_TOUCH_MIN);   /* START/STOP/MARK */
-	hpi_m3_apply_card(b, bg, HPI_M3_RADIUS_XL);
-	lv_obj_set_style_border_width(b, 0, 0);
-	lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
-	lv_obj_set_flex_align(b, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-			      LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_style_pad_column(b, HPI_M3_SPACE_2, 0);
-	lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_t *b = hpi_ui_button_create(parent, kind, icon, text, cb, NULL);
 
-	lv_obj_t *ic = lv_label_create(b);
-	lv_label_set_text(ic, icon);
-	if (icon[0] == '\xEF') {
-		/* LVGL built-in LV_SYMBOL_* strings start with 0xEF in UTF-8 —
-		 * HPI_M3_FONT_ICON doesn't include that codepoint range, so
-		 * force the stock font that does. */
-		lv_obj_set_style_text_font(ic, &lv_font_montserrat_14, 0);
-	} else {
-		lv_obj_set_style_text_font(ic, HPI_M3_FONT_ICON, 0);
-	}
-	lv_obj_set_style_text_color(ic, fg, 0);
-	lv_obj_t *l = lv_label_create(b);
-	lv_label_set_text(l, text);
-	lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS, 0);
-	lv_obj_set_style_text_color(l, fg, 0);
+	lv_obj_set_width(b, lv_pct(100));   /* START/STOP/MARK */
 	return b;
-}
-
-static lv_obj_t *seg_item(lv_obj_t *bar, const char *text, bool on, bool last, int idx)
-{
-	lv_obj_t *s = lv_obj_create(bar);
-	lv_obj_set_height(s, lv_pct(100));
-	lv_obj_set_flex_grow(s, 1);
-	lv_obj_set_style_bg_color(s, HPI_M3_PRIMARY_CONTAINER, 0);
-	lv_obj_set_style_bg_opa(s, on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-	lv_obj_set_style_radius(s, 0, 0);
-	lv_obj_set_style_border_width(s, last ? 0 : 1, 0);
-	lv_obj_set_style_border_side(s, LV_BORDER_SIDE_RIGHT, 0);
-	lv_obj_set_style_border_color(s, HPI_M3_OUTLINE, 0);
-	lv_obj_set_style_pad_all(s, 0, 0);
-	lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_t *l = lv_label_create(s);
-	lv_label_set_text(l, text);
-	lv_obj_center(l);
-	lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
-	lv_obj_set_style_text_color(l, on ? HPI_M3_PRIMARY_LIGHT
-					  : HPI_M3_ON_SURFACE_VARIANT, 0);
-	if (idx >= 0 && idx < REC_DUR_COUNT) {
-		s_rec.dur_seg[idx] = s;
-	}
-	return s;
 }
 
 static void channel_toggle_cb(lv_event_t *e)
@@ -310,18 +265,7 @@ static void duration_select_cb(lv_event_t *e)
 		return;
 	}
 	s_rec.dur_idx = idx;
-	for (int i = 0; i < REC_DUR_COUNT; i++) {
-		lv_obj_t *s = s_rec.dur_seg[i];
-		if (!s) {
-			continue;
-		}
-		lv_obj_set_style_bg_opa(s, i == idx ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-		lv_obj_t *l = lv_obj_get_child(s, 0);
-		if (l) {
-			lv_obj_set_style_text_color(l, i == idx ? HPI_M3_PRIMARY_LIGHT
-							 : HPI_M3_ON_SURFACE_VARIANT, 0);
-		}
-	}
+	hpi_ui_segmented_select(s_rec.dur_seg, idx);
 }
 
 /* --- callbacks --- */
@@ -366,7 +310,7 @@ static void rec_start_cb(lv_event_t *e)
 			s_rec.stop_timer = NULL;
 		}
 		if (s_rec.stop_btn) {
-			lv_obj_t *lbl = lv_obj_get_child(s_rec.stop_btn, 1);
+			lv_obj_t *lbl = hpi_ui_button_label(s_rec.stop_btn);
 			if (lbl) {
 				lv_label_set_text(lbl, "STOP & SAVE");
 			}
@@ -445,13 +389,12 @@ static void rec_mark_long_cb(lv_event_t *e)
 	lv_textarea_set_max_length(ta, 63);   /* the service keeps 63 bytes + NUL */
 	lv_textarea_set_placeholder_text(ta, "Event note (optional)");
 
-	lv_obj_t *cancel = lv_button_create(ov);
-	lv_obj_set_size(cancel, lv_pct(30), HPI_M3_TOUCH_MIN);
+	/* Was a stock LVGL button: default-theme #2196F3, the one control in the
+	 * UI that ignored the palette. */
+	lv_obj_t *cancel = hpi_ui_button_create(ov, HPI_UI_BTN_SECONDARY, NULL,
+						"CANCEL", note_cancel_cb, NULL);
+	lv_obj_set_width(cancel, lv_pct(30));
 	lv_obj_align(cancel, LV_ALIGN_TOP_RIGHT, -8, 8);
-	lv_obj_add_event_cb(cancel, note_cancel_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *cl = lv_label_create(cancel);
-	lv_label_set_text(cl, "CANCEL");
-	lv_obj_center(cl);
 
 	lv_obj_t *kb = lv_keyboard_create(ov);
 	lv_keyboard_set_textarea(kb, ta);
@@ -507,23 +450,10 @@ static void build_setup(lv_obj_t *parent)
 	/* Duration: auto-stop after this much recorded time. */
 	lv_obj_t *du = rec_card(s_rec.setup);
 	section_label(du, "DURATION");
-	lv_obj_t *seg = lv_obj_create(du);
-	lv_obj_set_size(seg, lv_pct(100), HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(seg, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_radius(seg, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(seg, 1, 0);
-	lv_obj_set_style_border_color(seg, HPI_M3_OUTLINE, 0);
-	lv_obj_set_style_pad_all(seg, 0, 0);
-	lv_obj_set_style_clip_corner(seg, true, 0);
-	lv_obj_clear_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
 	static const char *const dur_label[REC_DUR_COUNT] = { "30 s", "5 min", "1 h", "CONT" };
 	s_rec.dur_idx = REC_DUR_DEFAULT;
-	for (int i = 0; i < REC_DUR_COUNT; i++) {
-		seg_item(seg, dur_label[i], i == REC_DUR_DEFAULT, i == REC_DUR_COUNT - 1, i);
-		lv_obj_add_event_cb(s_rec.dur_seg[i], duration_select_cb, LV_EVENT_CLICKED,
-				    (void *)(intptr_t)i);
-	}
+	s_rec.dur_seg = hpi_ui_segmented_create(du, dur_label, REC_DUR_COUNT,
+						REC_DUR_DEFAULT, duration_select_cb);
 
 	/* SD card (live free space). */
 	lv_obj_t *sd = rec_card(s_rec.setup);
@@ -579,13 +509,12 @@ static void build_setup(lv_obj_t *parent)
 
 	/* START CTA + BROWSE. */
 	lv_obj_t *cta = rec_button(s_rec.setup, HPI_SYM_REC, "START RECORDING",
-				   HPI_M3_CTA, HPI_M3_ON_CTA, rec_start_cb);
+				   HPI_UI_BTN_CTA, rec_start_cb);
 	lv_obj_set_style_margin_top(cta, HPI_M3_SPACE_2, 0);
 
 	lv_obj_t *browse = rec_button(s_rec.setup, LV_SYMBOL_LIST,
 				      "BROWSE RECORDINGS",
-				      HPI_M3_SURFACE_CONTAINER, HPI_M3_ON_SURFACE,
-				      rec_browse_cb);
+				      HPI_UI_BTN_SECONDARY, rec_browse_cb);
 	lv_obj_set_style_margin_top(browse, HPI_M3_SPACE_2, 0);
 
 }
@@ -643,18 +572,19 @@ static void build_active(lv_obj_t *parent)
 	lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_COLUMN);
 
 	/* Pause / Resume; the label follows the service in refresh. */
-	s_rec.pause_btn = rec_button(btns, LV_SYMBOL_PAUSE, "PAUSE", HPI_M3_CTA,
-				     HPI_M3_ON_CTA, pause_btn_cb);
+	s_rec.pause_btn = rec_button(btns, LV_SYMBOL_PAUSE, "PAUSE",
+				     HPI_UI_BTN_CTA, pause_btn_cb);
 
 	/* Mark button: short press = mark, long press = note keyboard. */
 	lv_obj_t *mark_btn = rec_button(btns, HPI_SYM_HRV, "MARK EVENT",
-					HPI_M3_SURFACE_CONTAINER, HPI_M3_SIG_RESP,
-					rec_mark_cb);
+					HPI_UI_BTN_SECONDARY, rec_mark_cb);
+	/* Event marks are drawn green in the recording; the icon says so. */
+	lv_obj_set_style_text_color(lv_obj_get_child(mark_btn, 0), HPI_M3_SIG_RESP, 0);
 	lv_obj_add_event_cb(mark_btn, rec_mark_long_cb, LV_EVENT_LONG_PRESSED, NULL);
 
 	/* Stop with two-tap confirm: first tap arms, second tap confirms. */
-	s_rec.stop_btn = rec_button(btns, HPI_SYM_REC, "STOP & SAVE", HPI_M3_ERROR,
-				    HPI_M3_ON_SURFACE, stop_btn_cb);
+	s_rec.stop_btn = rec_button(btns, HPI_SYM_REC, "STOP & SAVE",
+				    HPI_UI_BTN_DANGER, stop_btn_cb);
 
 	lv_obj_t *hint = lv_label_create(s_rec.active);
 	lv_label_set_text(hint, "Hardware button: short press = mark event");
@@ -862,7 +792,7 @@ void hpi_scr_record_refresh(void)
 			 st.paused ? "  \xC2\xB7  PAUSED" : "");
 		lv_label_set_text(s_rec.meta, buf);
 		lv_label_set_text(s_rec.fname, st.path);
-		lv_obj_t *plbl = lv_obj_get_child(s_rec.pause_btn, 1);
+		lv_obj_t *plbl = hpi_ui_button_label(s_rec.pause_btn);
 		if (plbl) {
 			lv_label_set_text(plbl, st.paused ? "RESUME" : "PAUSE");
 		}

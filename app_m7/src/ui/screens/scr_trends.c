@@ -121,17 +121,8 @@ static void tab_select(intptr_t idx)
 {
 	s_t.sel = (enum vital)idx;
 	for (int i = 0; i <= V_N; i++) {
-		bool on = (i == (int)idx);
-
-		lv_obj_set_style_bg_opa(s_t.tabs[i], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-		lv_obj_t *l = lv_obj_get_child(s_t.tabs[i], 0);
-		if (l) {
-			lv_obj_set_style_text_color(l, on ? vcol((enum vital)idx)
-							  : HPI_M3_ON_SURFACE_VARIANT, 0);
-		}
+		hpi_ui_button_set_selected(s_t.tabs[i], i == (int)idx);
 	}
-	lv_obj_set_style_bg_color(s_t.tabs[(int)idx], vcol((enum vital)idx), 0);
-	lv_obj_set_style_bg_opa(s_t.tabs[(int)idx], LV_OPA_20, 0);
 	lv_chart_set_series_color(s_t.chart, s_t.series, vcol(s_t.sel));
 	hpi_scr_trends_refresh();
 }
@@ -157,19 +148,16 @@ void hpi_scr_trends_select(enum hpi_trend_vital v)
 
 static void tab_add(lv_obj_t *bar, const char *text, int idx)
 {
-	lv_obj_t *t = lv_button_create(bar);
-	lv_obj_set_height(t, HPI_M3_TOUCH_MIN);   /* live tab: switches the series */
-	lv_obj_set_style_radius(t, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_bg_opa(t, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_border_width(t, 1, 0);
-	lv_obj_set_style_border_color(t, HPI_M3_OUTLINE, 0);
-	lv_obj_set_style_pad_hor(t, HPI_M3_SPACE_3, 0);
-	lv_obj_add_event_cb(t, tab_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
-	lv_obj_t *l = lv_label_create(t);
-	lv_label_set_text(l, text);
-	lv_obj_center(l);
-	lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
-	lv_obj_set_style_text_color(l, HPI_M3_ON_SURFACE_VARIANT, 0);
+	/* Five equal tabs across the row. Selected = filled with the vital's own
+	 * colour, so the tab matches its trace. */
+	lv_obj_t *t = hpi_ui_button_create(bar, HPI_UI_BTN_SECONDARY, NULL, text,
+					   tab_cb, (void *)(intptr_t)idx);
+	lv_color_t c = (idx == V_N) ? HPI_M3_SIG_HRV : vcol((enum vital)idx);
+
+	lv_obj_set_flex_grow(t, 1);
+	lv_obj_set_style_pad_hor(t, HPI_M3_SPACE_1, 0);
+	lv_obj_set_style_text_font(hpi_ui_button_label(t), HPI_M3_FONT_CAPS_SM, 0);
+	hpi_ui_button_set_selected_colors(t, c, HPI_M3_BTN_SELECTED_FG);
 	s_t.tabs[idx] = t;
 }
 

@@ -81,6 +81,7 @@ static void chip_create(lv_obj_t **value_out, lv_obj_t *rowparent, const char *i
 	lv_obj_set_height(chip, LV_SIZE_CONTENT);
 	hpi_m3_apply_card(chip, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_LG);
 	hpi_m3_apply_touch(chip);
+	hpi_m3_apply_pressable(chip, HPI_M3_SURFACE_CONTAINER);
 	lv_obj_add_flag(chip, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_add_event_cb(chip, chip_cb, LV_EVENT_CLICKED, (void *)(intptr_t)trend);
 	lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);

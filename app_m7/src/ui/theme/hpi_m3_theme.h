@@ -6,10 +6,31 @@
  * truth for color roles, the type scale, shape (corner radii) and the 4 dp
  * spacing grid. Screens and components reference ONLY these tokens.
  *
- * HealthyPi 6 palette (dark): brand blue #6FB3CC for nav/selection/primary
- * actions; Signal Amber #FBBF24 for ECG/HR and the single big CTA per screen.
- * Surfaces step #14171A -> #1C2126 -> #232A31 with 1 px outlines (no pure
- * black); all accents target >=4.5:1 contrast on these surfaces.
+ * HealthyPi 6 palette ("LCD slate"): brand blue #6FB3CC for nav/selection/
+ * primary actions; Signal Amber #FBBF24 for ECG/HR and the single big CTA per
+ * screen.
+ *
+ * ---------------------------------------------------------------------------
+ * HOW TO RESTYLE THE UI -- every colour, radius and state lives in this file.
+ *
+ *   1. Background / cards / outlines ..... "Surfaces" below
+ *   2. Text greys ........................ "Text"
+ *   3. Brand + status accents ............ "Accents"
+ *   4. What each button kind looks like .. "Buttons" (HPI_M3_BTN_*)
+ *   5. Pressed / disabled feedback ....... "Interaction states"
+ *
+ * Screens never name a hex value; components never name a colour that is not
+ * a token here. Change a value, rebuild, done.
+ * ---------------------------------------------------------------------------
+ *
+ * Why slate and not near-black: this is a backlit TFT, not an OLED. Backlight
+ * bleed lifts the darkest greys toward one shade, so the previous ramp
+ * (#14171A/#1C2126/#232A31, 1.12:1 between levels, 1.45:1 for the outline)
+ * merged into one flat field and outlined controls vanished. The surfaces now
+ * start above the bleed floor and step further apart; waveforms keep a darker
+ * PLOT_WELL so traces stay at maximum contrast. Keep every accent and text
+ * token >= 4.5:1 on SURFACE and SURFACE_CONTAINER if you change them (measure
+ * at RGB565 -- the UI renders 16-bit).
  *
  * No `static lv_style_t` anywhere in the UI — apply tokens with direct
  * lv_obj_set_style_* setters (see helpers below).
@@ -23,26 +44,32 @@
 extern "C" {
 #endif
 
-/* ---- M3 color roles (HealthyPi 6 palette, dark) ---- */
-#define HPI_M3_PRIMARY            lv_color_hex(0x6FB3CC)  /* brand blue: nav, selection, primary actions */
-#define HPI_M3_ON_PRIMARY         lv_color_hex(0x0E1114)  /* dark text/icon on brand blue */
-#define HPI_M3_PRIMARY_CONTAINER  lv_color_hex(0x1E3A45)  /* brand-tinted container fill */
-#define HPI_M3_PRIMARY_LIGHT      lv_color_hex(0xA8D4E4)  /* brand blue hover/emphasis */
-#define HPI_M3_SURFACE            lv_color_hex(0x14171A)  /* base surface */
-#define HPI_M3_SURFACE_CONTAINER  lv_color_hex(0x1C2126)  /* card / container surface */
-#define HPI_M3_SURFACE_HIGH       lv_color_hex(0x232A31)  /* raised surface */
-#define HPI_M3_SURFACE_DIM        lv_color_hex(0x0E1114)  /* splash / dimmed backdrop */
+/* ==== 1. Surfaces (darkest -> lightest) ==== */
+#define HPI_M3_SURFACE_DIM        lv_color_hex(0x161B20)  /* splash / ambient / power backdrop */
+#define HPI_M3_PLOT_WELL          lv_color_hex(0x161B20)  /* behind waveforms: recessed, max trace contrast */
+#define HPI_M3_SURFACE            lv_color_hex(0x1E252C)  /* screen background */
+#define HPI_M3_SURFACE_CONTAINER  lv_color_hex(0x29323B)  /* card / list row / nav bar */
+#define HPI_M3_SURFACE_HIGH       lv_color_hex(0x35404B)  /* raised: secondary buttons, stepper keys */
+#define HPI_M3_OUTLINE            lv_color_hex(0x4A5763)  /* 1 px card / button edge */
+#define HPI_M3_DIVIDER            lv_color_hex(0x323C46)  /* hairline row divider, chart grid */
+
+/* ==== 2. Text ==== */
 #define HPI_M3_ON_SURFACE         lv_color_hex(0xECEFF1)  /* primary text (bright) */
 #define HPI_M3_ON_SURFACE_VARIANT lv_color_hex(0x9AA6AD)  /* secondary text / labels */
-#define HPI_M3_ON_SURFACE_MUTED   lv_color_hex(0x6B767E)  /* units, captions */
-#define HPI_M3_ON_SURFACE_FAINT   lv_color_hex(0x4A555C)  /* disabled / pending */
-#define HPI_M3_OUTLINE            lv_color_hex(0x2C343B)  /* 1 px card outline */
-#define HPI_M3_DIVIDER            lv_color_hex(0x1B2126)  /* hairline row divider */
+#define HPI_M3_ON_SURFACE_MUTED   lv_color_hex(0x7F8B93)  /* units, captions (4.5:1 on SURFACE) */
+#define HPI_M3_ON_SURFACE_FAINT   lv_color_hex(0x5C6870)  /* disabled / pending -- decorative only */
+
+/* ==== 3. Accents ==== */
+#define HPI_M3_PRIMARY            lv_color_hex(0x6FB3CC)  /* brand blue: nav, selection, primary actions */
+#define HPI_M3_ON_PRIMARY         lv_color_hex(0x0E1114)  /* dark text/icon on brand blue */
+#define HPI_M3_PRIMARY_CONTAINER  lv_color_hex(0x1E4352)  /* brand-tinted fill: selected tab/segment */
+#define HPI_M3_PRIMARY_LIGHT      lv_color_hex(0xA8D4E4)  /* text/icon on PRIMARY_CONTAINER */
 #define HPI_M3_ERROR              lv_color_hex(0xF87171)
+#define HPI_M3_ON_ERROR           lv_color_hex(0x2A0A0A)  /* dark text on red (6.9:1; white was 2.3:1) */
 #define HPI_M3_WARNING            lv_color_hex(0xFB923C)
 #define HPI_M3_SUCCESS            lv_color_hex(0x4ADE80)
 
-/* ---- brand CTA (the single big call-to-action per screen = Signal Amber) ---- */
+/* Brand CTA: the single big call-to-action per screen = Signal Amber. */
 #define HPI_M3_CTA                lv_color_hex(0xFBBF24)
 #define HPI_M3_ON_CTA             lv_color_hex(0x1F1300)  /* dark text/icon on amber */
 
@@ -92,7 +119,7 @@ extern "C" {
 #define HPI_M3_RADIUS_MD  12
 #define HPI_M3_RADIUS_LG  16
 #define HPI_M3_RADIUS_XL  28
-#define HPI_M3_RADIUS_PILL 22   /* fully-rounded 44 px pill button / chip */
+#define HPI_M3_RADIUS_PILL LV_RADIUS_CIRCLE   /* fully rounded at any height (was 22: sized for 44 px) */
 
 /* ---- spacing (4 dp grid) + min touch target ---- */
 #define HPI_M3_SPACE_1  4
@@ -110,6 +137,67 @@ extern "C" {
  * nothing rather than the neighbour. Use as pad_row/pad_column wherever
  * targets are stacked. */
 #define HPI_M3_TOUCH_GAP 16
+
+/* ==== 4. Buttons ===========================================================
+ * One table for every button in the UI (hpi_ui_button_create() in
+ * components/). Each kind = fill / text+icon / 1 px edge. Every kind has a
+ * SOLID fill -- keep it that way: on this LCD a transparent button with a
+ * hairline edge reads as floating text, which is what Live/Trends had.
+ *
+ *   CTA        the one main action on a screen (START RECORDING, PAUSE)
+ *   FILLED     a primary action that is not the CTA
+ *   TONAL      a quieter primary action (Live PAUSE)
+ *   SECONDARY  everything else: BROWSE, CLOSE, MARK, pager, zoom/sweep, tabs
+ *   DANGER     destructive: STOP & SAVE, DELETE
+ *
+ * SELECTED is the look of a SECONDARY button in its selected state (tabs,
+ * segmented controls): hpi_ui_button_set_selected().
+ */
+#define HPI_M3_BTN_CTA_BG         HPI_M3_CTA
+#define HPI_M3_BTN_CTA_FG         HPI_M3_ON_CTA
+#define HPI_M3_BTN_CTA_EDGE       HPI_M3_CTA
+
+#define HPI_M3_BTN_FILLED_BG      HPI_M3_PRIMARY
+#define HPI_M3_BTN_FILLED_FG      HPI_M3_ON_PRIMARY
+#define HPI_M3_BTN_FILLED_EDGE    HPI_M3_PRIMARY
+
+#define HPI_M3_BTN_TONAL_BG       HPI_M3_PRIMARY_CONTAINER
+#define HPI_M3_BTN_TONAL_FG       HPI_M3_PRIMARY_LIGHT
+#define HPI_M3_BTN_TONAL_EDGE     HPI_M3_PRIMARY_CONTAINER
+
+#define HPI_M3_BTN_SECONDARY_BG   HPI_M3_SURFACE_HIGH
+#define HPI_M3_BTN_SECONDARY_FG   HPI_M3_ON_SURFACE
+#define HPI_M3_BTN_SECONDARY_EDGE HPI_M3_OUTLINE
+
+#define HPI_M3_BTN_DANGER_BG      HPI_M3_ERROR
+#define HPI_M3_BTN_DANGER_FG      HPI_M3_ON_ERROR
+#define HPI_M3_BTN_DANGER_EDGE    HPI_M3_ERROR
+
+/* Selected = a SOLID accent fill (4.5:1 against an unselected SECONDARY).
+ * A tinted container was tried: 1.04:1 luminance against SECONDARY, so on
+ * this panel the choice was readable only by hue. */
+#define HPI_M3_BTN_SELECTED_BG    HPI_M3_PRIMARY
+#define HPI_M3_BTN_SELECTED_FG    HPI_M3_ON_PRIMARY
+#define HPI_M3_BTN_SELECTED_EDGE  HPI_M3_PRIMARY
+
+/* On/off switch (Rec channels, Link radios, HealthyLink slots). The off knob
+ * is a light grey so "off" still reads as a control, not as missing. */
+#define HPI_M3_SWITCH_TRACK_ON    HPI_M3_PRIMARY
+#define HPI_M3_SWITCH_KNOB_ON     HPI_M3_ON_PRIMARY
+#define HPI_M3_SWITCH_TRACK_OFF   HPI_M3_OUTLINE
+#define HPI_M3_SWITCH_KNOB_OFF    HPI_M3_ON_SURFACE_VARIANT
+
+#define HPI_M3_BTN_RADIUS         HPI_M3_RADIUS_PILL  /* list rows/cards keep RADIUS_MD/LG */
+#define HPI_M3_BTN_EDGE_W         1
+#define HPI_M3_BTN_PAD_HOR        HPI_M3_SPACE_4
+#define HPI_M3_BTN_FONT           HPI_M3_FONT_CAPS
+
+/* ==== 5. Interaction states ================================================
+ * PRESSED: the fill is mixed toward white by this much while a finger is
+ * down. Lightening (not darkening) because darkening a dark fill is
+ * invisible; LVGL's default-theme 35 % black recolor is switched off on our
+ * controls so the two don't fight. DISABLED_OPA is below with the helpers. */
+#define HPI_M3_PRESSED_LIGHTEN    LV_OPA_20
 
 /* ---- layout constants ---- */
 #define HPI_M3_NAVBAR_H   80   /* M3 bottom navigation bar height (5 slots) */
@@ -168,6 +256,19 @@ static inline void hpi_m3_apply_card(lv_obj_t *o, lv_color_t fill, uint8_t radiu
 	lv_obj_set_style_border_opa(o, LV_OPA_COVER, 0);
 	lv_obj_set_style_pad_all(o, HPI_M3_SPACE_3, 0);
 	lv_obj_set_style_shadow_width(o, 0, 0);
+}
+
+/* Visible press feedback for anything tappable that is NOT built with
+ * hpi_ui_button_create() -- list rows, settings entries, chips. `fill` is the
+ * object's resting fill; while pressed it lightens by HPI_M3_PRESSED_LIGHTEN.
+ * Also cancels the default theme's black recolor, which only lv_button gets
+ * and which is invisible on dark fills anyway. */
+static inline void hpi_m3_apply_pressable(lv_obj_t *o, lv_color_t fill)
+{
+	lv_obj_set_style_bg_color(o, lv_color_lighten(fill, HPI_M3_PRESSED_LIGHTEN),
+				  LV_STATE_PRESSED);
+	lv_obj_set_style_bg_opa(o, LV_OPA_COVER, LV_STATE_PRESSED);
+	lv_obj_set_style_recolor_opa(o, LV_OPA_TRANSP, LV_STATE_PRESSED);
 }
 
 #ifdef __cplusplus

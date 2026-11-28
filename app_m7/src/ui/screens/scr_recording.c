@@ -338,7 +338,7 @@ static void del_confirm_timeout(lv_timer_t *t)
 	lv_obj_t *btn = (lv_obj_t *)lv_timer_get_user_data(t);
 	s_rb.del_armed = false;
 	if (btn) {
-		lv_label_set_text(lv_obj_get_child(btn, 1), "DELETE");
+		lv_label_set_text(hpi_ui_button_label(btn), "DELETE");
 	}
 	s_rb.del_timer = NULL;
 	lv_timer_del(t);
@@ -361,7 +361,7 @@ static void del_btn_cb(lv_event_t *e)
 	if (!s_rb.del_armed) {
 		/* First tap: just arm it. Nothing is deleted here. */
 		s_rb.del_armed = true;
-		lv_label_set_text(lv_obj_get_child(btn, 1), "CONFIRM DELETE");
+		lv_label_set_text(hpi_ui_button_label(btn), "CONFIRM DELETE");
 		s_rb.del_timer = lv_timer_create(del_confirm_timeout, 2000, btn);
 		return;
 	}
@@ -374,13 +374,13 @@ static void del_btn_cb(lv_event_t *e)
 	s_rb.del_armed = false;
 	atomic_set(&s_delete_done, 0);
 	if (recording_delete_async(s_rb.sel.path, delete_cb, NULL) != 0) {
-		lv_label_set_text(lv_obj_get_child(btn, 1), "DELETE FAILED");
+		lv_label_set_text(hpi_ui_button_label(btn), "DELETE FAILED");
 		return;
 	}
 	/* The card work happens off this thread; refresh picks up the result. */
 	s_deleting = true;
 	s_rb.del_btn = btn;
-	lv_label_set_text(lv_obj_get_child(btn, 1), "DELETING...");
+	lv_label_set_text(hpi_ui_button_label(btn), "DELETING...");
 }
 
 /* UI thread: finish a delete once the work queue has reported back. */
@@ -395,7 +395,7 @@ static void delete_poll(void)
 		detail_close();
 		hpi_scr_recording_reload();   /* pull the deleted row out of the list */
 	} else if (s_rb.detail && s_rb.del_btn) {
-		lv_label_set_text(lv_obj_get_child(s_rb.del_btn, 1),
+		lv_label_set_text(hpi_ui_button_label(s_rb.del_btn),
 				  s_delete_rc == -EBUSY ? "IN USE - CAN'T DELETE"
 							: "DELETE FAILED");
 	}
@@ -463,16 +463,8 @@ static void open_detail(const struct recording_summary *e, uint32_t idx)
 	lv_obj_set_flex_align(titlerow, LV_FLEX_ALIGN_SPACE_BETWEEN,
 			      LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-	lv_obj_t *prev_btn = lv_button_create(titlerow);
-	lv_obj_set_size(prev_btn, HPI_M3_TOUCH_MIN, HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(prev_btn, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_border_width(prev_btn, 0, 0);
-	lv_obj_add_event_cb(prev_btn, page_prev_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *pl = lv_label_create(prev_btn);
-	lv_label_set_text(pl, LV_SYMBOL_LEFT);
-	lv_obj_set_style_text_font(pl, &lv_font_montserrat_14, 0);
-	lv_obj_center(pl);
-	lv_obj_set_style_text_color(pl, HPI_M3_ON_SURFACE_VARIANT, 0);
+	hpi_ui_button_create(titlerow, HPI_UI_BTN_SECONDARY, LV_SYMBOL_LEFT, NULL,
+			     page_prev_cb, NULL);
 
 	lv_obj_t *titlebox = lv_obj_create(titlerow);
 	lv_obj_set_size(titlebox, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -496,16 +488,8 @@ static void open_detail(const struct recording_summary *e, uint32_t idx)
 	lv_obj_set_style_text_font(pagelbl, HPI_M3_FONT_CAPS_SM, 0);
 	lv_obj_set_style_text_color(pagelbl, HPI_M3_ON_SURFACE_FAINT, 0);
 
-	lv_obj_t *next_btn = lv_button_create(titlerow);
-	lv_obj_set_size(next_btn, HPI_M3_TOUCH_MIN, HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(next_btn, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_border_width(next_btn, 0, 0);
-	lv_obj_add_event_cb(next_btn, page_next_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *nl = lv_label_create(next_btn);
-	lv_label_set_text(nl, LV_SYMBOL_RIGHT);
-	lv_obj_set_style_text_font(nl, &lv_font_montserrat_14, 0);
-	lv_obj_center(nl);
-	lv_obj_set_style_text_color(nl, HPI_M3_ON_SURFACE_VARIANT, 0);
+	hpi_ui_button_create(titlerow, HPI_UI_BTN_SECONDARY, LV_SYMBOL_RIGHT, NULL,
+			     page_next_cb, NULL);
 
 	detail_row(ov, "DATE", dbuf);
 	detail_row(ov, "DURATION", durbuf);
@@ -539,36 +523,13 @@ static void open_detail(const struct recording_summary *e, uint32_t idx)
 	lv_obj_set_style_border_width(spacer, 0, 0);
 	lv_obj_clear_flag(spacer, LV_OBJ_FLAG_SCROLLABLE);
 
-	lv_obj_t *del_btn = lv_button_create(ov);
-	lv_obj_set_size(del_btn, lv_pct(100), HPI_M3_TOUCH_MIN);
-	hpi_m3_apply_card(del_btn, HPI_M3_ERROR, HPI_M3_RADIUS_XL);
-	lv_obj_set_style_border_width(del_btn, 0, 0);
-	lv_obj_set_flex_flow(del_btn, LV_FLEX_FLOW_ROW);
-	lv_obj_set_flex_align(del_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-			      LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_style_pad_column(del_btn, HPI_M3_SPACE_2, 0);
-	lv_obj_add_event_cb(del_btn, del_btn_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *dic = lv_label_create(del_btn);
-	lv_label_set_text(dic, LV_SYMBOL_TRASH);
-	lv_obj_set_style_text_font(dic, &lv_font_montserrat_14, 0);
-	lv_obj_set_style_text_color(dic, HPI_M3_ON_SURFACE, 0);
-	lv_obj_t *dl = lv_label_create(del_btn);
-	lv_label_set_text(dl, "DELETE");
-	lv_obj_set_style_text_font(dl, HPI_M3_FONT_CAPS, 0);
-	lv_obj_set_style_text_color(dl, HPI_M3_ON_SURFACE, 0);
+	lv_obj_t *del_btn = hpi_ui_button_create(ov, HPI_UI_BTN_DANGER, LV_SYMBOL_TRASH,
+						 "DELETE", del_btn_cb, NULL);
+	lv_obj_set_width(del_btn, lv_pct(100));
 
-	lv_obj_t *close_btn = lv_button_create(ov);
-	lv_obj_set_size(close_btn, lv_pct(100), HPI_M3_TOUCH_MIN);
-	hpi_m3_apply_card(close_btn, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_XL);
-	lv_obj_set_style_border_width(close_btn, 0, 0);
-	lv_obj_set_flex_flow(close_btn, LV_FLEX_FLOW_ROW);
-	lv_obj_set_flex_align(close_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-			      LV_FLEX_ALIGN_CENTER);
-	lv_obj_add_event_cb(close_btn, detail_close_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *cl = lv_label_create(close_btn);
-	lv_label_set_text(cl, "CLOSE");
-	lv_obj_set_style_text_font(cl, HPI_M3_FONT_CAPS, 0);
-	lv_obj_set_style_text_color(cl, HPI_M3_ON_SURFACE, 0);
+	lv_obj_t *close_btn = hpi_ui_button_create(ov, HPI_UI_BTN_SECONDARY, NULL,
+						   "CLOSE", detail_close_cb, NULL);
+	lv_obj_set_width(close_btn, lv_pct(100));
 }
 
 /* ---- row tap ---- */
@@ -593,6 +554,7 @@ static void build_row(lv_obj_t *parent, const struct recording_summary *e, uint3
 	lv_obj_set_height(row, LV_SIZE_CONTENT);
 	hpi_m3_apply_card(row, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_MD);
 	lv_obj_set_style_pad_all(row, HPI_M3_SPACE_3, 0);
+	hpi_m3_apply_pressable(row, HPI_M3_SURFACE_CONTAINER);
 	lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_add_event_cb(row, row_click_cb, LV_EVENT_CLICKED,
@@ -705,20 +667,10 @@ lv_obj_t *hpi_scr_recording_create(lv_obj_t *parent)
 	 * launched from Rec, so that's where the user expects to land back. */
 	s_rb.bar = hpi_ui_subbar_create(root, "Recordings", HPI_UI_SCREEN_REC);
 
-	lv_obj_t *right = lv_obj_create(s_rb.bar);
-	lv_obj_set_size(right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-	hpi_m3_apply_touch(right);   /* the glyph alone is a 14 px target */
-	lv_obj_set_style_bg_opa(right, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_border_width(right, 0, 0);
-	lv_obj_set_style_pad_all(right, 0, 0);
-	lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_add_flag(right, LV_OBJ_FLAG_CLICKABLE);
-	lv_obj_add_event_cb(right, refresh_btn_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *ric = lv_label_create(right);
-	lv_label_set_text(ric, LV_SYMBOL_REFRESH);
-	lv_obj_set_style_text_font(ric, &lv_font_montserrat_14, 0);
-	lv_obj_set_style_text_color(ric, HPI_M3_ON_SURFACE_VARIANT, 0);
-	lv_obj_center(ric);
+	/* Refresh, at the right of the bar. Not the CTA of this screen -- that
+	 * is the list itself -- so the quiet kind. */
+	hpi_ui_button_create(s_rb.bar, HPI_UI_BTN_SECONDARY, LV_SYMBOL_REFRESH, NULL,
+			     refresh_btn_cb, NULL);
 
 	s_rb.list = lv_obj_create(root);
 	lv_obj_set_width(s_rb.list, lv_pct(100));
@@ -740,28 +692,16 @@ lv_obj_t *hpi_scr_recording_create(lv_obj_t *parent)
 	lv_obj_set_flex_align(s_rb.pager_bar, LV_FLEX_ALIGN_SPACE_BETWEEN,
 			      LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-	s_rb.pager_prev = lv_button_create(s_rb.pager_bar);
-	lv_obj_set_size(s_rb.pager_prev, HPI_M3_TOUCH_MIN, HPI_M3_TOUCH_MIN);
-	hpi_m3_apply_card(s_rb.pager_prev, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_MD);
-	lv_obj_add_event_cb(s_rb.pager_prev, pager_prev_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *ppl = lv_label_create(s_rb.pager_prev);
-	lv_label_set_text(ppl, LV_SYMBOL_LEFT);
-	lv_obj_set_style_text_font(ppl, &lv_font_montserrat_14, 0);
-	lv_obj_center(ppl);
+	s_rb.pager_prev = hpi_ui_button_create(s_rb.pager_bar, HPI_UI_BTN_SECONDARY,
+					       LV_SYMBOL_LEFT, NULL, pager_prev_cb, NULL);
 
 	s_rb.pager_label = lv_label_create(s_rb.pager_bar);
 	lv_label_set_text(s_rb.pager_label, "Page 1 / 1");
 	lv_obj_set_style_text_font(s_rb.pager_label, HPI_M3_FONT_CAPS_SM, 0);
 	lv_obj_set_style_text_color(s_rb.pager_label, HPI_M3_ON_SURFACE_VARIANT, 0);
 
-	s_rb.pager_next = lv_button_create(s_rb.pager_bar);
-	lv_obj_set_size(s_rb.pager_next, HPI_M3_TOUCH_MIN, HPI_M3_TOUCH_MIN);
-	hpi_m3_apply_card(s_rb.pager_next, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_MD);
-	lv_obj_add_event_cb(s_rb.pager_next, pager_next_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_t *pnl = lv_label_create(s_rb.pager_next);
-	lv_label_set_text(pnl, LV_SYMBOL_RIGHT);
-	lv_obj_set_style_text_font(pnl, &lv_font_montserrat_14, 0);
-	lv_obj_center(pnl);
+	s_rb.pager_next = hpi_ui_button_create(s_rb.pager_bar, HPI_UI_BTN_SECONDARY,
+					       LV_SYMBOL_RIGHT, NULL, pager_next_cb, NULL);
 
 	s_rb.empty_label = lv_label_create(root);
 	lv_label_set_text(s_rb.empty_label, "No recordings yet");

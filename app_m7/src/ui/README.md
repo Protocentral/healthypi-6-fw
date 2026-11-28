@@ -8,8 +8,8 @@ HealthyLink / HRV / Settings / Alert limits / OTA). Structure:
   the boot state machine, the ambient idle timeout, and the sample-bus drain.
 - `screens/` — one file per screen; each exposes `create()` plus optional
   `refresh()`/`push_*()` hooks called from the UI thread.
-- `components/` — shared M3 widgets (appbar, navbar, status chip, waveform,
-  tiles).
+- `components/` — shared M3 widgets (status bar, navbar, **button**,
+  **segmented control**, stepper, status chip, waveform, tiles).
 - `theme/hpi_m3_theme.h` — every color/font/shape token. **Screens use tokens
   only; no per-screen hex.**
 - `fonts/` — committed LVGL bitmap fonts + the regeneration pipeline
@@ -20,6 +20,30 @@ The UI is optional: build-gated by `CONFIG_HPI_DISPLAY_ENABLED` (set via
 Every UI-facing control has a non-display path (HealthyPi Studio / the
 `healthypi` CLI over CDC1, the `.HP6` stream on CDC0, MSC Transfer Mode), so a
 headless build loses only the on-device preview.
+
+## Restyling
+
+Everything visual is in **`theme/hpi_m3_theme.h`**, in five labelled sections:
+surfaces, text, accents, buttons (`HPI_M3_BTN_*`) and interaction states
+(`HPI_M3_PRESSED_LIGHTEN`, `HPI_M3_DISABLED_OPA`). Change a value there and
+rebuild; no screen needs touching.
+
+- **Buttons** are made only with `hpi_ui_button_create(parent, kind, icon,
+  text, cb, user)`. Pick the kind by role — `CTA` (the one main action on a
+  screen), `FILLED`, `TONAL`, `SECONDARY` (everything else), `DANGER` — never
+  by colour. Do not call `lv_button_create()` in a screen, and do not colour a
+  button's labels: the text colour is set on the button so the pressed and
+  selected states reach them.
+- **Choices** (tabs, one-of-N) are `SECONDARY` buttons with
+  `hpi_ui_button_set_selected()`, or `hpi_ui_segmented_create()`.
+- **Tappable rows/cards** that are not buttons call
+  `hpi_m3_apply_pressable(obj, fill)` so a touch is visible.
+
+The palette is tuned for the backlit TFT: surfaces start above the backlight
+bleed floor (`#1E252C`, not near-black) and step far enough apart to read as
+layers, and every button has a solid fill. When changing a colour, keep text
+and accents ≥ 4.5:1 and control edges as strong as they are now, measured at
+RGB565 (the UI renders 16-bit).
 
 ## Contract this layer honors
 

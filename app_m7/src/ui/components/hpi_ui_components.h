@@ -80,6 +80,60 @@ lv_obj_t *hpi_ui_chip_create(lv_obj_t *parent, const char *text, lv_color_t col)
  * screens carrying several of them. */
 void hpi_ui_chip_set(lv_obj_t *chip_label, const char *text, lv_color_t col);
 
+/* ---- button: the ONE way to make a tappable button --------------------------
+ *
+ * Every button in the UI comes from here, so they all share one shape, one
+ * font, one touch floor and one pressed/disabled/selected behaviour. What each
+ * kind LOOKS like is not decided here: it is the HPI_M3_BTN_* table in
+ * theme/hpi_m3_theme.h. Restyle there, not at a call site.
+ *
+ * Layout is fixed so callers can reach the parts:
+ *   child 0 = icon label  (hidden when `icon` is NULL)
+ *   child 1 = text label  (hidden when `text` is NULL) -- hpi_ui_button_label()
+ * The text colour is set on the button and inherited by both labels, so do not
+ * colour the labels yourself or the pressed/selected states stop reaching them.
+ *
+ * Size: HPI_M3_TOUCH_MIN tall, content-wide (never below TOUCH_MIN). Set
+ * lv_obj_set_width(btn, lv_pct(100)) or flex_grow for a full-width button.
+ * `icon` may be an LV_SYMBOL_* (Montserrat glyph) or an HPI_SYM_* (Material
+ * Symbols); the right font is picked automatically. `cb` fires on CLICKED with
+ * `user` as the event user data; NULL for none. */
+enum hpi_ui_btn_kind {
+	HPI_UI_BTN_CTA,        /* the one main action per screen (amber)   */
+	HPI_UI_BTN_FILLED,     /* primary action that is not the CTA       */
+	HPI_UI_BTN_TONAL,      /* quieter primary action                    */
+	HPI_UI_BTN_SECONDARY,  /* everything else; can be "selected"        */
+	HPI_UI_BTN_DANGER,     /* destructive                               */
+};
+
+lv_obj_t *hpi_ui_button_create(lv_obj_t *parent, enum hpi_ui_btn_kind kind,
+			       const char *icon, const char *text,
+			       lv_event_cb_t cb, void *user);
+
+/* Re-skin an existing button as another kind (e.g. an armed STOP). */
+void hpi_ui_button_set_kind(lv_obj_t *btn, enum hpi_ui_btn_kind kind);
+
+/* The text label (child 1), for relabelling: PAUSE -> RESUME. */
+lv_obj_t *hpi_ui_button_label(lv_obj_t *btn);
+
+/* Selected look (HPI_M3_BTN_SELECTED_*) for tab-like buttons. */
+void hpi_ui_button_set_selected(lv_obj_t *btn, bool selected);
+
+/* Override the selected look for ONE button -- Trends fills each tab with its
+ * vital's colour. `bg` is the fill (and edge), `fg` the text. */
+void hpi_ui_button_set_selected_colors(lv_obj_t *btn, lv_color_t bg, lv_color_t fg);
+
+/* ---- segmented control ------------------------------------------------------
+ * A full-width HPI_M3_TOUCH_MIN-tall row of `n` equal segments, one selected.
+ * `cb` fires on CLICKED with the segment INDEX as the user data
+ * ((int)(intptr_t)lv_event_get_user_data(e)); it should then call
+ * hpi_ui_segmented_select(). With `cb` NULL it is a read-only indicator
+ * (follow with hpi_m3_apply_inert()). Colours: HPI_M3_BTN_SECONDARY_* for the
+ * bar, HPI_M3_BTN_SELECTED_* for the chosen segment. */
+lv_obj_t *hpi_ui_segmented_create(lv_obj_t *parent, const char *const *items,
+				  int n, int sel, lv_event_cb_t cb);
+void hpi_ui_segmented_select(lv_obj_t *seg, int sel);
+
 /* [ − ] value [ + ] stepper — the touch-friendly way to set a number.
  *
  * Prefer this to lv_slider: a slider's track is ~10 px tall and emits a

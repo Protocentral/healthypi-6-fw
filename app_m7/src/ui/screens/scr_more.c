@@ -26,6 +26,7 @@ static void more_add_row(lv_obj_t *list, const char *title, enum hpi_ui_screen t
 	lv_obj_set_height(row, LV_SIZE_CONTENT);
 	hpi_m3_apply_card(row, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_MD);
 	hpi_m3_apply_touch(row);   /* content sizing alone gave ~44 px rows */
+	hpi_m3_apply_pressable(row, HPI_M3_SURFACE_CONTAINER);
 	lv_obj_add_event_cb(row, more_row_cb, LV_EVENT_CLICKED, (void *)(intptr_t)target);
 	lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
 	lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
@@ -99,16 +100,8 @@ lv_obj_t *hpi_scr_placeholder_create(lv_obj_t *parent, const char *title,
 	lv_obj_set_style_pad_row(root, HPI_M3_SPACE_2, 0);
 
 	if (back_to >= 0) {
-		lv_obj_t *back = lv_button_create(root);
-		lv_obj_set_height(back, LV_SIZE_CONTENT);
-		hpi_m3_apply_card(back, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_PILL);
-		hpi_m3_apply_touch(back);
-		lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED,
-				    (void *)(intptr_t)back_to);
-		lv_obj_t *bl = lv_label_create(back);
-		lv_label_set_text(bl, LV_SYMBOL_LEFT "  Back");
-		lv_obj_set_style_text_color(bl, HPI_M3_PRIMARY, 0);
-		lv_obj_set_style_text_font(bl, HPI_M3_FONT_SYMBOL, 0);
+		hpi_ui_button_create(root, HPI_UI_BTN_SECONDARY, LV_SYMBOL_LEFT, "BACK",
+				     back_cb, (void *)(intptr_t)back_to);
 	}
 
 	lv_obj_t *t = lv_label_create(root);
