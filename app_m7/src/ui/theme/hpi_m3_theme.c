@@ -57,7 +57,7 @@ static const struct hpi_m3_palette PAL_DARK = {
 	.sig_temp             = 0xFB923C,
 	.sig_hrv              = 0x9A94F5,
 
-	.trace_ecg            = 0xFFB000,
+	.trace_ecg            = 0x00E676,   /* bright green (monitor convention); was amber #FFB000 */
 	.trace_ppg            = 0x6FB3CC,
 	.trace_resp           = 0x4CC38A,
 
@@ -108,9 +108,9 @@ static const struct hpi_m3_palette PAL_LIGHT = {
 	.sig_temp             = 0xB93A0B,
 	.sig_hrv              = 0x6D28D9,
 
-	/* Bright, as in DARK: the plot well is black in both themes. ECG is a
-	 * saturated amber (#FFB000), not the pastel #FBBF24 it started as. */
-	.trace_ecg            = 0xFFB000,
+	/* Bright, as in DARK: the plot well is black in both themes. ECG is
+	 * bright green here, as on a bedside monitor (amber #FFB000 was tried). */
+	.trace_ecg            = 0x00E676,   /* bright green (monitor convention); was amber #FFB000 */
 	.trace_ppg            = 0x6FB3CC,
 	.trace_resp           = 0x4CC38A,
 
