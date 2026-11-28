@@ -6,7 +6,7 @@
  *
  * The artwork is two colours over an alpha channel, so it ships as two
  * LV_COLOR_FORMAT_A8 masks on a shared canvas rather than one RGB565A8 image:
- * a third of the flash, and the brand colours stay in hpi_m3_theme.h instead of
+ * a third of the flash, and the brand colours stay in the theme palette instead of
  * being baked into the asset. Both layers are full-canvas so they scale about
  * the same origin and cannot drift apart.
  *
@@ -23,10 +23,10 @@
 #define HPI_LOGO_LOCKUP_W  312
 #define HPI_LOGO_LOCKUP_H  119
 
-/** "HealthyPi" wordmark layer -- painted HPI_M3_ON_SURFACE. */
+/** "HealthyPi" wordmark layer -- painted HPI_M3_LOGO_TEXT. */
 extern const lv_image_dsc_t hpi_logo_lockup_light;
 
-/** 6 / hexagon / ECG trace layer -- painted HPI_M3_SIG_ECG. */
+/** 6 / hexagon / ECG trace layer -- painted HPI_M3_LOGO_ACCENT. */
 extern const lv_image_dsc_t hpi_logo_lockup_accent;
 
 #endif /* HPI_LOGO_H_ */

@@ -77,6 +77,12 @@ struct hpi_m3_palette {
 	uint32_t trace_ecg;
 	uint32_t trace_ppg;
 	uint32_t trace_resp;
+	/* Boot splash + self-test, and the two logos. */
+	uint32_t splash_bg;          /* splash / self-test page                  */
+	uint32_t logo_text;          /* "HealthyPi" wordmark                     */
+	uint32_t logo_accent;        /* the 6 / hexagon / ECG mark               */
+	uint32_t pc_mark;            /* ProtoCentral round mark                  */
+	uint32_t pc_text;            /* "PROTOCENTRAL" wordmark                  */
 };
 
 enum hpi_m3_theme_id {
@@ -130,6 +136,12 @@ enum hpi_m3_theme_id hpi_m3_theme_active(void);
 #define HPI_M3_TRACE_ECG          HPI_M3_C(trace_ecg)
 #define HPI_M3_TRACE_PPG          HPI_M3_C(trace_ppg)
 #define HPI_M3_TRACE_RESP         HPI_M3_C(trace_resp)
+
+#define HPI_M3_SPLASH_BG          HPI_M3_C(splash_bg)
+#define HPI_M3_LOGO_TEXT          HPI_M3_C(logo_text)
+#define HPI_M3_LOGO_ACCENT        HPI_M3_C(logo_accent)
+#define HPI_M3_PC_MARK            HPI_M3_C(pc_mark)
+#define HPI_M3_PC_TEXT            HPI_M3_C(pc_text)
 
 /* ---- M3 type scale ----------------------------------------------------------
  * The design fonts (LVGL bitmap fonts generated from the design TTFs by

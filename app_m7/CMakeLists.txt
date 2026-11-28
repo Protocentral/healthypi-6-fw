@@ -93,6 +93,7 @@ target_sources_ifdef(CONFIG_HPI_DISPLAY_ENABLED app PRIVATE
     src/ui/screens/scr_power.c
     # Brand lockup (generated from the design artwork by ui/assets/convert_logo.py)
     src/ui/assets/hpi_logo.c
+    src/ui/assets/pc_logo.c
     # Redesign fonts (generated from the real design TTFs by ui/fonts/convert_fonts.sh)
     src/ui/fonts/lvgl/rubik_500_148.c
     src/ui/fonts/lvgl/rubik_500_32.c

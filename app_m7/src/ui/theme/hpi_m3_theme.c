@@ -57,9 +57,15 @@ static const struct hpi_m3_palette PAL_DARK = {
 	.sig_temp             = 0xFB923C,
 	.sig_hrv              = 0x9A94F5,
 
-	.trace_ecg            = 0xFBBF24,
+	.trace_ecg            = 0xFFB000,
 	.trace_ppg            = 0x6FB3CC,
 	.trace_resp           = 0x4CC38A,
+
+	.splash_bg            = 0x0A1826,
+	.logo_text            = 0xECEFF1,
+	.logo_accent          = 0xFBBF24,
+	.pc_mark              = 0x2B88AD,   /* brand teal #015876 lifted: it vanishes on navy */
+	.pc_text              = 0x9AA6AD,
 };
 
 /* LIGHT -- "mist". What an LCD renders best: no backlight bleed to fight,
@@ -102,10 +108,20 @@ static const struct hpi_m3_palette PAL_LIGHT = {
 	.sig_temp             = 0xB93A0B,
 	.sig_hrv              = 0x6D28D9,
 
-	/* Bright, as in DARK: the plot well is black in both themes. */
-	.trace_ecg            = 0xFBBF24,
+	/* Bright, as in DARK: the plot well is black in both themes. ECG is a
+	 * saturated amber (#FFB000), not the pastel #FBBF24 it started as. */
+	.trace_ecg            = 0xFFB000,
 	.trace_ppg            = 0x6FB3CC,
 	.trace_resp           = 0x4CC38A,
+
+	/* Splash: a clean near-white page, navy wordmark (the DARK theme's
+	 * background colour, tying the two together), deep amber mark, and the
+	 * ProtoCentral logo in its own artwork colours. */
+	.splash_bg            = 0xF2F5F8,
+	.logo_text            = 0x0F2233,
+	.logo_accent          = 0xD97706,
+	.pc_mark              = 0x015876,
+	.pc_text              = 0x5F6670,
 };
 
 static const struct hpi_m3_palette *const PALETTES[HPI_M3_THEME_COUNT] = {

@@ -253,9 +253,11 @@ lv_obj_t *hpi_scr_home_create(lv_obj_t *parent)
 	lv_obj_set_style_bg_opa(s_ecg.panel, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_pad_all(s_ecg.panel, 0, 0);
 	lv_obj_set_flex_grow(s_ecg.panel, 0);
-	lv_obj_set_width(s_ecg.panel, lv_pct(90));
-	lv_obj_set_height(s_ecg.panel, 56);
-	lv_obj_set_style_margin_top(s_ecg.panel, 24, 0);   /* gap below the focal HR */
+	/* 130 px (was 56, too short to read a QRS): the focal column has ~190 px
+	 * spare below its centred content at the 800 px panel height. */
+	lv_obj_set_width(s_ecg.panel, lv_pct(100));
+	lv_obj_set_height(s_ecg.panel, 130);
+	lv_obj_set_style_margin_top(s_ecg.panel, HPI_M3_SPACE_4, 0);   /* gap below the focal HR */
 	/* Full opacity: on the black plot well a 60 % trace read as dim. */
 	lv_obj_t *ecgcap = lv_obj_get_child(s_ecg.panel, 0);   /* hide empty caption */
 	if (ecgcap) {
@@ -272,7 +274,7 @@ lv_obj_t *hpi_scr_home_create(lv_obj_t *parent)
 	lv_obj_set_style_border_width(chips, 0, 0);
 	lv_obj_set_style_pad_all(chips, 0, 0);
 	lv_obj_set_style_pad_row(chips, HPI_M3_SPACE_3, 0);
-	lv_obj_set_style_margin_top(chips, 36, 0);   /* design grid margin-top */
+	lv_obj_set_style_margin_top(chips, HPI_M3_SPACE_6, 0);
 	lv_obj_clear_flag(chips, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(chips, LV_FLEX_FLOW_COLUMN);
 

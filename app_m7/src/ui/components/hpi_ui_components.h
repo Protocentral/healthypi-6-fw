@@ -26,6 +26,11 @@ lv_obj_t *hpi_ui_appbar_create(lv_obj_t *parent, const char *title);
  * into a flex layout. */
 lv_obj_t *hpi_ui_logo_create(lv_obj_t *parent, int width_px);
 
+/* The ProtoCentral long logo (round mark + wordmark), PC_LOGO_W x PC_LOGO_H
+ * (240 x 40), coloured from the palette (pc_mark / pc_text). Fixed size:
+ * regenerate with ui/assets/convert_pc_logo.py to change it. */
+lv_obj_t *hpi_ui_pc_logo_create(lv_obj_t *parent);
+
 /* The shared top status bar — one implementation for every screen.
  *
  * Left slot: `title` when non-NULL, otherwise the live date ("TUE 15 JUL").

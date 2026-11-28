@@ -7,6 +7,7 @@
  */
 #include "hpi_ui_components.h"
 #include "../assets/hpi_logo.h"
+#include "../assets/pc_logo.h"
 #include "../fonts/hpi_symbols.h"
 #include "../theme/hpi_m3_theme.h"
 
@@ -85,8 +86,38 @@ lv_obj_t *hpi_ui_logo_create(lv_obj_t *parent, int width_px)
 	lv_obj_set_style_pad_all(box, 0, 0);
 	lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
-	logo_layer(box, &hpi_logo_lockup_light, HPI_M3_ON_SURFACE, width_px, h);
-	logo_layer(box, &hpi_logo_lockup_accent, HPI_M3_SIG_ECG, width_px, h);
+	logo_layer(box, &hpi_logo_lockup_light, HPI_M3_LOGO_TEXT, width_px, h);
+	logo_layer(box, &hpi_logo_lockup_accent, HPI_M3_LOGO_ACCENT, width_px, h);
+	return box;
+}
+
+/* ---- ProtoCentral logo ---- */
+
+/* One cropped A8 layer at its offset on the logo canvas, tinted `c`. Drawn at
+ * native size: the masks were rendered at exactly PC_LOGO_W. */
+static void pc_logo_layer(lv_obj_t *box, const lv_image_dsc_t *src, int x, int y,
+			  lv_color_t c)
+{
+	lv_obj_t *img = lv_image_create(box);
+
+	lv_image_set_src(img, src);
+	lv_obj_set_style_image_recolor(img, c, 0);
+	lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
+	lv_obj_set_pos(img, x, y);
+}
+
+lv_obj_t *hpi_ui_pc_logo_create(lv_obj_t *parent)
+{
+	lv_obj_t *box = lv_obj_create(parent);
+
+	lv_obj_set_size(box, PC_LOGO_W, PC_LOGO_H);
+	lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(box, 0, 0);
+	lv_obj_set_style_pad_all(box, 0, 0);
+	lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+	pc_logo_layer(box, &pc_logo_mark, PC_LOGO_MARK_X, PC_LOGO_MARK_Y, HPI_M3_PC_MARK);
+	pc_logo_layer(box, &pc_logo_text, PC_LOGO_TEXT_X, PC_LOGO_TEXT_Y, HPI_M3_PC_TEXT);
 	return box;
 }
 
