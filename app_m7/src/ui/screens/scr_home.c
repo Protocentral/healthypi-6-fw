@@ -343,8 +343,10 @@ static void render_lead_off(uint8_t mask)
 		lv_label_set_text(s_h.leadtxt, line);
 	}
 	/* Dim the trace instead of letting a floating electrode's rail-to-rail
-	 * artefact scroll past looking like a signal. */
-	lv_obj_set_style_line_opa(s_ecg.chart, mask ? LV_OPA_20 : LV_OPA_COVER,
+	 * artefact scroll past looking like a signal -- only when an electrode
+	 * Lead II uses (RA, LL) is off. The banner still names all of them. */
+	lv_obj_set_style_line_opa(s_ecg.chart,
+				  (mask & HP6_LEAD_OFF_LEAD_II) ? LV_OPA_20 : LV_OPA_COVER,
 				  LV_PART_ITEMS);   /* full when on: 60 % read dim on black */
 
 	/* The vitals producer suppresses an ECG HR while the leads are off, but it

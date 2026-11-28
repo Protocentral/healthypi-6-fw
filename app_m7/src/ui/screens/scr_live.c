@@ -340,13 +340,17 @@ void hpi_scr_live_push_ecg(int32_t lead_ii_uv, int32_t resp_uv, uint8_t lead_off
 	}
 	lv_obj_set_style_text_color(s_l.leads,
 				    lead_off == 0 ? HPI_M3_SUCCESS : HPI_M3_ERROR, 0);
-	/* A floating electrode rails; dim the trace rather than let the artefact
-	 * scroll past at full contrast as though it were a signal. Respiration is
-	 * measured across the same limb electrodes, so it is dimmed with ECG. */
+	/* A floating electrode rails; dim a trace rather than let the artefact
+	 * scroll past at full contrast as though it were a signal -- but only
+	 * for the electrodes THAT trace uses. Lead II needs RA + LL; V1 or LA
+	 * off leaves it valid. Respiration needs RA/LA/LL, not V1. The warning
+	 * text above still names every electrode that is off. */
 	lv_obj_set_style_line_opa(s_l.ecg.wf.chart,
-				  lead_off ? LV_OPA_20 : LV_OPA_COVER, LV_PART_ITEMS);
+				  (lead_off & HP6_LEAD_OFF_LEAD_II) ? LV_OPA_20 : LV_OPA_COVER,
+				  LV_PART_ITEMS);
 	lv_obj_set_style_line_opa(s_l.resp.wf.chart,
-				  lead_off ? LV_OPA_20 : LV_OPA_COVER, LV_PART_ITEMS);
+				  (lead_off & HP6_LEAD_OFF_RESP) ? LV_OPA_20 : LV_OPA_COVER,
+				  LV_PART_ITEMS);
 }
 
 void hpi_scr_live_push_ppg(int32_t ir)
