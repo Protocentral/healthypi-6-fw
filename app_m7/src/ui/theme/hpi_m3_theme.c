@@ -59,7 +59,7 @@ static const struct hpi_m3_palette PAL_DARK = {
 
 	.trace_ecg            = 0x00E676,   /* bright green (monitor convention); was amber #FFB000 */
 	.trace_ppg            = 0x6FB3CC,
-	.trace_resp           = 0x4CC38A,
+	.trace_resp           = 0xFFE600,   /* bright yellow; was green #4CC38A (too close to the green ECG) */
 
 	.splash_bg            = 0x0A1826,
 	.logo_text            = 0xECEFF1,
@@ -112,7 +112,7 @@ static const struct hpi_m3_palette PAL_LIGHT = {
 	 * bright green here, as on a bedside monitor (amber #FFB000 was tried). */
 	.trace_ecg            = 0x00E676,   /* bright green (monitor convention); was amber #FFB000 */
 	.trace_ppg            = 0x6FB3CC,
-	.trace_resp           = 0x4CC38A,
+	.trace_resp           = 0xFFE600,   /* bright yellow; was green #4CC38A (too close to the green ECG) */
 
 	/* Splash: a clean near-white page, navy wordmark (the DARK theme's
 	 * background colour, tying the two together), deep amber mark, and the
