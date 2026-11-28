@@ -39,11 +39,12 @@ rebuild; no screen needs touching.
 - **Tappable rows/cards** that are not buttons call
   `hpi_m3_apply_pressable(obj, fill)` so a touch is visible.
 
-The palette is tuned for the backlit TFT: surfaces start above the backlight
-bleed floor (`#1E252C`, not near-black) and step far enough apart to read as
-layers, and every button has a solid fill. When changing a colour, keep text
-and accents ≥ 4.5:1 and control edges as strong as they are now, measured at
-RGB565 (the UI renders 16-bit).
+The palette is tuned for the backlit TFT: a saturated navy background
+(`#0F2233`) rather than black or neutral grey, which backlight bleed turns
+into washed-out black. Surfaces step far enough apart to read as layers and
+every button has a solid fill. When changing a colour, keep text and accents
+≥ 4.5:1 and control edges as strong as they are now, measured at RGB565 (the
+UI renders 16-bit).
 
 ## Contract this layer honors
 

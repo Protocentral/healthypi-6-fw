@@ -6,7 +6,7 @@
  * truth for color roles, the type scale, shape (corner radii) and the 4 dp
  * spacing grid. Screens and components reference ONLY these tokens.
  *
- * HealthyPi 6 palette ("LCD slate"): brand blue #6FB3CC for nav/selection/
+ * HealthyPi 6 palette ("navy ink"): brand blue #6FB3CC for nav/selection/
  * primary actions; Signal Amber #FBBF24 for ECG/HR and the single big CTA per
  * screen.
  *
@@ -23,14 +23,15 @@
  * a token here. Change a value, rebuild, done.
  * ---------------------------------------------------------------------------
  *
- * Why slate and not near-black: this is a backlit TFT, not an OLED. Backlight
- * bleed lifts the darkest greys toward one shade, so the previous ramp
- * (#14171A/#1C2126/#232A31, 1.12:1 between levels, 1.45:1 for the outline)
- * merged into one flat field and outlined controls vanished. The surfaces now
- * start above the bleed floor and step further apart; waveforms keep a darker
- * PLOT_WELL so traces stay at maximum contrast. Keep every accent and text
- * token >= 4.5:1 on SURFACE and SURFACE_CONTAINER if you change them (measure
- * at RGB565 -- the UI renders 16-bit).
+ * Why navy and not black or grey: this is a backlit TFT, not an OLED.
+ * Backlight bleed lifts dark values toward a common grey, so a near-black
+ * ramp merged into one flat field, and a neutral slate (#1E252C, tried next)
+ * read as black that had washed out. A saturated dark hue (navy, sat ~0.7 at
+ * RGB565) survives the bleed and reads as a deliberate colour; it is the brand
+ * blue's own family. Surfaces step ~1.25:1 apart so cards read as layers, and
+ * waveforms keep a darker PLOT_WELL for maximum trace contrast. Keep every
+ * accent and text token >= 4.5:1 on SURFACE and SURFACE_CONTAINER if you
+ * change them (measure at RGB565 -- the UI renders 16-bit).
  *
  * No `static lv_style_t` anywhere in the UI — apply tokens with direct
  * lv_obj_set_style_* setters (see helpers below).
@@ -45,24 +46,24 @@ extern "C" {
 #endif
 
 /* ==== 1. Surfaces (darkest -> lightest) ==== */
-#define HPI_M3_SURFACE_DIM        lv_color_hex(0x161B20)  /* splash / ambient / power backdrop */
-#define HPI_M3_PLOT_WELL          lv_color_hex(0x161B20)  /* behind waveforms: recessed, max trace contrast */
-#define HPI_M3_SURFACE            lv_color_hex(0x1E252C)  /* screen background */
-#define HPI_M3_SURFACE_CONTAINER  lv_color_hex(0x29323B)  /* card / list row / nav bar */
-#define HPI_M3_SURFACE_HIGH       lv_color_hex(0x35404B)  /* raised: secondary buttons, stepper keys */
-#define HPI_M3_OUTLINE            lv_color_hex(0x4A5763)  /* 1 px card / button edge */
-#define HPI_M3_DIVIDER            lv_color_hex(0x323C46)  /* hairline row divider, chart grid */
+#define HPI_M3_SURFACE_DIM        lv_color_hex(0x0A1826)  /* splash / ambient / power backdrop */
+#define HPI_M3_PLOT_WELL          lv_color_hex(0x0A1826)  /* behind waveforms: recessed, max trace contrast */
+#define HPI_M3_SURFACE            lv_color_hex(0x0F2233)  /* screen background */
+#define HPI_M3_SURFACE_CONTAINER  lv_color_hex(0x18324A)  /* card / list row / nav bar */
+#define HPI_M3_SURFACE_HIGH       lv_color_hex(0x23425E)  /* raised: secondary buttons, stepper keys */
+#define HPI_M3_OUTLINE            lv_color_hex(0x3A5C7C)  /* 1 px card / button edge */
+#define HPI_M3_DIVIDER            lv_color_hex(0x1F3B55)  /* hairline row divider, chart grid */
 
 /* ==== 2. Text ==== */
 #define HPI_M3_ON_SURFACE         lv_color_hex(0xECEFF1)  /* primary text (bright) */
 #define HPI_M3_ON_SURFACE_VARIANT lv_color_hex(0x9AA6AD)  /* secondary text / labels */
-#define HPI_M3_ON_SURFACE_MUTED   lv_color_hex(0x7F8B93)  /* units, captions (4.5:1 on SURFACE) */
-#define HPI_M3_ON_SURFACE_FAINT   lv_color_hex(0x5C6870)  /* disabled / pending -- decorative only */
+#define HPI_M3_ON_SURFACE_MUTED   lv_color_hex(0x8A9BAA)  /* units, captions (4.7:1 on CONTAINER) */
+#define HPI_M3_ON_SURFACE_FAINT   lv_color_hex(0x5E7287)  /* disabled / pending -- decorative only */
 
 /* ==== 3. Accents ==== */
 #define HPI_M3_PRIMARY            lv_color_hex(0x6FB3CC)  /* brand blue: nav, selection, primary actions */
 #define HPI_M3_ON_PRIMARY         lv_color_hex(0x0E1114)  /* dark text/icon on brand blue */
-#define HPI_M3_PRIMARY_CONTAINER  lv_color_hex(0x1E4352)  /* brand-tinted fill: selected tab/segment */
+#define HPI_M3_PRIMARY_CONTAINER  lv_color_hex(0x24566B)  /* brand-tinted fill: TONAL buttons, active nav item */
 #define HPI_M3_PRIMARY_LIGHT      lv_color_hex(0xA8D4E4)  /* text/icon on PRIMARY_CONTAINER */
 #define HPI_M3_ERROR              lv_color_hex(0xF87171)
 #define HPI_M3_ON_ERROR           lv_color_hex(0x2A0A0A)  /* dark text on red (6.9:1; white was 2.3:1) */
@@ -80,7 +81,7 @@ extern "C" {
 #define HPI_M3_SIG_SPO2           lv_color_hex(0x6FB3CC)  /* SpO2 (= PPG blue) */
 #define HPI_M3_SIG_RESP           lv_color_hex(0x4CC38A)  /* respiration green */
 #define HPI_M3_SIG_TEMP           lv_color_hex(0xFB923C)  /* temperature orange */
-#define HPI_M3_SIG_HRV            lv_color_hex(0x8B84F0)  /* HRV violet */
+#define HPI_M3_SIG_HRV            lv_color_hex(0x9A94F5)  /* HRV violet (lifted: 4.4 -> 5.2:1 on navy cards) */
 
 /* ---- M3 type scale ----------------------------------------------------------
  * The design fonts (LVGL bitmap fonts generated from the design TTFs by
