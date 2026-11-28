@@ -92,7 +92,7 @@ enum hpi_m3_theme_id {
 };
 
 /* The active palette. Set by hpi_m3_theme_select(), once, before any screen
- * is built; never NULL (defaults to DARK). */
+ * is built; never NULL (defaults to LIGHT). */
 extern const struct hpi_m3_palette *hpi_m3_pal;
 void hpi_m3_theme_select(enum hpi_m3_theme_id id);
 enum hpi_m3_theme_id hpi_m3_theme_active(void);

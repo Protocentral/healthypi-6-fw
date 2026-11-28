@@ -52,6 +52,10 @@ enum {
 	HPI_CONFIG_THEME_LIGHT = 1,
 	HPI_CONFIG_THEME_COUNT
 };
+
+/* What a unit with no stored choice shows: light reads best on the TFT.
+ * The stored values above never change; only this default does. */
+#define HPI_CONFIG_THEME_DEFAULT HPI_CONFIG_THEME_LIGHT
 uint8_t  hpi_config_display_theme(void);              /* default DARK */
 int      hpi_config_set_display_theme(uint8_t t);     /* -EINVAL if out of range */
 bool     hpi_config_display_theme_saved(void);

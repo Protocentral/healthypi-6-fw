@@ -30,7 +30,7 @@ static struct {
     .stream_channels = 0x03,   /* ECG | PPG */
     .display_brightness = 80,
     .display_sleep_s = 60,
-    .display_theme = HPI_CONFIG_THEME_DARK,
+    .display_theme = HPI_CONFIG_THEME_DEFAULT,
 };
 
 /* settings 'set' -- called for each stored "hpi/..." key during load + on host
@@ -65,9 +65,9 @@ static int cfg_set(const char *name, size_t len, settings_read_cb read_cb, void 
         if (len != sizeof(t) || read_cb(cb_arg, &t, sizeof(t)) < 0) {
             return -EINVAL;
         }
-        /* An unknown value (a newer firmware's theme) falls back to dark
-         * rather than indexing past the palette table. */
-        g_cfg.display_theme = (t < HPI_CONFIG_THEME_COUNT) ? t : HPI_CONFIG_THEME_DARK;
+        /* An unknown value (a newer firmware's theme) falls back to the
+         * default rather than indexing past the palette table. */
+        g_cfg.display_theme = (t < HPI_CONFIG_THEME_COUNT) ? t : HPI_CONFIG_THEME_DEFAULT;
         return 0;
     }
     if (settings_name_steq(name, "disp_sleep", &next) && !next) {

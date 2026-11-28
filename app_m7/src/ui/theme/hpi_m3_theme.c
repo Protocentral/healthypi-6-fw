@@ -22,6 +22,8 @@ BUILD_ASSERT((int)HPI_M3_THEME_DARK == (int)HPI_CONFIG_THEME_DARK &&
 	     (int)HPI_M3_THEME_LIGHT == (int)HPI_CONFIG_THEME_LIGHT &&
 	     (int)HPI_M3_THEME_COUNT == (int)HPI_CONFIG_THEME_COUNT,
 	     "theme ids must match the config values");
+BUILD_ASSERT((int)HPI_CONFIG_THEME_DEFAULT == (int)HPI_M3_THEME_LIGHT,
+	     "the palette fallback below must match the config default");
 
 /* DARK -- "navy ink". A saturated dark hue rather than black or neutral grey:
  * on this backlit TFT, backlight bleed turns near-black and neutral greys into
@@ -129,13 +131,13 @@ static const struct hpi_m3_palette *const PALETTES[HPI_M3_THEME_COUNT] = {
 	[HPI_M3_THEME_LIGHT] = &PAL_LIGHT,
 };
 
-const struct hpi_m3_palette *hpi_m3_pal = &PAL_DARK;
-static enum hpi_m3_theme_id s_active = HPI_M3_THEME_DARK;
+const struct hpi_m3_palette *hpi_m3_pal = &PAL_LIGHT;
+static enum hpi_m3_theme_id s_active = HPI_M3_THEME_LIGHT;
 
 void hpi_m3_theme_select(enum hpi_m3_theme_id id)
 {
 	if ((unsigned int)id >= HPI_M3_THEME_COUNT) {
-		id = HPI_M3_THEME_DARK;
+		id = HPI_M3_THEME_LIGHT;
 	}
 	s_active = id;
 	hpi_m3_pal = PALETTES[id];
