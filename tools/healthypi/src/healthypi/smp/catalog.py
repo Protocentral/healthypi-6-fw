@@ -507,6 +507,14 @@ COMMANDS: tuple[Command, ...] = (
             Field("ppg", T.BOOL),
             Field("m4", T.BOOL),
             Field("qspi", T.BOOL),
+            # Optional: firmware before suite v2 (1.1.0 and older) has no
+            # IMU check, and a required field would fail its whole reply.
+            Field(
+                "imu",
+                T.BOOL,
+                "BMI323 ready and read in the last second (suite v2+)",
+                optional=True,
+            ),
             Field("pass", T.UINT),
             Field("fail", T.UINT),
             Field("health_overall", T.UINT),

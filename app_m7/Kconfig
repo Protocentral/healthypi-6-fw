@@ -395,14 +395,14 @@ config HPI_UI_DEBUG_CYCLE_MS
 
 config HPI_EOL_SUITE_VER
 	int "End-of-line (manufacturing) self-test suite version"
-	default 1
+	default 2
 	help
 	  Version stamp returned by the group-64 self-test (0x0080) so the factory
 	  can pin which EOL check suite a unit passed. Bump whenever the set of
 	  checks or their pass criteria change. Prod pins this explicitly
 	  (prj.prod.conf) so a shipped image always reports a deliberate suite
 	  version. The firmware suite covers the runtime-automatable checks
-	  (sd/batt/ecg/ppg/m4/qspi); SDRAM sweep, display backlight and touch are
+	  (sd/batt/ecg/ppg/m4/qspi/imu; v2 added imu); SDRAM sweep, display backlight and touch are
 	  bench/visual line steps (see app_m7_bench + the manufacturing checklist).
 
 config HPI_HEALTH_POLL_MS

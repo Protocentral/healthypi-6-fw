@@ -351,6 +351,10 @@ async def diag_selftest(conn, g, is_error, fmt_error):
         return _err("diag_selftest", resp, fmt_error, "refused")
     subs = {"sd": resp.sd, "batt": resp.batt, "ecg": resp.ecg,
             "ppg": resp.ppg, "m4": resp.m4, "qspi": resp.qspi}
+    # Suite v2 (firmware after 1.1.0) adds the IMU. Older firmware does not
+    # report it; leave it out rather than reading its absence as a failure.
+    if getattr(resp, "imu", None) is not None:
+        subs["imu"] = resp.imu
     bad = [k for k, v in subs.items() if not v]
     # `pass` is a Python keyword, so the generated model carries it under that
     # exact name and it is only reachable via getattr -- resp.pass is a syntax

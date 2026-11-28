@@ -504,6 +504,7 @@ Request `{}` →
 |---|---|---|
 | `suite_ver` | uint | Test suite version |
 | `sd`, `batt`, `ecg`, `ppg`, `m4`, `qspi` | bool | Per-test pass/fail |
+| `imu` | bool | BMI323 IMU pass/fail. Suite version 2 and later only; absent from older firmware |
 | `pass`, `fail` | uint | Totals |
 | `health_overall` | uint | Aggregate subsystem health |
 | `health` | **map** | `{acq, m4, stream, rec, hl}`, each uint |
@@ -513,6 +514,11 @@ sample in the last second. Both sample continuously from boot, so a healthy
 unit always passes; a front end that initialises but never produces data
 fails. `batt` needs a fuel gauge that answers, `sd` a mounted card (it must be
 present at boot).
+
+`imu` passes only when the BMI323 IMU (I2C2, address 0x69) is ready **and**
+has returned an accelerometer reading in the last second. "Ready" means it
+answered with its chip ID at boot; the IMU is read at 50 Hz, so a working
+unit always passes.
 
 `health` is a **nested map** — a flat parser will fail on it. Note that
 top-level `m4` (bool, the self-test result) and `health.m4` (uint, the subsystem

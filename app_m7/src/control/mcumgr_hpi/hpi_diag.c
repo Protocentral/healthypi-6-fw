@@ -11,6 +11,7 @@
 
 #include "hpi_mgmt_group.h"
 #include "core/acquisition.h"       /* debounced ECG lead-off mask */
+#include "core/imu.h"               /* BMI323 last-sample age */
 #include "core/sample_formats.h"    /* HP6_LEAD_OFF_* / HP6_VIT_* */
 #include "services/power_service.h"
 #include "platform/fs_mount.h"
@@ -67,12 +68,22 @@ int hpi_diag_run_selftest(struct smp_streamer *ctxt)
     /* The board's QSPI NOR, whatever the part: every HealthyPi 6 board names
      * it as its chosen flash controller. */
     bool qspi = node_ready(DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_controller)));
+    /* BMI323 IMU (I2C2 @ 0x69). Ready means its init read chip ID 0x43, so
+     * the part answered at boot; a good accel read in the last second (it
+     * polls at 50 Hz) means it still answers. A board without the node fails
+     * this check rather than skipping it: every HealthyPi 6 carries one. */
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(bmi323), okay)
+    bool imu  = node_ready(DEVICE_DT_GET(DT_NODELABEL(bmi323))) &&
+                hpi_imu_sample_age_ms() < HPI_SELFTEST_SAMPLE_MAX_AGE_MS;
+#else
+    bool imu  = false;
+#endif
 
-    uint32_t pass = (uint32_t)sd + batt + ecg + ppg + m4 + qspi;
-    uint32_t fail = 6u - pass;
+    uint32_t pass = (uint32_t)sd + batt + ecg + ppg + m4 + qspi + imu;
+    uint32_t fail = 7u - pass;
 
-    LOG_INF("selftest[v%d]: sd=%d batt=%d ecg=%d ppg=%d m4=%d qspi=%d (%u/6 pass)",
-            CONFIG_HPI_EOL_SUITE_VER, sd, batt, ecg, ppg, m4, qspi, pass);
+    LOG_INF("selftest[v%d]: sd=%d batt=%d ecg=%d ppg=%d m4=%d qspi=%d imu=%d (%u/7 pass)",
+            CONFIG_HPI_EOL_SUITE_VER, sd, batt, ecg, ppg, m4, qspi, imu, pass);
 
     /* per-subsystem health states (0=unknown,1=ok,2=degraded,3=failed). */
     struct hpi_health_report hr;
@@ -86,6 +97,7 @@ int hpi_diag_run_selftest(struct smp_streamer *ctxt)
         zcbor_tstr_put_lit(zse, "ppg")  && zcbor_bool_put(zse, ppg) &&
         zcbor_tstr_put_lit(zse, "m4")   && zcbor_bool_put(zse, m4) &&
         zcbor_tstr_put_lit(zse, "qspi") && zcbor_bool_put(zse, qspi) &&
+        zcbor_tstr_put_lit(zse, "imu")  && zcbor_bool_put(zse, imu) &&
         zcbor_tstr_put_lit(zse, "pass") && zcbor_uint32_put(zse, pass) &&
         zcbor_tstr_put_lit(zse, "fail") && zcbor_uint32_put(zse, fail) &&
         zcbor_tstr_put_lit(zse, "health_overall") && zcbor_uint32_put(zse, hr.overall) &&
