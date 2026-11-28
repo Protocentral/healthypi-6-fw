@@ -10,6 +10,22 @@ Versions here are the **firmware** version reported by the device
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-11-28
+
+The self-test now checks the BMI323 IMU. M7 only. The M4 is rebuilt at 1.1.1
+so both cores keep one version; its code is unchanged from 1.1.0. The
+ESP32-C6 image is unchanged.
+
+**Update** from 1.0.x or 1.1.0 with
+`healthypi fw update --port <CDC1> --bundle <1.1.1 bundle>`.
+
+**Self-test suite version 2.** A factory step that pins suite version 1 must
+be updated for units on 1.1.1.
+
+### Validation
+- On a v5 unit the self-test reports suite version 2 with `imu` passing.
+- A failing IMU is covered by host tests only.
+
 ### Fixed
 - **The self-test did not check the BMI323 IMU (M7).** A unit with a missing
   or dead IMU passed. The group-64 self-test (`0x0080`) now reports `imu`. It
