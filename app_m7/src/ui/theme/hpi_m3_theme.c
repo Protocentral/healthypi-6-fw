@@ -28,7 +28,7 @@ BUILD_ASSERT((int)HPI_M3_THEME_DARK == (int)HPI_CONFIG_THEME_DARK &&
  * one washed-out field. Bright traces on a darker plot well. */
 static const struct hpi_m3_palette PAL_DARK = {
 	.surface_dim          = 0x0A1826,
-	.plot_well            = 0x0A1826,
+	.plot_well            = 0x000000,
 	.surface              = 0x0F2233,
 	.surface_container    = 0x18324A,
 	.surface_high         = 0x23425E,
@@ -56,20 +56,24 @@ static const struct hpi_m3_palette PAL_DARK = {
 	.sig_resp             = 0x4CC38A,
 	.sig_temp             = 0xFB923C,
 	.sig_hrv              = 0x9A94F5,
+
+	.trace_ecg            = 0xFBBF24,
+	.trace_ppg            = 0x6FB3CC,
+	.trace_resp           = 0x4CC38A,
 };
 
 /* LIGHT -- "mist". What an LCD renders best: no backlight bleed to fight,
  * readable in bright rooms and at an angle. The page is a soft blue-grey
  * (#D3DDE4, ~20 % less luminous than near-white #EEF2F5, which glared at
- * full backlight); cards sit a step lighter, and the waveform plot well is
- * the BRIGHTEST surface, so traces get the most contrast where they are read.
- * Every accent and signal is a deep version of its dark-theme counterpart:
- * the bright ones fail on light (amber #FBBF24 is ~1.7:1). Signals are
- * >= 4.5:1 on cards and >= 5.2:1 on the plot well. The CTA stays a filled
+ * full backlight); cards sit a step lighter. The plot rectangles are black
+ * (as in DARK), with bright traces, like a patient monitor.
+ * Every accent and signal (labels, numbers) is a deep version of its
+ * dark-theme counterpart: the bright ones fail on light (amber #FBBF24 is
+ * ~1.7:1). Signals are >= 4.5:1 on cards. The CTA stays a filled
  * amber with dark text. */
 static const struct hpi_m3_palette PAL_LIGHT = {
 	.surface_dim          = 0xC9D4DC,
-	.plot_well            = 0xF5F8FA,
+	.plot_well            = 0x000000,
 	.surface              = 0xD3DDE4,
 	.surface_container    = 0xE6ECF0,
 	.surface_high         = 0xC3CFD8,
@@ -97,6 +101,11 @@ static const struct hpi_m3_palette PAL_LIGHT = {
 	.sig_resp             = 0x047857,
 	.sig_temp             = 0xB93A0B,
 	.sig_hrv              = 0x6D28D9,
+
+	/* Bright, as in DARK: the plot well is black in both themes. */
+	.trace_ecg            = 0xFBBF24,
+	.trace_ppg            = 0x6FB3CC,
+	.trace_resp           = 0x4CC38A,
 };
 
 static const struct hpi_m3_palette *const PALETTES[HPI_M3_THEME_COUNT] = {

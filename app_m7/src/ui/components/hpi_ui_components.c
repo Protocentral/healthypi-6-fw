@@ -845,7 +845,7 @@ void hpi_ui_waveform_create(struct hpi_ui_waveform *w, lv_obj_t *parent,
 	w->panel = lv_obj_create(parent);
 	lv_obj_set_width(w->panel, lv_pct(100));
 	lv_obj_set_flex_grow(w->panel, 1);
-	hpi_m3_apply_card(w->panel, HPI_M3_PLOT_WELL, HPI_M3_RADIUS_MD);
+	hpi_m3_apply_card(w->panel, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_MD);
 	lv_obj_set_style_pad_all(w->panel, HPI_M3_SPACE_2, 0);
 	lv_obj_clear_flag(w->panel, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(w->panel, LV_FLEX_FLOW_COLUMN);
@@ -862,7 +862,12 @@ void hpi_ui_waveform_create(struct hpi_ui_waveform *w, lv_obj_t *parent,
 	lv_chart_set_update_mode(w->chart, LV_CHART_UPDATE_MODE_SHIFT);
 	lv_chart_set_point_count(w->chart, points);
 	lv_chart_set_div_line_count(w->chart, 0, 0);
-	lv_obj_set_style_bg_opa(w->chart, LV_OPA_TRANSP, 0);
+	/* The chart IS the plot area: only this rectangle takes PLOT_WELL, so
+	 * the caption and any header around it stay on the card. */
+	lv_obj_set_style_bg_color(w->chart, HPI_M3_PLOT_WELL, 0);
+	lv_obj_set_style_bg_opa(w->chart, LV_OPA_COVER, 0);
+	lv_obj_set_style_radius(w->chart, HPI_M3_RADIUS_SM, 0);
+	lv_obj_set_style_pad_all(w->chart, HPI_M3_SPACE_1, 0);
 	lv_obj_set_style_border_width(w->chart, 0, 0);
 	/* Line only, no per-sample markers; set the width explicitly rather than
 	 * inheriting it. */

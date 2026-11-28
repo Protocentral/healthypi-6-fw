@@ -245,9 +245,9 @@ lv_obj_t *hpi_scr_home_create(lv_obj_t *parent)
 	lv_obj_set_style_pad_ver(s_h.src, HPI_M3_SPACE_1, 0);
 	lv_obj_set_style_margin_bottom(s_h.src, HPI_M3_SPACE_2, 0);
 
-	/* Small live ECG sparkline (amber). Reuse the waveform component but strip
-	 * its card chrome + caption so it reads as a sparkline, not a panel. */
-	hpi_ui_waveform_create(&s_ecg, focal, "", HPI_M3_SIG_ECG,
+	/* Small live ECG strip: the waveform component without its card chrome
+	 * or caption -- just the black plot rectangle and a bright trace. */
+	hpi_ui_waveform_create(&s_ecg, focal, "", HPI_M3_TRACE_ECG,
 			       HPI_HOME_WAVE_POINTS, -2000, 2000, 9);
 	lv_obj_set_style_border_width(s_ecg.panel, 0, 0);
 	lv_obj_set_style_bg_opa(s_ecg.panel, LV_OPA_TRANSP, 0);
@@ -256,7 +256,7 @@ lv_obj_t *hpi_scr_home_create(lv_obj_t *parent)
 	lv_obj_set_width(s_ecg.panel, lv_pct(90));
 	lv_obj_set_height(s_ecg.panel, 56);
 	lv_obj_set_style_margin_top(s_ecg.panel, 24, 0);   /* gap below the focal HR */
-	lv_obj_set_style_line_opa(s_ecg.chart, LV_OPA_60, LV_PART_ITEMS);
+	/* Full opacity: on the black plot well a 60 % trace read as dim. */
 	lv_obj_t *ecgcap = lv_obj_get_child(s_ecg.panel, 0);   /* hide empty caption */
 	if (ecgcap) {
 		lv_obj_add_flag(ecgcap, LV_OBJ_FLAG_HIDDEN);

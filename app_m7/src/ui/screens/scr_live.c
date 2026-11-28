@@ -164,18 +164,18 @@ static void controls_create(lv_obj_t *root)
 /* ---- one waveform lane: header (dot/label/value/unit) + waveform ---- */
 
 static void lane_create(struct live_lane *ln, lv_obj_t *parent, const char *label,
-			const char *unit, lv_color_t color, uint8_t bl_shift,
-			int32_t yseed, bool border_bottom)
+			const char *unit, lv_color_t color, lv_color_t trace,
+			uint8_t bl_shift, int32_t yseed, bool border_bottom)
 {
-	/* Each lane is its own plot-well panel: the trace is drawn on the
-	 * surface the palette reserves for traces (brightest in LIGHT, darkest
-	 * in DARK), not on the page background. The gaps between panels
-	 * separate the lanes, so there is no divider line. */
+	/* Each lane is a card: header (label, value, unit) on the card, and
+	 * the trace in the waveform's own PLOT_WELL rectangle below it. Only
+	 * that rectangle is black; `color` styles the header, `trace` the line.
+	 * The gaps between cards separate the lanes, so there is no divider. */
 	ARG_UNUSED(border_bottom);
 	lv_obj_t *lane = lv_obj_create(parent);
 	lv_obj_set_width(lane, lv_pct(100));
 	lv_obj_set_flex_grow(lane, 1);
-	hpi_m3_apply_card(lane, HPI_M3_PLOT_WELL, HPI_M3_RADIUS_MD);
+	hpi_m3_apply_card(lane, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_MD);
 	lv_obj_set_style_border_width(lane, 0, 0);
 	lv_obj_set_style_pad_hor(lane, HPI_M3_SPACE_3, 0);
 	lv_obj_set_style_pad_ver(lane, HPI_M3_SPACE_2, 0);
@@ -212,7 +212,7 @@ static void lane_create(struct live_lane *ln, lv_obj_t *parent, const char *labe
 	lv_obj_set_style_text_font(un, HPI_M3_FONT_CAPS_SM, 0);
 	lv_obj_set_style_text_color(un, HPI_M3_ON_SURFACE_MUTED, 0);
 
-	hpi_ui_waveform_create(&ln->wf, lane, "", color, HPI_LIVE_WAVE_POINTS,
+	hpi_ui_waveform_create(&ln->wf, lane, "", trace, HPI_LIVE_WAVE_POINTS,
 			       -yseed, yseed, bl_shift);
 	lv_obj_set_style_border_width(ln->wf.panel, 0, 0);
 	lv_obj_set_style_bg_opa(ln->wf.panel, LV_OPA_TRANSP, 0);
@@ -294,9 +294,9 @@ lv_obj_t *hpi_scr_live_create(lv_obj_t *parent)
 	/* DC-block: ECG steady -> slow (9); PPG wanders -> fast (5). Respiration
 	 * is slow (9, ~0.04 Hz): a faster block (6, ~0.33 Hz) cut into normal
 	 * breathing at 0.2-0.5 Hz. */
-	lane_create(&s_l.ecg,  lanes, "ECG \xC2\xB7 LEAD II", "BPM",   HPI_M3_SIG_ECG,  9, 2000,   true);
-	lane_create(&s_l.ppg,  lanes, "PPG \xC2\xB7 IR",      "% SPO2 UNCAL", HPI_M3_SIG_PPG,  5, 200000, true);
-	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, 9, 2000,   false);
+	lane_create(&s_l.ecg,  lanes, "ECG \xC2\xB7 LEAD II", "BPM",   HPI_M3_SIG_ECG,  HPI_M3_TRACE_ECG,  9, 2000,   true);
+	lane_create(&s_l.ppg,  lanes, "PPG \xC2\xB7 IR",      "% SPO2 UNCAL", HPI_M3_SIG_PPG,  HPI_M3_TRACE_PPG,  5, 200000, true);
+	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, HPI_M3_TRACE_RESP, 9, 2000,   false);
 	hpi_ui_waveform_set_target(&s_l.resp.wf, RESP_TARGET);
 	hpi_ui_waveform_set_floor(&s_l.resp.wf, RESP_FLOOR_UV);
 

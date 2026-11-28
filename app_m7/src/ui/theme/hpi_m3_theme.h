@@ -46,7 +46,7 @@ extern "C" {
 struct hpi_m3_palette {
 	/* Surfaces */
 	uint32_t surface_dim;        /* splash / ambient / power backdrop        */
-	uint32_t plot_well;          /* behind waveforms                         */
+	uint32_t plot_well;          /* the plot rectangle behind every trace    */
 	uint32_t surface;            /* screen background                        */
 	uint32_t surface_container;  /* card / list row / nav bar                */
 	uint32_t surface_high;       /* raised: secondary buttons, stepper keys  */
@@ -71,6 +71,12 @@ struct hpi_m3_palette {
 	uint32_t sig_resp;
 	uint32_t sig_temp;
 	uint32_t sig_hrv;
+	/* Traces: the line colour INSIDE plot_well. Separate from sig_*, which
+	 * colour labels and numbers on cards: a black plot well needs bright
+	 * traces even on the light theme, whose sig_* are deep for light cards. */
+	uint32_t trace_ecg;
+	uint32_t trace_ppg;
+	uint32_t trace_resp;
 };
 
 enum hpi_m3_theme_id {
@@ -120,6 +126,10 @@ enum hpi_m3_theme_id hpi_m3_theme_active(void);
 #define HPI_M3_SIG_RESP           HPI_M3_C(sig_resp)
 #define HPI_M3_SIG_TEMP           HPI_M3_C(sig_temp)
 #define HPI_M3_SIG_HRV            HPI_M3_C(sig_hrv)
+
+#define HPI_M3_TRACE_ECG          HPI_M3_C(trace_ecg)
+#define HPI_M3_TRACE_PPG          HPI_M3_C(trace_ppg)
+#define HPI_M3_TRACE_RESP         HPI_M3_C(trace_resp)
 
 /* ---- M3 type scale ----------------------------------------------------------
  * The design fonts (LVGL bitmap fonts generated from the design TTFs by
