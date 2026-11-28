@@ -12,6 +12,7 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -23,11 +24,13 @@ static struct {
     uint32_t stream_channels;
     uint8_t  display_brightness;
     uint16_t display_sleep_s;  /* 0 = never */
+    uint8_t  display_theme;    /* HPI_CONFIG_THEME_* */
 } g_cfg = {
     .device_name = "HealthyPi 6",
     .stream_channels = 0x03,   /* ECG | PPG */
     .display_brightness = 80,
     .display_sleep_s = 60,
+    .display_theme = HPI_CONFIG_THEME_DEFAULT,
 };
 
 /* settings 'set' -- called for each stored "hpi/..." key during load + on host
@@ -55,6 +58,17 @@ static int cfg_set(const char *name, size_t len, settings_read_cb read_cb, void 
             return -EINVAL;
         }
         return (read_cb(cb_arg, &g_cfg.display_brightness, sizeof(uint8_t)) < 0) ? -EIO : 0;
+    }
+    if (settings_name_steq(name, "disp_theme", &next) && !next) {
+        uint8_t t;
+
+        if (len != sizeof(t) || read_cb(cb_arg, &t, sizeof(t)) < 0) {
+            return -EINVAL;
+        }
+        /* An unknown value (a newer firmware's theme) falls back to the
+         * default rather than indexing past the palette table. */
+        g_cfg.display_theme = (t < HPI_CONFIG_THEME_COUNT) ? t : HPI_CONFIG_THEME_DEFAULT;
+        return 0;
     }
     if (settings_name_steq(name, "disp_sleep", &next) && !next) {
         if (len != sizeof(uint16_t)) {
@@ -92,6 +106,13 @@ static int cfg_get(const char *name, char *val, int val_len_max)
         memcpy(val, &g_cfg.display_brightness, sizeof(uint8_t));
         return sizeof(uint8_t);
     }
+    if (settings_name_steq(name, "disp_theme", &next) && !next) {
+        if (val_len_max < (int)sizeof(uint8_t)) {
+            return -ENOMEM;
+        }
+        memcpy(val, &g_cfg.display_theme, sizeof(uint8_t));
+        return sizeof(uint8_t);
+    }
     if (settings_name_steq(name, "disp_sleep", &next) && !next) {
         if (val_len_max < (int)sizeof(uint16_t)) {
             return -ENOMEM;
@@ -109,6 +130,7 @@ static int cfg_export(int (*cb)(const char *name, const void *value, size_t val_
     cb("hpi/stream_ch", &g_cfg.stream_channels, sizeof(uint32_t));
     cb("hpi/disp_bright", &g_cfg.display_brightness, sizeof(uint8_t));
     cb("hpi/disp_sleep", &g_cfg.display_sleep_s, sizeof(uint16_t));
+    cb("hpi/disp_theme", &g_cfg.display_theme, sizeof(uint8_t));
     return 0;
 }
 
@@ -152,6 +174,25 @@ static void cfg_sleep_save_work(struct k_work *w)
     }
 }
 
+/* The theme is written once per tap, not per touch sample, so it is not
+ * debounced -- but it is still a QSPI program, so it still runs here and not
+ * on the UI thread. `s_theme_saved` lets the UI wait for it before the
+ * restart that applies the theme. */
+static atomic_t s_theme_saved = ATOMIC_INIT(1);
+
+static void cfg_theme_save_work(struct k_work *w)
+{
+    ARG_UNUSED(w);
+    uint8_t t = g_cfg.display_theme;
+    int rc = settings_save_one("hpi/disp_theme", &t, sizeof(t));
+
+    if (rc != 0) {
+        LOG_WRN("theme persist failed (%d)", rc);
+    }
+    atomic_set(&s_theme_saved, 1);
+}
+
+static K_WORK_DEFINE(cfg_theme_save, cfg_theme_save_work);
 static K_WORK_DELAYABLE_DEFINE(cfg_bright_save, cfg_bright_save_work);
 static K_WORK_DELAYABLE_DEFINE(cfg_sleep_save, cfg_sleep_save_work);
 
@@ -188,6 +229,25 @@ int hpi_config_service_init(void)
 uint32_t hpi_config_stream_channels(void) { return g_cfg.stream_channels; }
 uint8_t  hpi_config_display_brightness(void) { return g_cfg.display_brightness; }
 uint16_t hpi_config_display_sleep_s(void) { return g_cfg.display_sleep_s; }
+uint8_t  hpi_config_display_theme(void) { return g_cfg.display_theme; }
+bool     hpi_config_display_theme_saved(void) { return atomic_get(&s_theme_saved) != 0; }
+
+int hpi_config_set_display_theme(uint8_t t)
+{
+    if (t >= HPI_CONFIG_THEME_COUNT) {
+        return -EINVAL;
+    }
+    g_cfg.display_theme = t;
+    atomic_set(&s_theme_saved, 0);
+    if (!cfg_wq_ready) {
+        int rc = settings_save_one("hpi/disp_theme", &t, sizeof(t));
+
+        atomic_set(&s_theme_saved, 1);
+        return rc;
+    }
+    k_work_submit_to_queue(&cfg_wq, &cfg_theme_save);
+    return 0;
+}
 const char *hpi_config_device_name(void) { return g_cfg.device_name; }
 
 int hpi_config_set_stream_channels(uint32_t ch)

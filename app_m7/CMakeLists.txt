@@ -77,6 +77,7 @@ target_sources_ifdef(CONFIG_HPI_SECURITY app PRIVATE
 # components + screens compile only with the display flavor.
 target_sources(app PRIVATE src/ui/ui_module.c)
 target_sources_ifdef(CONFIG_HPI_DISPLAY_ENABLED app PRIVATE
+    src/ui/theme/hpi_m3_theme.c
     src/ui/components/hpi_ui_components.c
     src/ui/screens/scr_home.c
     src/ui/screens/scr_live.c
@@ -92,14 +93,15 @@ target_sources_ifdef(CONFIG_HPI_DISPLAY_ENABLED app PRIVATE
     src/ui/screens/scr_power.c
     # Brand lockup (generated from the design artwork by ui/assets/convert_logo.py)
     src/ui/assets/hpi_logo.c
+    src/ui/assets/pc_logo.c
     # Redesign fonts (generated from the real design TTFs by ui/fonts/convert_fonts.sh)
     src/ui/fonts/lvgl/rubik_500_148.c
-    src/ui/fonts/lvgl/rubik_500_28.c
-    src/ui/fonts/lvgl/manrope_700_16.c
-    src/ui/fonts/lvgl/manrope_700_12.c
-    src/ui/fonts/lvgl/saira_700_28.c
-    src/ui/fonts/lvgl/saira_600_18.c
-    src/ui/fonts/lvgl/jetbrains_mono_14.c
+    src/ui/fonts/lvgl/rubik_500_32.c
+    src/ui/fonts/lvgl/manrope_700_18.c
+    src/ui/fonts/lvgl/manrope_700_14.c
+    src/ui/fonts/lvgl/saira_700_30.c
+    src/ui/fonts/lvgl/saira_600_20.c
+    src/ui/fonts/lvgl/jetbrains_mono_16.c
     src/ui/fonts/lvgl/matsym_20.c
     src/ui/fonts/lvgl/matsym_24.c)
 

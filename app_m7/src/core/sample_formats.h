@@ -48,6 +48,12 @@ extern "C" {
 #define HP6_LEAD_OFF_LL   0x04
 #define HP6_LEAD_OFF_V1   0x08
 
+/* Which electrodes each derived signal depends on: a signal is invalid only
+ * when one of ITS electrodes is off. Lead II = LL - RA. Respiration (thoracic
+ * Z on CH1) is excited through the limb electrodes; V1 does not affect it. */
+#define HP6_LEAD_OFF_LEAD_II  (HP6_LEAD_OFF_RA | HP6_LEAD_OFF_LL)
+#define HP6_LEAD_OFF_RESP     (HP6_LEAD_OFF_RA | HP6_LEAD_OFF_LA | HP6_LEAD_OFF_LL)
+
 /* HPI_CH_ECG payload (20 B): ECG leads + respiration, microvolts.
  * Respiration shares the ECG frame (ADS1294R CH0). */
 struct hp6_ecg_sample {

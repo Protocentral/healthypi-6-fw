@@ -205,6 +205,14 @@ int main(void)
      * hpi_health_snapshot() with a max-timeout fallback. It runs at priority
      * 8, below acquisition and IPC, and everything it consumes -- the sample
      * bus and the health table -- is initialised above. */
+    /* config service -- load persistent settings from /lfs (QSPI). The
+     * LittleFS is auto-mounted by the fstab node before main() runs, so this
+     * does not wait on the SD gate below. It runs BEFORE the UI because the UI
+     * reads the colour theme once, before it paints the splash; it used to run
+     * ~3 s later, which was harmless only while every UI setting was read
+     * lazily. Only the UI consumes config. */
+    (void)hpi_config_service_init();
+
     hpi_ui_init();
 
     /* Filesystem bring-up with the FS-ready handshake. A mount failure is
@@ -257,9 +265,6 @@ int main(void)
     /* power/telemetry (battery monitor) -- feeds group-64 telemetry. */
     (void)hpi_power_service_init();
 
-    /* config service -- load persistent settings from /lfs (QSPI). The
-     * LittleFS is auto-mounted by the fstab node before main() runs. */
-    (void)hpi_config_service_init();
     (void)hpi_button_service_init();
 
     /* HealthyLink module framework -- detect modules per slot, match a

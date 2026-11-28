@@ -11,6 +11,7 @@
 #ifndef HPI_SERVICES_CONFIG_SERVICE_H
 #define HPI_SERVICES_CONFIG_SERVICE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -40,6 +41,24 @@ int      hpi_config_set_display_brightness(uint8_t b);
  * deferred onto the config workqueue rather than run on the LVGL thread. */
 uint16_t hpi_config_display_sleep_s(void);            /* default 60 */
 int      hpi_config_set_display_sleep_s(uint16_t s);
+
+/* UI colour theme. Read ONCE, by the UI before it draws the splash: screens
+ * are built at boot and never rebuilt, so a change applies at the next
+ * restart. The setter persists off the UI thread; poll
+ * hpi_config_display_theme_saved() before restarting so the choice is not
+ * lost to the reboot. */
+enum {
+	HPI_CONFIG_THEME_DARK  = 0,
+	HPI_CONFIG_THEME_LIGHT = 1,
+	HPI_CONFIG_THEME_COUNT
+};
+
+/* What a unit with no stored choice shows: light reads best on the TFT.
+ * The stored values above never change; only this default does. */
+#define HPI_CONFIG_THEME_DEFAULT HPI_CONFIG_THEME_LIGHT
+uint8_t  hpi_config_display_theme(void);              /* default DARK */
+int      hpi_config_set_display_theme(uint8_t t);     /* -EINVAL if out of range */
+bool     hpi_config_display_theme_saved(void);
 
 const char *hpi_config_device_name(void);             /* default "HealthyPi 6" */
 int      hpi_config_set_device_name(const char *name);

@@ -5,10 +5,10 @@ The redesign UI uses the **real design type stack** (per
 
 | Face | Role | Generated sizes |
 |------|------|-----------------|
-| **Rubik-500** | all numerals | `rubik_500_148` (focal HR/hero), `rubik_500_28` (chips) |
-| **Manrope-700** | labels / units / caps | `manrope_700_16`, `manrope_700_12` |
-| **Saira** (600/700) | screen titles | `saira_600_18` (title), `saira_700_28` (headline) |
-| **JetBrains Mono** | filenames / versions | `jetbrains_mono_14` |
+| **Rubik-500** | all numerals | `rubik_500_148` (focal HR/hero), `rubik_500_32` (chips) |
+| **Manrope-700** | labels / units / caps | `manrope_700_18`, `manrope_700_14` |
+| **Saira** (600/700) | screen titles | `saira_600_20` (title), `saira_700_30` (headline) |
+| **JetBrains Mono** | filenames / versions | `jetbrains_mono_16` |
 | **Material Symbols Outlined** | icons (nav / chips / status / caption) | `matsym_20`, `matsym_24` — 17-glyph subset |
 
 - `ttf/` — the source TTFs (vendored from the design fonts: Rubik, Manrope,

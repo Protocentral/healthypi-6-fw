@@ -100,23 +100,13 @@ static void sweep_cb(lv_event_t *e)
  * relabel it as the value changes. */
 static lv_obj_t *pill_cycle(lv_obj_t *row, const char *text, lv_event_cb_t cb)
 {
-	lv_obj_t *p = lv_button_create(row);
+	lv_obj_t *p = hpi_ui_button_create(row, HPI_UI_BTN_SECONDARY, NULL, text,
+					   cb, NULL);
+	lv_obj_t *l = hpi_ui_button_label(p);
 
-	lv_obj_set_size(p, LV_SIZE_CONTENT, HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(p, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_radius(p, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(p, 1, 0);
-	lv_obj_set_style_border_color(p, HPI_M3_OUTLINE, 0);
+	/* Three controls + the lead indicator share one 480 px row. */
 	lv_obj_set_style_pad_hor(p, HPI_M3_SPACE_3, 0);
-	lv_obj_set_style_pad_ver(p, 0, 0);
-	lv_obj_add_event_cb(p, cb, LV_EVENT_CLICKED, NULL);
-
-	lv_obj_t *l = lv_label_create(p);
-
-	lv_label_set_text(l, text);
-	lv_obj_center(l);
-	lv_obj_set_style_text_font(l, HPI_M3_FONT_MONO, 0);
-	lv_obj_set_style_text_color(l, HPI_M3_ON_SURFACE_VARIANT, 0);
+	lv_obj_set_style_text_font(l, HPI_M3_FONT_MONO, 0);   /* a value, not a verb */
 	return l;
 }
 
@@ -135,17 +125,10 @@ static void controls_create(lv_obj_t *root)
 			      LV_FLEX_ALIGN_CENTER);
 
 	/* Pause (functional). */
-	lv_obj_t *pause = lv_button_create(row);
-	lv_obj_set_height(pause, HPI_M3_TOUCH_MIN);
-	hpi_m3_apply_card(pause, HPI_M3_PRIMARY_CONTAINER, HPI_M3_RADIUS_PILL);
-	lv_obj_set_style_border_width(pause, 0, 0);
+	lv_obj_t *pause = hpi_ui_button_create(row, HPI_UI_BTN_TONAL, NULL, "PAUSE",
+					       pause_cb, NULL);
 	lv_obj_set_style_pad_hor(pause, HPI_M3_SPACE_3, 0);
-	lv_obj_add_event_cb(pause, pause_cb, LV_EVENT_CLICKED, NULL);
-	s_l.pause_lbl = lv_label_create(pause);
-	lv_label_set_text(s_l.pause_lbl, "PAUSE");
-	lv_obj_center(s_l.pause_lbl);
-	lv_obj_set_style_text_font(s_l.pause_lbl, HPI_M3_FONT_CAPS_SM, 0);
-	lv_obj_set_style_text_color(s_l.pause_lbl, HPI_M3_PRIMARY_LIGHT, 0);
+	s_l.pause_lbl = hpi_ui_button_label(pause);
 
 	/* Zoom / sweep — live; both cycle their step on tap. Applied to all three
 	 * lanes at once, and only to the display: acquisition, the stream and the
@@ -181,18 +164,21 @@ static void controls_create(lv_obj_t *root)
 /* ---- one waveform lane: header (dot/label/value/unit) + waveform ---- */
 
 static void lane_create(struct live_lane *ln, lv_obj_t *parent, const char *label,
-			const char *unit, lv_color_t color, uint8_t bl_shift,
-			int32_t yseed, bool border_bottom)
+			const char *unit, lv_color_t color, lv_color_t trace,
+			uint8_t bl_shift, int32_t yseed, bool border_bottom)
 {
+	/* Each lane is a card: header (label, value, unit) on the card, and
+	 * the trace in the waveform's own PLOT_WELL rectangle below it. Only
+	 * that rectangle is black; `color` styles the header, `trace` the line.
+	 * The gaps between cards separate the lanes, so there is no divider. */
+	ARG_UNUSED(border_bottom);
 	lv_obj_t *lane = lv_obj_create(parent);
 	lv_obj_set_width(lane, lv_pct(100));
 	lv_obj_set_flex_grow(lane, 1);
-	lv_obj_set_style_bg_opa(lane, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_border_width(lane, border_bottom ? 1 : 0, 0);
-	lv_obj_set_style_border_side(lane, LV_BORDER_SIDE_BOTTOM, 0);
-	lv_obj_set_style_border_color(lane, HPI_M3_OUTLINE, 0);
+	hpi_m3_apply_card(lane, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_MD);
+	lv_obj_set_style_border_width(lane, 0, 0);
 	lv_obj_set_style_pad_hor(lane, HPI_M3_SPACE_3, 0);
-	lv_obj_set_style_pad_ver(lane, HPI_M3_SPACE_1, 0);
+	lv_obj_set_style_pad_ver(lane, HPI_M3_SPACE_2, 0);
 	lv_obj_clear_flag(lane, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(lane, LV_FLEX_FLOW_COLUMN);
 
@@ -226,7 +212,7 @@ static void lane_create(struct live_lane *ln, lv_obj_t *parent, const char *labe
 	lv_obj_set_style_text_font(un, HPI_M3_FONT_CAPS_SM, 0);
 	lv_obj_set_style_text_color(un, HPI_M3_ON_SURFACE_MUTED, 0);
 
-	hpi_ui_waveform_create(&ln->wf, lane, "", color, HPI_LIVE_WAVE_POINTS,
+	hpi_ui_waveform_create(&ln->wf, lane, "", trace, HPI_LIVE_WAVE_POINTS,
 			       -yseed, yseed, bl_shift);
 	lv_obj_set_style_border_width(ln->wf.panel, 0, 0);
 	lv_obj_set_style_bg_opa(ln->wf.panel, LV_OPA_TRANSP, 0);
@@ -299,17 +285,18 @@ lv_obj_t *hpi_scr_live_create(lv_obj_t *parent)
 	lv_obj_set_flex_grow(lanes, 1);
 	lv_obj_set_style_bg_opa(lanes, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_border_width(lanes, 0, 0);
-	lv_obj_set_style_pad_all(lanes, 0, 0);
-	lv_obj_set_style_pad_row(lanes, 0, 0);
+	lv_obj_set_style_pad_hor(lanes, HPI_M3_SPACE_2, 0);
+	lv_obj_set_style_pad_ver(lanes, HPI_M3_SPACE_1, 0);
+	lv_obj_set_style_pad_row(lanes, HPI_M3_SPACE_2, 0);
 	lv_obj_clear_flag(lanes, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(lanes, LV_FLEX_FLOW_COLUMN);
 
 	/* DC-block: ECG steady -> slow (9); PPG wanders -> fast (5). Respiration
 	 * is slow (9, ~0.04 Hz): a faster block (6, ~0.33 Hz) cut into normal
 	 * breathing at 0.2-0.5 Hz. */
-	lane_create(&s_l.ecg,  lanes, "ECG \xC2\xB7 LEAD II", "BPM",   HPI_M3_SIG_ECG,  9, 2000,   true);
-	lane_create(&s_l.ppg,  lanes, "PPG \xC2\xB7 IR",      "% SPO2 UNCAL", HPI_M3_SIG_PPG,  5, 200000, true);
-	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, 9, 2000,   false);
+	lane_create(&s_l.ecg,  lanes, "ECG \xC2\xB7 LEAD II", "BPM",   HPI_M3_SIG_ECG,  HPI_M3_TRACE_ECG,  9, 2000,   true);
+	lane_create(&s_l.ppg,  lanes, "PPG \xC2\xB7 IR",      "% SPO2",       HPI_M3_SIG_PPG,  HPI_M3_TRACE_PPG,  5, 200000, true);
+	lane_create(&s_l.resp, lanes, "RESP \xC2\xB7 BIOZ",   "/MIN",  HPI_M3_SIG_RESP, HPI_M3_TRACE_RESP, 9, 2000,   false);
 	hpi_ui_waveform_set_target(&s_l.resp.wf, RESP_TARGET);
 	hpi_ui_waveform_set_floor(&s_l.resp.wf, RESP_FLOOR_UV);
 
@@ -353,13 +340,17 @@ void hpi_scr_live_push_ecg(int32_t lead_ii_uv, int32_t resp_uv, uint8_t lead_off
 	}
 	lv_obj_set_style_text_color(s_l.leads,
 				    lead_off == 0 ? HPI_M3_SUCCESS : HPI_M3_ERROR, 0);
-	/* A floating electrode rails; dim the trace rather than let the artefact
-	 * scroll past at full contrast as though it were a signal. Respiration is
-	 * measured across the same limb electrodes, so it is dimmed with ECG. */
+	/* A floating electrode rails; dim a trace rather than let the artefact
+	 * scroll past at full contrast as though it were a signal -- but only
+	 * for the electrodes THAT trace uses. Lead II needs RA + LL; V1 or LA
+	 * off leaves it valid. Respiration needs RA/LA/LL, not V1. The warning
+	 * text above still names every electrode that is off. */
 	lv_obj_set_style_line_opa(s_l.ecg.wf.chart,
-				  lead_off ? LV_OPA_20 : LV_OPA_COVER, LV_PART_ITEMS);
+				  (lead_off & HP6_LEAD_OFF_LEAD_II) ? LV_OPA_20 : LV_OPA_COVER,
+				  LV_PART_ITEMS);
 	lv_obj_set_style_line_opa(s_l.resp.wf.chart,
-				  lead_off ? LV_OPA_20 : LV_OPA_COVER, LV_PART_ITEMS);
+				  (lead_off & HP6_LEAD_OFF_RESP) ? LV_OPA_20 : LV_OPA_COVER,
+				  LV_PART_ITEMS);
 }
 
 void hpi_scr_live_push_ppg(int32_t ir)

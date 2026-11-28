@@ -88,18 +88,18 @@ gen() { # <ttf> <size> <bpp> <range> <name>
 
 echo "Rubik-500 (numerals)"
 gen Rubik-500.ttf          148 4 "$NUM" rubik_500_148   # focal HR hero
-gen Rubik-500.ttf           28 4 "$NUM" rubik_500_28    # vital chips
+gen Rubik-500.ttf           32 4 "$NUM" rubik_500_32    # vital chips
 
 echo "Manrope-700 (labels / units / caps)"
-gen Manrope-700.ttf         16 4 "$TXT" manrope_700_16  # caption / unit / body / label
-gen Manrope-700.ttf         12 4 "$TXT" manrope_700_12  # small labels / nav / chip role
+gen Manrope-700.ttf         18 4 "$TXT" manrope_700_18  # caption / unit / body / label
+gen Manrope-700.ttf         14 4 "$TXT" manrope_700_14  # small labels / nav / chip role
 
 echo "Saira (titles)"
-gen Saira-700.ttf           28 4 "$TXT" saira_700_28    # headline / display
-gen Saira-600.ttf           18 4 "$TXT" saira_600_18    # title
+gen Saira-700.ttf           30 4 "$TXT" saira_700_30    # headline / display
+gen Saira-600.ttf           20 4 "$TXT" saira_600_20    # title
 
 echo "JetBrains Mono (clock / mono)"
-gen JetBrainsMono-Regular.ttf 14 4 "$TXT" jetbrains_mono_14
+gen JetBrainsMono-Regular.ttf 16 4 "$TXT" jetbrains_mono_16
 
 echo "Material Symbols Outlined (icon subset)"
 gen MaterialSymbols-Outlined.ttf 20 4 "$SYM" matsym_20   # chips / status / caption

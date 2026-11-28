@@ -41,7 +41,7 @@ lv_obj_t *hpi_scr_boot_create(lv_obj_t *screen)
 {
 	s_b.root = lv_obj_create(screen);
 	lv_obj_set_size(s_b.root, lv_pct(100), lv_pct(100));
-	lv_obj_set_style_bg_color(s_b.root, HPI_M3_SURFACE_DIM, 0);
+	lv_obj_set_style_bg_color(s_b.root, HPI_M3_SPLASH_BG, 0);
 	lv_obj_set_style_bg_opa(s_b.root, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(s_b.root, 0, 0);
 	lv_obj_set_style_radius(s_b.root, 0, 0);
@@ -59,15 +59,12 @@ lv_obj_t *hpi_scr_boot_create(lv_obj_t *screen)
 			      LV_FLEX_ALIGN_CENTER);
 	lv_obj_set_style_pad_row(s_b.splash, HPI_M3_SPACE_2, 0);
 
-	/* The lockup carries the product name; only the company line goes under. */
+	/* The lockup carries the product name; the company logo goes under it. */
 	hpi_ui_logo_create(s_b.splash, SPLASH_LOGO_W);
 
-	lv_obj_t *tag = lv_label_create(s_b.splash);
-	lv_label_set_text(tag, "PROTOCENTRAL ELECTRONICS");
-	lv_obj_set_style_text_font(tag, HPI_M3_FONT_CAPS_SM, 0);
-	lv_obj_set_style_text_color(tag, HPI_M3_ON_SURFACE_MUTED, 0);
-	lv_obj_set_style_text_letter_space(tag, 3, 0);
-	lv_obj_set_style_pad_top(tag, HPI_M3_SPACE_3, 0);
+	lv_obj_t *pc = hpi_ui_pc_logo_create(s_b.splash);
+
+	lv_obj_set_style_margin_top(pc, HPI_M3_SPACE_6 + HPI_M3_SPACE_4, 0);
 
 	s_b.test = NULL;
 	return s_b.root;

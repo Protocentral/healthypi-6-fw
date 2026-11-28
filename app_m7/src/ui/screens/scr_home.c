@@ -81,6 +81,7 @@ static void chip_create(lv_obj_t **value_out, lv_obj_t *rowparent, const char *i
 	lv_obj_set_height(chip, LV_SIZE_CONTENT);
 	hpi_m3_apply_card(chip, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_LG);
 	hpi_m3_apply_touch(chip);
+	hpi_m3_apply_pressable(chip, HPI_M3_SURFACE_CONTAINER);
 	lv_obj_add_flag(chip, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_add_event_cb(chip, chip_cb, LV_EVENT_CLICKED, (void *)(intptr_t)trend);
 	lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
@@ -244,18 +245,20 @@ lv_obj_t *hpi_scr_home_create(lv_obj_t *parent)
 	lv_obj_set_style_pad_ver(s_h.src, HPI_M3_SPACE_1, 0);
 	lv_obj_set_style_margin_bottom(s_h.src, HPI_M3_SPACE_2, 0);
 
-	/* Small live ECG sparkline (amber). Reuse the waveform component but strip
-	 * its card chrome + caption so it reads as a sparkline, not a panel. */
-	hpi_ui_waveform_create(&s_ecg, focal, "", HPI_M3_SIG_ECG,
+	/* Small live ECG strip: the waveform component without its card chrome
+	 * or caption -- just the black plot rectangle and a bright trace. */
+	hpi_ui_waveform_create(&s_ecg, focal, "", HPI_M3_TRACE_ECG,
 			       HPI_HOME_WAVE_POINTS, -2000, 2000, 9);
 	lv_obj_set_style_border_width(s_ecg.panel, 0, 0);
 	lv_obj_set_style_bg_opa(s_ecg.panel, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_pad_all(s_ecg.panel, 0, 0);
 	lv_obj_set_flex_grow(s_ecg.panel, 0);
-	lv_obj_set_width(s_ecg.panel, lv_pct(90));
-	lv_obj_set_height(s_ecg.panel, 56);
-	lv_obj_set_style_margin_top(s_ecg.panel, 24, 0);   /* gap below the focal HR */
-	lv_obj_set_style_line_opa(s_ecg.chart, LV_OPA_60, LV_PART_ITEMS);
+	/* 130 px (was 56, too short to read a QRS): the focal column has ~190 px
+	 * spare below its centred content at the 800 px panel height. */
+	lv_obj_set_width(s_ecg.panel, lv_pct(100));
+	lv_obj_set_height(s_ecg.panel, 130);
+	lv_obj_set_style_margin_top(s_ecg.panel, HPI_M3_SPACE_4, 0);   /* gap below the focal HR */
+	/* Full opacity: on the black plot well a 60 % trace read as dim. */
 	lv_obj_t *ecgcap = lv_obj_get_child(s_ecg.panel, 0);   /* hide empty caption */
 	if (ecgcap) {
 		lv_obj_add_flag(ecgcap, LV_OBJ_FLAG_HIDDEN);
@@ -271,12 +274,12 @@ lv_obj_t *hpi_scr_home_create(lv_obj_t *parent)
 	lv_obj_set_style_border_width(chips, 0, 0);
 	lv_obj_set_style_pad_all(chips, 0, 0);
 	lv_obj_set_style_pad_row(chips, HPI_M3_SPACE_3, 0);
-	lv_obj_set_style_margin_top(chips, 36, 0);   /* design grid margin-top */
+	lv_obj_set_style_margin_top(chips, HPI_M3_SPACE_6, 0);
 	lv_obj_clear_flag(chips, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_flex_flow(chips, LV_FLEX_FLOW_COLUMN);
 
 	lv_obj_t *r1 = chip_row(chips);
-	chip_create(&s_h.spo2, r1, HPI_SYM_SPO2, "%",           "SPO2 UNCAL", HPI_M3_SIG_SPO2,
+	chip_create(&s_h.spo2, r1, HPI_SYM_SPO2, "%",           "SPO2", HPI_M3_SIG_SPO2,
 		    HPI_TREND_SPO2);
 	chip_create(&s_h.resp, r1, HPI_SYM_RESP, "/MIN",        "RESP", HPI_M3_SIG_RESP,
 		    HPI_TREND_RESP);
@@ -340,9 +343,11 @@ static void render_lead_off(uint8_t mask)
 		lv_label_set_text(s_h.leadtxt, line);
 	}
 	/* Dim the trace instead of letting a floating electrode's rail-to-rail
-	 * artefact scroll past looking like a signal. */
-	lv_obj_set_style_line_opa(s_ecg.chart, mask ? LV_OPA_20 : LV_OPA_60,
-				  LV_PART_ITEMS);
+	 * artefact scroll past looking like a signal -- only when an electrode
+	 * Lead II uses (RA, LL) is off. The banner still names all of them. */
+	lv_obj_set_style_line_opa(s_ecg.chart,
+				  (mask & HP6_LEAD_OFF_LEAD_II) ? LV_OPA_20 : LV_OPA_COVER,
+				  LV_PART_ITEMS);   /* full when on: 60 % read dim on black */
 
 	/* The vitals producer suppresses an ECG HR while the leads are off, but it
 	 * only speaks when the M4 sends something. Blank the numeral here too, so

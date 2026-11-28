@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Settings + Alert limits + OTA screens. Brightness and display sleep drive
- * the config service live; the temperature unit is visual; alert thresholds
+ * the config service live; the theme is saved live and applied by a restart; the temperature unit is visual; alert thresholds
  * are local UI state with an explicit research-use caution (HealthyPi 6 is a
  * dev kit — not a medical alarm system). OTA shows the real firmware version
  * only — there is no on-device update transport.
@@ -18,6 +18,8 @@
 #include <app_version.h>
 
 #include "services/config_service.h"
+#include "services/dfu_service.h"
+#include "services/recording_service.h"
 
 /* Lockup width in device pixels. */
 #define OTA_LOGO_W  224
@@ -100,6 +102,7 @@ static void entry(lv_obj_t *parent, const char *icon, lv_color_t icol,
 	lv_obj_t *c = card(parent);
 	lv_obj_add_flag(c, LV_OBJ_FLAG_CLICKABLE);
 	hpi_m3_apply_touch(c);
+	hpi_m3_apply_pressable(c, HPI_M3_SURFACE_CONTAINER);
 	lv_obj_add_event_cb(c, nav_cb, LV_EVENT_CLICKED, (void *)(intptr_t)to);
 	lv_obj_t *r = row_head(c, icon, icol, name);
 	if (trail) {
@@ -112,65 +115,6 @@ static void entry(lv_obj_t *parent, const char *icon, lv_color_t icol,
 	lv_label_set_text(ch, HPI_SYM_CHEV);
 	lv_obj_set_style_text_font(ch, HPI_M3_FONT_ICON, 0);
 	lv_obj_set_style_text_color(ch, HPI_M3_ON_SURFACE_MUTED, 0);
-}
-
-/* Segmented control. `cb` NULL builds it as an indicator (caller should then
- * hpi_m3_apply_inert() it); otherwise each segment is tappable and calls back
- * with its index. Returns the container so the caller can restyle or disable it.
- */
-static void seg_select(lv_obj_t *seg, int sel)
-{
-	uint32_t n = lv_obj_get_child_count(seg);
-
-	for (uint32_t i = 0; i < n; i++) {
-		lv_obj_t *s = lv_obj_get_child(seg, i);
-		bool on = ((int)i == sel);
-
-		lv_obj_set_style_bg_opa(s, on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-		lv_obj_set_style_text_color(lv_obj_get_child(s, 0),
-					    on ? HPI_M3_PRIMARY_LIGHT
-					       : HPI_M3_ON_SURFACE_VARIANT, 0);
-	}
-}
-
-static lv_obj_t *segmented(lv_obj_t *parent, const char *const *items, int n, int sel,
-			   lv_event_cb_t cb)
-{
-	lv_obj_t *seg = lv_obj_create(parent);
-	lv_obj_set_size(seg, lv_pct(100), HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(seg, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_radius(seg, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(seg, 1, 0);
-	lv_obj_set_style_border_color(seg, HPI_M3_OUTLINE, 0);
-	lv_obj_set_style_pad_all(seg, 0, 0);
-	lv_obj_set_style_clip_corner(seg, true, 0);
-	lv_obj_clear_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
-	for (int i = 0; i < n; i++) {
-		lv_obj_t *s = lv_obj_create(seg);
-		lv_obj_set_height(s, lv_pct(100));
-		lv_obj_set_flex_grow(s, 1);
-		lv_obj_set_style_bg_color(s, HPI_M3_PRIMARY_CONTAINER, 0);
-		lv_obj_set_style_bg_opa(s, i == sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-		lv_obj_set_style_radius(s, 0, 0);
-		lv_obj_set_style_border_width(s, i < n - 1 ? 1 : 0, 0);
-		lv_obj_set_style_border_side(s, LV_BORDER_SIDE_RIGHT, 0);
-		lv_obj_set_style_border_color(s, HPI_M3_OUTLINE, 0);
-		lv_obj_set_style_pad_all(s, 0, 0);
-		lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);
-		if (cb) {
-			lv_obj_add_flag(s, LV_OBJ_FLAG_CLICKABLE);
-			lv_obj_add_event_cb(s, cb, LV_EVENT_CLICKED,
-					    (void *)(intptr_t)i);
-		}
-		lv_obj_t *l = lv_label_create(s);
-		lv_label_set_text(l, items[i]);
-		lv_obj_center(l);
-		lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
-		lv_obj_set_style_text_color(l, i == sel ? HPI_M3_PRIMARY_LIGHT
-							: HPI_M3_ON_SURFACE_VARIANT, 0);
-	}
-	return seg;
 }
 
 /* ============================ Settings ============================ */
@@ -217,7 +161,112 @@ static void sleep_cb(lv_event_t *e)
 		return;
 	}
 	hpi_config_set_display_sleep_s(SLEEP_SECS[i]);
-	seg_select(s_sleep_seg, i);
+	hpi_ui_segmented_select(s_sleep_seg, i);
+}
+
+/* ---- theme ----------------------------------------------------------------
+ * The palette is chosen once per boot (screens are built once and never
+ * rebuilt), so a new choice is saved at once and APPLIED by a restart. The
+ * restart is a separate, explicit tap -- picking a segment never reboots the
+ * device on its own -- and it is refused while a recording is running, which
+ * a reboot would cut off unclosed. */
+static const char *const THEME_LABEL[HPI_CONFIG_THEME_COUNT] = { "DARK", "LIGHT" };
+
+static struct {
+	lv_obj_t   *seg;
+	lv_obj_t   *restart;   /* shown only while the choice != the running theme */
+	lv_obj_t   *note;
+	lv_timer_t *wait;      /* polls for the save to land before rebooting */
+	uint8_t     waited;
+} s_th;
+
+#define THEME_SAVE_POLL_MS   50
+#define THEME_SAVE_POLL_MAX  40   /* 2 s, then reboot anyway */
+
+static void theme_note(const char *text)
+{
+	lv_label_set_text(s_th.note, text);
+	lv_obj_clear_flag(s_th.note, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void theme_wait_cb(lv_timer_t *t)
+{
+	if (!hpi_config_display_theme_saved() && ++s_th.waited < THEME_SAVE_POLL_MAX) {
+		return;
+	}
+	lv_timer_delete(t);
+	s_th.wait = NULL;
+	hpi_dfu_reboot();   /* does not return */
+}
+
+static void theme_restart_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	struct hpi_recording_status st = {0};
+
+	if (s_th.wait) {
+		return;   /* already restarting */
+	}
+	hpi_recording_get_status(&st);
+	if (st.active) {
+		theme_note("Stop the recording first. The theme is saved and will "
+			   "apply at the next restart.");
+		return;
+	}
+	theme_note("Restarting...");
+	lv_obj_add_state(s_th.restart, LV_STATE_DISABLED);
+	s_th.waited = 0;
+	s_th.wait = lv_timer_create(theme_wait_cb, THEME_SAVE_POLL_MS, NULL);
+}
+
+static void theme_cb(lv_event_t *e)
+{
+	int i = (int)(intptr_t)lv_event_get_user_data(e);
+
+	if (i < 0 || i >= HPI_CONFIG_THEME_COUNT || s_th.wait) {
+		return;
+	}
+	if (hpi_config_set_display_theme((uint8_t)i) != 0) {
+		return;
+	}
+	hpi_ui_segmented_select(s_th.seg, i);
+
+	bool pending = (i != (int)hpi_m3_theme_active());
+
+	if (pending) {
+		lv_obj_clear_flag(s_th.restart, LV_OBJ_FLAG_HIDDEN);
+		theme_note("Saved. Restart to apply.");
+	} else {
+		lv_obj_add_flag(s_th.restart, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_add_flag(s_th.note, LV_OBJ_FLAG_HIDDEN);
+	}
+}
+
+static void theme_card(lv_obj_t *body)
+{
+	lv_obj_t *c = card(body);
+
+	row_head(c, HPI_SYM_BRIGHT, HPI_M3_PRIMARY, "Theme");
+	/* Show the stored choice; it equals the running theme unless the device
+	 * was changed over MCUmgr since boot, which the restart button covers. */
+	int stored = hpi_config_display_theme();
+
+	s_th.seg = hpi_ui_segmented_create(c, THEME_LABEL, HPI_CONFIG_THEME_COUNT,
+					   stored, theme_cb);
+
+	s_th.note = lv_label_create(c);
+	lv_obj_set_width(s_th.note, lv_pct(100));
+	lv_label_set_long_mode(s_th.note, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_font(s_th.note, HPI_M3_FONT_CAPS_SM, 0);
+	lv_obj_set_style_text_color(s_th.note, HPI_M3_ON_SURFACE_VARIANT, 0);
+	lv_obj_add_flag(s_th.note, LV_OBJ_FLAG_HIDDEN);
+
+	s_th.restart = hpi_ui_button_create(c, HPI_UI_BTN_FILLED, NULL,
+					    "RESTART TO APPLY", theme_restart_cb, NULL);
+	lv_obj_set_width(s_th.restart, lv_pct(100));
+	if (stored == (int)hpi_m3_theme_active()) {
+		lv_obj_add_flag(s_th.restart, LV_OBJ_FLAG_HIDDEN);
+	}
 }
 
 lv_obj_t *hpi_scr_settings_create(lv_obj_t *parent)
@@ -246,41 +295,18 @@ lv_obj_t *hpi_scr_settings_create(lv_obj_t *parent)
 	/* Display sleep (live) -- drives the UI's ambient-clock idle timeout. */
 	lv_obj_t *sc = card(body);
 	row_head(sc, HPI_SYM_SLEEP, HPI_M3_PRIMARY, "Display sleep");
-	s_sleep_seg = segmented(sc, SLEEP_LABEL, SLEEP_N, sleep_index(),
-				sleep_cb);
+	s_sleep_seg = hpi_ui_segmented_create(sc, SLEEP_LABEL, SLEEP_N,
+					      sleep_index(), sleep_cb);
+
+	theme_card(body);
 
 	/* Temperature unit -- inert: there is no temperature producer yet, so the
 	 * Temp chip reads "--" and there is nothing for a unit to apply to. */
 	lv_obj_t *tc = card(body);
 	lv_obj_t *tr = row_head(tc, HPI_SYM_TEMP, HPI_M3_SIG_TEMP, "Temperature unit");
 	static const char *const UNIT[] = { "\xC2\xB0" "C", "\xC2\xB0" "F" };
-	lv_obj_t *useg = lv_obj_create(tr);
-	lv_obj_set_size(useg, 2 * HPI_M3_TOUCH_MIN, HPI_M3_TOUCH_MIN);
-	lv_obj_set_style_bg_opa(useg, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_radius(useg, HPI_M3_RADIUS_PILL, 0);
-	lv_obj_set_style_border_width(useg, 1, 0);
-	lv_obj_set_style_border_color(useg, HPI_M3_OUTLINE, 0);
-	lv_obj_set_style_pad_all(useg, 0, 0);
-	lv_obj_set_style_clip_corner(useg, true, 0);
-	lv_obj_clear_flag(useg, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_set_flex_flow(useg, LV_FLEX_FLOW_ROW);
-	for (int i = 0; i < 2; i++) {
-		lv_obj_t *s = lv_obj_create(useg);
-		lv_obj_set_height(s, lv_pct(100));
-		lv_obj_set_flex_grow(s, 1);
-		lv_obj_set_style_bg_color(s, HPI_M3_PRIMARY_CONTAINER, 0);
-		lv_obj_set_style_bg_opa(s, i == 0 ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-		lv_obj_set_style_radius(s, 0, 0);
-		lv_obj_set_style_border_width(s, 0, 0);
-		lv_obj_set_style_pad_all(s, 0, 0);
-		lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);
-		lv_obj_t *l = lv_label_create(s);
-		lv_label_set_text(l, UNIT[i]);
-		lv_obj_center(l);
-		lv_obj_set_style_text_font(l, HPI_M3_FONT_CAPS_SM, 0);
-		lv_obj_set_style_text_color(l, i == 0 ? HPI_M3_PRIMARY_LIGHT
-						      : HPI_M3_ON_SURFACE_VARIANT, 0);
-	}
+	lv_obj_t *useg = hpi_ui_segmented_create(tr, UNIT, 2, 0, NULL);
+	lv_obj_set_width(useg, 2 * HPI_M3_TOUCH_MIN);
 	hpi_m3_apply_inert(useg);
 
 	/* Entries. */

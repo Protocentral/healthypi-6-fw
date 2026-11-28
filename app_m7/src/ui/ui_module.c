@@ -467,6 +467,13 @@ static void ui_thread(void *a, void *b, void *c)
 	/* Splash first, then one lv_timer_handler() to actually put it on the
 	 * panel, then everything else — without the flush in between the split
 	 * buys nothing. */
+	/* The palette is fixed for this boot: every screen below captures token
+	 * values as it is built and is never rebuilt. main() loads config before
+	 * starting this thread, so the stored choice is already in the cache. */
+	hpi_m3_theme_select((enum hpi_m3_theme_id)hpi_config_display_theme());
+	LOG_INF("UI theme: %s",
+		hpi_m3_theme_active() == HPI_M3_THEME_LIGHT ? "light" : "dark");
+
 	ui_build_splash();
 	(void)lv_timer_handler();
 	ui_trace("splash-up");

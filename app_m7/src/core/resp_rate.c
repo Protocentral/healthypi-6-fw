@@ -46,7 +46,7 @@ LOG_MODULE_REGISTER(hpi_resp, CONFIG_HPI_APP_LOG_LEVEL);
 #define RESP_STALE_MS       12000
 
 /* Limb electrodes drive the resp excitation. V1 off is not a reason to drop. */
-#define RESP_LIMB_OFF       (HP6_LEAD_OFF_RA | HP6_LEAD_OFF_LA | HP6_LEAD_OFF_LL)
+#define RESP_LIMB_OFF       HP6_LEAD_OFF_RESP
 
 /* First-order IIR in Q15. HP R = exp(-2π·0.08/25) ≈ 0.980; two LP stages
  * α = 1 − exp(-2π·0.45/25) ≈ 0.107. */

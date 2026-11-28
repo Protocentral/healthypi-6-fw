@@ -96,6 +96,7 @@ static void row(lv_obj_t *parent, const char *icon, const lv_font_t *icon_font,
 	lv_obj_set_height(b, LV_SIZE_CONTENT);
 	hpi_m3_apply_card(b, HPI_M3_SURFACE_CONTAINER, HPI_M3_RADIUS_LG);
 	hpi_m3_apply_touch(b);
+	hpi_m3_apply_pressable(b, HPI_M3_SURFACE_CONTAINER);
 	lv_obj_set_style_pad_all(b, HPI_M3_SPACE_4, 0);
 	lv_obj_set_style_pad_column(b, HPI_M3_SPACE_3, 0);
 	lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
